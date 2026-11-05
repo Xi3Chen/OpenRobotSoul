@@ -1,0 +1,34 @@
+{
+  "profile_schema_version": 1,
+  "profile_id": "simulator-basic",
+  "profile_version": "1.0.0",
+  "manufacturer": "OpenRobotSoul",
+  "model": "SimulatorBasic",
+  "adapter_id": "fake-simulator",
+  "robot_id": "robot-sim-basic",
+  "required_capabilities": ["speech.say"],
+  "capabilities": [
+    {
+      "name": "speech.say",
+      "parameters": {"text": {"type": "string", "max_length": 240}},
+      "timeout_ms": 5000,
+      "required": true
+    },
+    {
+      "name": "head.look",
+      "parameters": {
+        "yaw_deg": {"type": "number", "min": -45, "max": 45},
+        "pitch_deg": {"type": "number", "min": -20, "max": 25}
+      },
+      "timeout_ms": 3000
+    },
+    {
+      "name": "base.move_distance",
+      "parameters": {
+        "distance_m": {"type": "number", "min": -0.5, "max": 0.5},
+        "max_speed_mps": {"type": "number", "min": 0.01, "max": 0.2}
+      },
+      "timeout_ms": 8000
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openrobotsoul"
+version = "0.1.0"
+description = "A safe, profile-driven robot agent runtime MVP"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+robotsoul = "robotsoul.cli:main"
+
+[tool.setuptools.package-data]
+robotsoul = ["profiles/*.json"]

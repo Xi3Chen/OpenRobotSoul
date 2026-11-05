@@ -1,0 +1,26 @@
+{
+  "profile_schema_version": 1,
+  "profile_id": "simulator-compact",
+  "profile_version": "1.0.0",
+  "manufacturer": "OpenRobotSoul",
+  "model": "SimulatorCompact",
+  "adapter_id": "fake-simulator",
+  "robot_id": "robot-sim-compact",
+  "required_capabilities": ["speech.say"],
+  "capabilities": [
+    {
+      "name": "speech.say",
+      "parameters": {"text": {"type": "string", "max_length": 160}},
+      "timeout_ms": 5000,
+      "required": true
+    },
+    {
+      "name": "head.look",
+      "parameters": {
+        "yaw_deg": {"type": "number", "min": -30, "max": 30},
+        "pitch_deg": {"type": "number", "min": -10, "max": 15}
+      },
+      "timeout_ms": 3000
+    }
+  ]
+}
