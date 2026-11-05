@@ -3,18 +3,28 @@ from __future__ import annotations
 import re
 from typing import Protocol
 
-from robotsoul.models import AgentIntent, CapabilitySpec
+from robotsoul.models import AgentIntent, CapabilitySpec, Observation
 
 
 class AgentProvider(Protocol):
-    def plan(self, user_input: str, capabilities: dict[str, CapabilitySpec]) -> AgentIntent | None:
+    def plan(
+        self,
+        user_input: str,
+        capabilities: dict[str, CapabilitySpec],
+        observations: tuple[Observation, ...] = (),
+    ) -> AgentIntent | None:
         """Return a bounded high-level plan; providers must enforce their own request timeout."""
 
 
 class DemoAgent:
     """Rule-based local agent that keeps the MVP runnable without credentials."""
 
-    def plan(self, user_input: str, capabilities: dict[str, CapabilitySpec]) -> AgentIntent | None:
+    def plan(
+        self,
+        user_input: str,
+        capabilities: dict[str, CapabilitySpec],
+        observations: tuple[Observation, ...] = (),
+    ) -> AgentIntent | None:
         text = user_input.strip()
         lowered = text.lower()
         if any(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from robotsoul.models import CapabilitySpec, Command, Feedback
+from robotsoul.models import CapabilitySpec, Command, Feedback, Observation
 
 
 class RobotAdapter(Protocol):
@@ -17,6 +17,8 @@ class RobotAdapter(Protocol):
     def identity(self) -> tuple[str, str]: ...
 
     def discover_capabilities(self) -> dict[str, CapabilitySpec]: ...
+
+    def drain_observations(self) -> tuple[Observation, ...]: ...
 
     def execute(self, command: Command) -> tuple[Feedback, ...]:
         """Return before command.deadline and fail safe on driver/network timeout."""

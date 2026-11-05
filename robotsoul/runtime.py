@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from math import isfinite
+from threading import Lock
 from typing import Any
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from robotsoul.models import (
     Evaluation,
     Feedback,
     FeedbackStatus,
+    Observation,
     Task,
     TaskResult,
     TaskStatus,
@@ -32,6 +34,11 @@ class RobotRuntime:
     adapter: RobotAdapter
     agent: AgentProvider
     capabilities: dict[str, CapabilitySpec]
+    _active_commands: dict[str, Command] = field(default_factory=dict, init=False, repr=False)
+    _cancel_confirmations: dict[str, Feedback] = field(default_factory=dict, init=False, repr=False)
+    _seen_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    _used_task_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    _runtime_lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     @classmethod
     def from_profile(
@@ -144,8 +151,60 @@ class RobotRuntime:
             for name, capability in self.capabilities.items()
         }
 
-    def run_text(self, text: str) -> TaskResult:
-        task = Task(str(uuid4()), str(uuid4()), self.profile.robot_id, text)
+    def cancel_task(self, task_id: str) -> Feedback | None:
+        """Request local cancellation of the task's active command.
+
+        A returned cancelled feedback is a stop acknowledgement from the adapter;
+        None means that this runtime has no command active for the task.
+        """
+        with self._runtime_lock:
+            command = self._active_commands.get(task_id)
+        if command is None:
+            return None
+        try:
+            confirmation = self.adapter.cancel(command)
+        except Exception as exc:
+            confirmation = self._local_feedback(
+                command,
+                FeedbackStatus.FAILED,
+                f"Adapter cancellation failed: {exc}",
+                "cancel_failed",
+            )
+        if (
+            not isinstance(confirmation, Feedback)
+            or confirmation.status not in {FeedbackStatus.CANCELLED, FeedbackStatus.FAILED}
+            or (confirmation.command_id, confirmation.task_id, confirmation.trace_id)
+            != (command.command_id, command.task_id, command.trace_id)
+        ):
+            confirmation = self._local_feedback(
+                command,
+                FeedbackStatus.FAILED,
+                "Adapter returned malformed cancellation feedback",
+                "malformed_cancel_feedback",
+            )
+        if confirmation.status == FeedbackStatus.CANCELLED:
+            with self._runtime_lock:
+                if self._active_commands.get(task_id) == command:
+                    self._cancel_confirmations[task_id] = confirmation
+        return confirmation
+
+    def run_text(
+        self,
+        text: str,
+        task_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> TaskResult:
+        resolved_task_id = task_id if task_id is not None else str(uuid4())
+        resolved_trace_id = trace_id if trace_id is not None else str(uuid4())
+        if not isinstance(resolved_task_id, str) or not resolved_task_id.strip():
+            raise ValueError("task_id must be non-empty text")
+        if not isinstance(resolved_trace_id, str) or not resolved_trace_id.strip():
+            raise ValueError("trace_id must be non-empty text")
+        with self._runtime_lock:
+            if resolved_task_id in self._used_task_ids:
+                raise ValueError(f"task_id has already been used in this runtime: {resolved_task_id}")
+            self._used_task_ids.add(resolved_task_id)
+        task = Task(resolved_task_id, resolved_trace_id, self.profile.robot_id, text)
         history: list[AuditRecord] = []
         feedback: tuple[Feedback, ...] = ()
         evaluation: Evaluation | None = None
@@ -158,13 +217,16 @@ class RobotRuntime:
             task.updated_at = utc_now()
             record("task.status", {"status": status.value})
 
-        record("task.received", {"input": text})
+        record("task.received", {"input_chars": len(text)})
         if not text.strip():
             return self._failed_result(task, history, "Task input is empty", transition, record)
         transition(TaskStatus.CONTEXTUALIZING)
+        observations, observation_error = self._collect_observations(record)
+        if observation_error:
+            return self._failed_result(task, history, observation_error, transition, record)
         transition(TaskStatus.AWAITING_AGENT)
         try:
-            intent = self.agent.plan(text, self.capabilities)
+            intent = self.agent.plan(text, self.capabilities, observations)
         except TimeoutError:
             return self._failed_result(task, history, "Agent request timed out", transition, record)
         except Exception as exc:
@@ -173,7 +235,7 @@ class RobotRuntime:
             return self._failed_result(task, history, "No supported skill matched the request", transition, record)
         if not isinstance(intent, AgentIntent):
             return self._failed_result(task, history, "Agent returned an invalid intent", transition, record)
-        record("agent.intent", {"skill": intent.skill, "parameters": intent.parameters})
+        record("agent.intent", {"skill": intent.skill, "parameter_names": sorted(intent.parameters) if isinstance(intent.parameters, dict) else []})
         transition(TaskStatus.VALIDATING_INTENT)
         validation_error = self._validate_intent(intent)
         if validation_error:
@@ -191,15 +253,31 @@ class RobotRuntime:
         )
         record("command.created", {"command_id": command.command_id, "skill": command.skill})
         transition(TaskStatus.EXECUTING)
+        with self._runtime_lock:
+            self._active_commands[task.task_id] = command
+            self._cancel_confirmations.pop(task.task_id, None)
         try:
             feedback = self.adapter.execute(command)
         except Exception as exc:
+            with self._runtime_lock:
+                self._active_commands.pop(task.task_id, None)
+                confirmation = self._cancel_confirmations.pop(task.task_id, None)
+            if confirmation is not None:
+                record("command.cancel_confirmation", {"status": confirmation.status.value})
             return self._failed_result(
                 task,
                 history,
                 f"Adapter execution failed: {exc}",
                 transition,
                 record,
+            )
+        with self._runtime_lock:
+            self._active_commands.pop(task.task_id, None)
+            confirmation = self._cancel_confirmations.pop(task.task_id, None)
+        if confirmation is not None:
+            record(
+                "command.cancel_confirmation",
+                {"status": confirmation.status.value, "feedback_id": confirmation.feedback_id},
             )
         if utc_now() > command.deadline:
             return self._failed_result(
@@ -213,6 +291,24 @@ class RobotRuntime:
         if feedback_error:
             record("command.feedback_rejected", {"error": feedback_error})
             return self._failed_result(task, history, feedback_error, transition, record)
+        terminal_cancel = next(
+            (item for item in feedback if item.status == FeedbackStatus.CANCELLED),
+            None,
+        )
+        if confirmation is not None and terminal_cancel is None:
+            return self._failed_result(
+                task,
+                history,
+                "Adapter cancellation confirmation contradicted command feedback",
+                transition,
+                record,
+                feedback,
+            )
+        if terminal_cancel is not None and confirmation is None:
+            record(
+                "command.cancel_confirmation",
+                {"status": terminal_cancel.status.value, "feedback_id": terminal_cancel.feedback_id},
+            )
         for item in feedback:
             record(
                 "command.feedback",
@@ -282,6 +378,93 @@ class RobotRuntime:
                     return f"Parameter {name} is too long"
         return None
 
+    def _collect_observations(
+        self,
+        record: Any,
+    ) -> tuple[tuple[Observation, ...], str | None]:
+        try:
+            observations = self.adapter.drain_observations()
+        except Exception as exc:
+            return (), f"Could not read adapter observations: {exc}"
+        if not isinstance(observations, tuple):
+            return (), "Adapter returned malformed observations"
+
+        accepted: list[Observation] = []
+        now = utc_now()
+        for observation in observations:
+            if not isinstance(observation, Observation):
+                return (), "Adapter returned a malformed observation"
+            event_id = observation.event_id
+            if not isinstance(event_id, str) or not event_id:
+                return (), "Observation event_id must be non-empty text"
+            with self._runtime_lock:
+                duplicate = event_id in self._seen_event_ids
+                self._seen_event_ids.add(event_id)
+            if duplicate:
+                record("observation.rejected", {"event_id": event_id, "reason": "duplicate"})
+                continue
+            if observation.robot_id != self.profile.robot_id:
+                record("observation.rejected", {"event_id": event_id, "reason": "robot_id_mismatch"})
+                continue
+            if not all(
+                isinstance(value, str) and value
+                for value in (observation.device_id, observation.event_type, observation.source)
+            ):
+                record("observation.rejected", {"event_id": event_id, "reason": "missing_metadata"})
+                continue
+            if not isinstance(observation.payload, dict):
+                record("observation.rejected", {"event_id": event_id, "reason": "invalid_payload"})
+                continue
+            if isinstance(observation.ttl_ms, bool) or not isinstance(observation.ttl_ms, int) or observation.ttl_ms <= 0:
+                record("observation.rejected", {"event_id": event_id, "reason": "invalid_ttl"})
+                continue
+            if not self._is_aware_datetime(observation.observed_at) or not self._is_aware_datetime(observation.received_at):
+                record("observation.rejected", {"event_id": event_id, "reason": "invalid_timestamp"})
+                continue
+            if observation.received_at > now or observation.observed_at > now or not observation.is_fresh:
+                record("observation.rejected", {"event_id": event_id, "reason": "expired_or_future"})
+                continue
+            if not isinstance(observation.privacy_class, str) or not observation.privacy_class:
+                record("observation.rejected", {"event_id": event_id, "reason": "invalid_privacy_class"})
+                continue
+            record(
+                "observation.accepted",
+                {
+                    "event_id": event_id,
+                    "device_id": observation.device_id,
+                    "event_type": observation.event_type,
+                    "source": observation.source,
+                    "privacy_class": observation.privacy_class,
+                },
+            )
+            if observation.privacy_class == "operational":
+                accepted.append(observation)
+            else:
+                record("observation.withheld", {"event_id": event_id, "reason": "privacy_policy"})
+        return tuple(accepted), None
+
+    @staticmethod
+    def _is_aware_datetime(value: Any) -> bool:
+        return getattr(value, "tzinfo", None) is not None and value.utcoffset() is not None
+
+    @staticmethod
+    def _local_feedback(
+        command: Command,
+        status: FeedbackStatus,
+        message: str,
+        error_code: str,
+    ) -> Feedback:
+        return Feedback(
+            feedback_id=str(uuid4()),
+            command_id=command.command_id,
+            task_id=command.task_id,
+            trace_id=command.trace_id,
+            status=status,
+            timestamp=utc_now(),
+            message=message,
+            error_code=error_code,
+        )
+
     @staticmethod
     def _validate_feedback(command: Command, feedback: tuple[Feedback, ...]) -> str | None:
         if not isinstance(feedback, tuple) or not feedback:
@@ -289,6 +472,10 @@ class RobotRuntime:
         for item in feedback:
             if not isinstance(item, Feedback) or not isinstance(item.status, FeedbackStatus):
                 return "Adapter returned malformed command feedback"
+            if not RobotRuntime._is_aware_datetime(item.timestamp):
+                return "Adapter feedback contains an invalid timestamp"
+            if item.timestamp > utc_now():
+                return "Adapter feedback contains a future timestamp"
             if (item.command_id, item.task_id, item.trace_id) != (
                 command.command_id,
                 command.task_id,
@@ -296,7 +483,10 @@ class RobotRuntime:
             ):
                 return "Adapter feedback correlation IDs do not match the command"
         statuses = [item.status for item in feedback]
-        if statuses == [FeedbackStatus.FAILED]:
+        timestamps = [item.timestamp for item in feedback]
+        if any(later < earlier for earlier, later in zip(timestamps, timestamps[1:])):
+            return "Adapter feedback timestamps are out of order"
+        if statuses in ([FeedbackStatus.FAILED], [FeedbackStatus.CANCELLED]):
             return None
         if len(statuses) < 2 or statuses[0] != FeedbackStatus.ACCEPTED:
             return "Adapter returned an invalid command lifecycle"
@@ -307,9 +497,6 @@ class RobotRuntime:
             return "Adapter returned an invalid command lifecycle"
         if len(statuses) == 3 and statuses[1] != FeedbackStatus.RUNNING:
             return "Adapter returned an invalid command lifecycle"
-        timestamps = [item.timestamp for item in feedback]
-        if any(later < earlier for earlier, later in zip(timestamps, timestamps[1:])):
-            return "Adapter feedback timestamps are out of order"
         return None
 
     @staticmethod

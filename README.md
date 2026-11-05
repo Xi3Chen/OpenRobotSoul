@@ -97,3 +97,29 @@ runtime = RobotRuntime.from_profile(load_profile("simulator-basic"))
 result = runtime.run_text("请抬头")
 print(result.task.status, result.evaluation)
 ```
+
+模拟适配器可注入带时效和隐私分类的观测；运行时会拒绝过期、未来时间、其他机器人和重复事件 ID，并且只把 `operational` 类观测交给 Agent：
+
+```python
+from robotsoul import Observation, RobotRuntime, load_profile
+from robotsoul.models import utc_now
+
+profile = load_profile("simulator-basic")
+runtime = RobotRuntime.from_profile(profile)
+now = utc_now()
+runtime.adapter.publish_observation(Observation(
+    event_id="event-1",
+    robot_id=profile.robot_id,
+    device_id="microphone-1",
+    event_type="speech.transcript",
+    observed_at=now,
+    received_at=now,
+    payload={"text": "抬头"},
+    source="simulator",
+    ttl_ms=3000,
+    privacy_class="operational",
+))
+result = runtime.run_text("请抬头", task_id="task-1")
+```
+
+`cancel_task(task_id)` 可请求停止正在执行的可中断技能；只有适配器确认停止后，任务才会进入 `cancelled`。
