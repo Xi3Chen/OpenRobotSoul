@@ -2,7 +2,7 @@
 
 ## 目标
 
-机器人 profile 用配置选择一个已实现的适配器组合、连接方式、设备映射和可用能力。对同一适配器/协议族中已支持的型号，新增型号或切换机型应以新增或修改 profile 为主，不在 Agent 和事务处理核心中写型号分支。
+机器人 profile 归属各自的 `adapters/<robot_code>/profiles/`。部署配置 `config/robot.json` 选择一个静态登记的 `robot_module`，模块清单可指定默认 profile，亦可在部署配置里用 `profile_id` 选择该模块内其他 profile。切换机器人模块通过配置完成，不在 Agent 和事务处理核心中写型号分支。
 
 一个运行时实例在任一时刻只加载一个 robot profile 并绑定一台物理机器人。更换型号意味着为另一台机器人部署/启动一个实例或切换当前实例配置后重新初始化；这份配置不描述多台机器人的集合，也不提供机器人间协同。
 
@@ -14,8 +14,8 @@
 
 1. 基础 schema 默认值：仅放不涉及安全的通用默认。
 2. 适配器/协议 profile：驱动类型、协议版本和协议族共性。
-3. 机器人型号 profile：型号设备映射、校准引用和能力差异。
-4. 部署实例配置：robot_id、网络地址、设备序列号和凭证引用。
+3. 机器人模块 profile：型号设备映射、校准引用和能力差异，保存在 `adapters/<robot_code>/profiles/`。
+4. 部署实例配置：`config/robot.json` 选择模块/profile；robot_id、网络地址、设备序列号和凭证引用由对应模块的受控部署配置承载。
 
 后层只可补充或收紧约束。部署配置不得将低于适配器、本地安全监督或厂商硬限制的安全上限调高。密钥使用 secret reference，不以内联明文保存在 profile。
 
@@ -24,9 +24,10 @@
 | 字段 | 作用 |
 |---|---|
 | profile_schema_version | 配置 schema 版本，用于迁移和兼容性检查 |
-| profile_id / profile_version | 稳定型号 profile 标识和版本 |
+| robot_module | 静态登记的机器人模块 ID，对应 `adapters/<robot_code>/` |
+| profile_id / profile_version | 模块内稳定型号 profile 标识和版本 |
 | manufacturer / model | 期望厂商与型号，用于展示和连接后校验 |
-| adapter_id / adapter_version | 选择已安装的驱动/适配器实现及兼容版本范围 |
+| adapter_id / adapter_version | 选择当前机器人模块内已实现的驱动 bridge 及兼容版本范围 |
 | transport | 已实现的传输类型和参数，例如本地 socket、SDK 或 ROS 2；不得填写可执行代码 |
 | devices | 传感器、执行器和控制器实例到适配器端点的映射 |
 | frames / units | 坐标系、轴向、角度/距离/速度单位和时间基准 |
@@ -38,11 +39,11 @@
 | health_checks | 连接、控制器、传感器及时间同步检查定义 |
 | extension_policy_ref | 允许加载的插件来源、能力和风险级别策略引用 |
 
-不要允许 profile 携带任意脚本、动态库路径、shell 命令或 Python/JavaScript 表达式。新增可执行逻辑应通过受审查、带版本且已安装的适配器插件交付。运行时自动安装/更新仅适用于 extension policy 明确预授权的低风险插件。
+不要允许 profile 携带任意脚本、动态库路径、shell 命令或 Python/JavaScript 表达式。模块 ID 到工厂的映射只能通过 core adapter registry 静态登记；配置不得提供动态 import path。第三方 SDK 放在模块自己的 `third_party/` 内并固定版本。新增可执行逻辑应通过受审查、带版本且已安装的机器人模块交付。
 
 ## 示例形状
 
-以下 YAML 是字段形状示例，不代表 Unitree Go2 的真实 SDK、Topic、单位、限值或已验证能力：
+Profile 当前以 JSON 实现。以下 YAML 仅说明字段形状，不代表 Unitree Go2 的真实 SDK、Topic、单位、限值或已验证能力：
 
 ~~~yaml
 profile_schema_version: 1
@@ -85,7 +86,7 @@ secrets:
 启动过程按以下顺序执行：
 
 1. 解析并校验 profile schema、版本和引用。
-2. 只加载本地已安装且版本兼容的 adapter_id。
+2. 从静态 registry 解析已登记的 `robot_module`，只加载该模块提供的 factory。
 3. 建立连接并读取设备身份、协议版本、控制器和传感器能力。
 4. 对照声明能力和实测能力，验证必需能力、单位、坐标和校准状态。
 5. 与本地安全策略取约束交集，生成该 robot_id 的有效能力清单。
@@ -105,7 +106,7 @@ Go2 可作为首发真实设备候选，但具体接入路径必须在阶段 0 �
 - 断连、进程退出、租约过期和急停时的设备行为。
 - 驱动许可证、维护状态和部署依赖。
 
-本方案不预写 Go2 的 API、ROS Topic、技能列表或数值限值；这些应在设备与驱动版本明确后写入单独 profile 和 ADR。
+本方案不预写 Go2 的 API、ROS Topic、技能列表或数值限值；Go2 专属代码/profile/SDK 放在 `adapters/unitree_go2/` 下，具体能力应在设备与驱动版本明确后写入该模块的独立 profile 和 ADR。
 
 ## 配置测试与兼容矩阵
 

@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>RobotHarness 控制台</title>
+    <link rel="stylesheet" href="/assets/dashboard.css">
+    <script src="/assets/dashboard.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="RobotHarness 控制台">
+        <span class="brand-mark" aria-hidden="true">RH</span>
+        <span>RobotHarness</span>
+      </a>
+      <div class="topbar-right">
+        <span id="connection-state" class="connection-state"><i></i><span>连接中</span></span>
+        <button id="sign-out" class="text-button hidden" type="button">退出</button>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <nav id="dashboard-nav" class="primary-nav hidden" aria-label="主导航">
+        <button class="nav-item active" type="button" data-view="overview">总览</button>
+        <button class="nav-item" type="button" data-view="controls">控制</button>
+        <button class="nav-item" type="button" data-view="capabilities">能力</button>
+        <button class="nav-item" type="button" data-view="activity">活动</button>
+      </nav>
+
+      <section id="login-view" class="login-view">
+        <form id="login-form" class="login-form">
+          <p class="eyebrow">本地操作员会话</p>
+          <h1>登录机器人控制台</h1>
+          <label for="operator-pin">操作员 PIN</label>
+          <input id="operator-pin" name="pin" type="password" inputmode="numeric" autocomplete="current-password" required>
+          <button class="primary-button" type="submit">登录</button>
+          <p id="login-error" class="form-error" role="alert"></p>
+        </form>
+      </section>
+
+      <div id="dashboard-view" class="dashboard-view hidden">
+        <section class="view-panel active" data-panel="overview" aria-labelledby="overview-title">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">机器人运行状态</p>
+              <h1 id="overview-title">总览</h1>
+            </div>
+            <span id="robot-identity" class="robot-identity">未连接</span>
+          </div>
+
+          <div class="status-band">
+            <div class="status-primary">
+              <span id="health-indicator" class="health-dot unknown"></span>
+              <div>
+                <span class="field-label">连接与健康</span>
+                <strong id="health-label">状态未知</strong>
+              </div>
+            </div>
+            <dl class="status-metrics">
+              <div><dt>当前任务</dt><dd id="active-task">无</dd></div>
+              <div><dt>最近反馈</dt><dd id="latest-feedback">暂无</dd></div>
+              <div><dt>策略版本</dt><dd id="policy-version">—</dd></div>
+            </dl>
+          </div>
+
+          <section class="robot-info-section" aria-labelledby="robot-info-title">
+            <div class="section-heading">
+              <h2 id="robot-info-title">当前机器人</h2>
+              <span class="subtle">来自当前机器人 profile 配置</span>
+            </div>
+            <dl id="robot-info-list" class="robot-info-list"></dl>
+          </section>
+
+          <div class="section-heading">
+            <h2>最近操作</h2>
+            <button class="quiet-button" type="button" data-open-view="activity">查看活动</button>
+          </div>
+          <div id="overview-actions" class="activity-list"></div>
+        </section>
+
+        <section class="view-panel" data-panel="controls" aria-labelledby="controls-title" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">受策略约束的操作</p><h1 id="controls-title">控制</h1></div>
+          </div>
+          <section class="control-section" aria-labelledby="task-title">
+            <div class="section-heading"><h2 id="task-title">自然语言任务</h2><span class="subtle">由 Agent 选择允许的技能</span></div>
+            <form id="task-form" class="task-form">
+              <label class="visually-hidden" for="task-text">任务内容</label>
+              <textarea id="task-text" name="text" rows="2" maxlength="1000" placeholder="输入一个任务" required></textarea>
+              <button class="primary-button" type="submit">提交任务</button>
+            </form>
+          </section>
+
+          <section class="control-section" aria-labelledby="skills-title">
+            <div class="section-heading"><h2 id="skills-title">可用操作</h2><span class="subtle">参数会在本地再次校验</span></div>
+            <div id="controls-list" class="control-list"></div>
+          </section>
+
+          <section class="voice-section" aria-labelledby="voice-title">
+            <div>
+              <p class="eyebrow">手机语音</p>
+              <h2 id="voice-title">语音会话</h2>
+            </div>
+            <div class="voice-state"><span class="status-pill muted">未配置</span><span>本地语音服务和机器人音频链路尚未接入</span></div>
+            <button class="secondary-button" type="button" disabled title="语音服务未配置">开始通话</button>
+          </section>
+        </section>
+
+        <section class="view-panel" data-panel="capabilities" aria-labelledby="capabilities-title" hidden>
+          <div class="page-heading"><div><p class="eyebrow">策略与适配器能力交集</p><h1 id="capabilities-title">能力目录</h1></div></div>
+          <div id="capability-list" class="capability-list"></div>
+        </section>
+
+        <section class="view-panel" data-panel="activity" aria-labelledby="activity-title" hidden>
+          <div class="page-heading"><div><p class="eyebrow">命令与审计结果</p><h1 id="activity-title">活动</h1></div><button id="refresh" class="quiet-button" type="button">刷新</button></div>
+          <div id="activity-list" class="activity-list"></div>
+        </section>
+        <p id="global-error" class="global-error" role="alert"></p>
+      </div>
+    </main>
+
+    <dialog id="action-dialog" class="action-dialog" aria-labelledby="dialog-title">
+      <form method="dialog" class="dialog-close-row"><button class="icon-button" aria-label="关闭" value="cancel">×</button></form>
+      <p id="dialog-risk" class="eyebrow"></p>
+      <h2 id="dialog-title">确认操作</h2>
+      <p id="dialog-description" class="dialog-description"></p>
+      <dl id="dialog-parameters" class="parameter-summary"></dl>
+      <label id="explicit-confirm-row" class="explicit-confirm hidden"><input id="explicit-confirm" type="checkbox"><span>我已核对机器人、操作和参数，确认执行本次操作</span></label>
+      <div class="dialog-actions"><button id="dialog-cancel" class="secondary-button" type="button">取消</button><button id="dialog-execute" class="danger-button" type="button">执行</button></div>
+    </dialog>
+
+    <div id="live-region" class="visually-hidden" aria-live="polite" aria-atomic="true"></div>
+  </body>
+</html>

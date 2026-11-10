@@ -7,14 +7,26 @@ from robotsoul.models import (
     Evaluation,
     Feedback,
     FeedbackStatus,
+    InvocationContext,
+    InvocationSource,
     Observation,
+    ReviewProposal,
+    ReviewVerdict,
+    RiskLevel,
+    SafetyReviewResult,
     Task,
     TaskResult,
     TaskStatus,
 )
-from robotsoul.profiles import RobotProfile, load_profile
+from robotsoul.audit import (
+    InMemoryToolCallAuditSink,
+    JsonlToolCallAuditSink,
+    NullToolCallAuditSink,
+    ToolCallAuditSink,
+)
+from robotsoul.profiles import RobotProfile, list_profiles, load_profile, load_selected_profile
 from robotsoul.picoclaw import CodingTaskResult, PicoClawCodingAgent, PicoClawError
-from robotsoul.runtime import RobotRuntime
+from robotsoul.runtime import RobotRuntime, SafetyReviewer
 
 __all__ = [
     "AgentIntent",
@@ -24,13 +36,26 @@ __all__ = [
     "Evaluation",
     "Feedback",
     "FeedbackStatus",
+    "InvocationContext",
+    "InvocationSource",
+    "InMemoryToolCallAuditSink",
+    "JsonlToolCallAuditSink",
+    "NullToolCallAuditSink",
     "Observation",
+    "ReviewProposal",
+    "ReviewVerdict",
+    "RiskLevel",
     "RobotProfile",
     "RobotRuntime",
+    "SafetyReviewer",
+    "SafetyReviewResult",
     "PicoClawCodingAgent",
     "PicoClawError",
     "Task",
     "TaskResult",
     "TaskStatus",
+    "ToolCallAuditSink",
+    "list_profiles",
     "load_profile",
+    "load_selected_profile",
 ]

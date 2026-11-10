@@ -2,9 +2,9 @@
 
 ## 目的
 
-适配器将厂商设备、ROS 2 Topic/Action/Service 或模拟器映射到稳定的系统契约。新增设备时实现适配器，不改 Agent 工具语义和任务回环核心。
+适配器将厂商设备、ROS 2 Topic/Action/Service 或模拟器映射到稳定的系统契约。每种机器人代码位于仓库根目录 `adapters/<robot_code>/`，其 SDK/驱动放在该模块的 `third_party/`。新增设备时新增并登记机器人模块，不改 Agent 工具语义和任务回环核心。
 
-机器人型号、适配器及设备映射由独立的机器人 profile 选择，字段和校验规则见[机器人兼容配置](02a-robot-profiles.md)。配置只组合已实现、已安装的驱动和适配器。
+部署配置选择已登记的机器人模块，profile 随模块存储，字段和校验规则见[机器人兼容配置](02a-robot-profiles.md)。配置只选择已实现、已登记的模块/profile，不接受任意导入路径或可执行内容。模块目录和注册约定见[机器人模块组织规范](12-robot-module-standard.md)。
 
 ## 插件职责
 

@@ -1,6 +1,7 @@
 {
-  "profile_schema_version": 1,
+  "profile_schema_version": 2,
   "profile_id": "simulator-basic",
+  "robot_module": "simulator",
   "profile_version": "1.0.0",
   "manufacturer": "OpenRobotSoul",
   "model": "SimulatorBasic",
@@ -10,12 +11,18 @@
   "capabilities": [
     {
       "name": "speech.say",
+      "risk_level": "normal",
+      "allowed_callers": ["agent", "dashboard"],
+      "requires_operator_confirmation": false,
       "parameters": {"text": {"type": "string", "max_length": 240}},
       "timeout_ms": 5000,
       "required": true
     },
     {
       "name": "head.look",
+      "risk_level": "normal",
+      "allowed_callers": ["agent", "dashboard"],
+      "requires_operator_confirmation": false,
       "parameters": {
         "yaw_deg": {"type": "number", "min": -45, "max": 45},
         "pitch_deg": {"type": "number", "min": -20, "max": 25}
@@ -24,6 +31,9 @@
     },
     {
       "name": "base.move_distance",
+      "risk_level": "confirm",
+      "allowed_callers": ["agent", "dashboard"],
+      "requires_operator_confirmation": false,
       "parameters": {
         "distance_m": {"type": "number", "min": -0.5, "max": 0.5},
         "max_speed_mps": {"type": "number", "min": 0.01, "max": 0.2}

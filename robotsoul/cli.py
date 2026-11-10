@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import os
 import sys
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any
 
-from robotsoul.profiles import load_profile
+from robotsoul.audit import JsonlToolCallAuditSink
+from robotsoul.dashboard import run_dashboard
+from robotsoul.profiles import list_profiles, load_selected_profile
 from robotsoul.picoclaw import PicoClawCodingAgent, PicoClawError
 from robotsoul.runtime import RobotRuntime
 
@@ -28,12 +32,20 @@ def _json_value(value: Any) -> Any:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="robotsoul", description="OpenRobotSoul Python MVP")
-    parser.add_argument("--profile", default="simulator-basic", help="Bundled robot profile ID")
+    parser.add_argument("--profile", help="Override the profile selected in config/robot.json")
+    parser.add_argument("--robot-module", help="Override the robot_module selected in config/robot.json")
+    parser.add_argument("--robot-config", help="Path to deployment robot selection JSON")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("profiles", help="List bundled simulator profiles")
-    run_parser = subparsers.add_parser("run", help="Run a text task against the simulator")
+    subparsers.add_parser("profiles", help="List profiles registered by robot modules")
+    run_parser = subparsers.add_parser("run", help="Run a text task using the selected robot module")
     run_parser.add_argument("text", nargs="+", help="Task text, for example: 抬头")
     subparsers.add_parser("demo", help="Run the built-in Chinese head-look demo")
+    dashboard_parser = subparsers.add_parser("dashboard", help="Run the local operator Dashboard")
+    dashboard_parser.add_argument("--operator-pin-env", default="ROBOTSOUL_DASHBOARD_PIN", help="Environment variable for the operator PIN; prompted securely when unset")
+    dashboard_parser.add_argument("--host", default="127.0.0.1", help="Bind address; LAN addresses require TLS")
+    dashboard_parser.add_argument("--port", type=int, default=8765, help="Dashboard port")
+    dashboard_parser.add_argument("--tls-cert", help="PEM certificate for LAN HTTPS")
+    dashboard_parser.add_argument("--tls-key", help="PEM private key for LAN HTTPS")
     coding_parser = subparsers.add_parser("coding-agent", help="Run a coding task with PicoClaw")
     coding_subparsers = coding_parser.add_subparsers(dest="coding_command", required=True)
     coding_check = coding_subparsers.add_parser("check", help="Check PicoClaw binary and configuration")
@@ -54,7 +66,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "profiles":
-        print("simulator-basic\nsimulator-compact")
+        print("\n".join(list_profiles()))
         return
     if args.command == "coding-agent":
         if args.coding_command == "check":
@@ -102,8 +114,25 @@ def main() -> None:
         if not result.succeeded:
             raise SystemExit(1)
         return
-    profile = load_profile(args.profile)
-    runtime = RobotRuntime.from_profile(profile)
+    try:
+        profile = load_selected_profile(args.profile, args.robot_config, args.robot_module)
+        runtime = RobotRuntime.from_profile(profile, audit_sink=JsonlToolCallAuditSink())
+    except (RuntimeError, ValueError) as exc:
+        parser.error(str(exc))
+    if args.command == "dashboard":
+        operator_pin = os.environ.get(args.operator_pin_env) or getpass.getpass("Dashboard operator PIN: ")
+        try:
+            run_dashboard(
+                runtime,
+                operator_pin=operator_pin,
+                host=args.host,
+                port=args.port,
+                tls_cert=args.tls_cert,
+                tls_key=args.tls_key,
+            )
+        except (RuntimeError, ValueError, OSError) as exc:
+            parser.error(str(exc))
+        return
     text = "抬头" if args.command == "demo" else " ".join(args.text)
     result = runtime.run_text(text)
     print(json.dumps(_json_value(result), ensure_ascii=False, indent=2))

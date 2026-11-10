@@ -140,6 +140,18 @@ class PicoClawCodingAgentTests(unittest.TestCase):
         with self.assertRaisesRegex(PicoClawError, "not found"):
             agent.run_task("inspect", self.workspace)
 
+    def test_resolves_binary_from_unified_build_directory(self):
+        executable_name = "picoclaw.exe" if os.name == "nt" else "picoclaw"
+        target = _host_target()
+        build_binary = PROJECT_ROOT / "build" / target / "bin" / executable_name
+        build_binary.parent.mkdir(parents=True, exist_ok=True)
+        build_binary.write_bytes(b"test binary")
+        self.addCleanup(build_binary.unlink, missing_ok=True)
+
+        agent = PicoClawCodingAgent()
+
+        self.assertEqual(agent._resolve_binary(), build_binary)
+
     @patch("robotsoul.picoclaw.subprocess.Popen")
     def test_missing_config_fails_before_starting_picoclaw(self, popen):
         agent = PicoClawCodingAgent(binary=self.binary)
@@ -264,3 +276,9 @@ class PicoClawCodingAgentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _host_target():
+    from robotsoul.build import detect_host_architecture, detect_host_platform
+
+    return f"{detect_host_platform()}-{detect_host_architecture()}"

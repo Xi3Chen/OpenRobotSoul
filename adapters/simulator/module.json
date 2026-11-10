@@ -1,0 +1,4 @@
+{
+  "robot_module": "simulator",
+  "default_profile": "simulator-basic"
+}

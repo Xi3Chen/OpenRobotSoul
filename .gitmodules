@@ -1,3 +1,6 @@
 [submodule "third_party/picoclaw"]
 	path = third_party/picoclaw
 	url = https://github.com/sipeed/picoclaw.git
+[submodule "adapters/unitree_sdk2"]
+	path = adapters/unitree_sdk2
+	url = https://github.com/unitreerobotics/unitree_sdk2.git

@@ -7,7 +7,10 @@ from threading import Event, Lock
 from time import monotonic
 from uuid import uuid4
 
-from robotsoul.models import CapabilitySpec, Command, Feedback, FeedbackStatus, Observation, utc_now
+from robotsoul.models import (
+    CapabilitySpec, Command, Feedback, FeedbackStatus, Observation, RiskLevel,
+    command_proposal_digest, utc_now,
+)
 from robotsoul.profiles import RobotProfile
 
 
@@ -232,6 +235,26 @@ class FakeRobotAdapter:
             return "Robot ID mismatch"
         if capability is None:
             return f"Unsupported skill: {command.skill}"
+        if command.risk_level != capability.risk_level:
+            return "Command risk does not match the registered capability"
+        if command.invocation_source.value not in capability.allowed_callers:
+            return "Command source is not permitted for the registered capability"
+        if capability.risk_level == RiskLevel.CONFIRM and not command.review_digest:
+            return "Confirm-tier command is missing its review binding"
+        if capability.risk_level == RiskLevel.CONFIRM and (
+            command.policy_version != self.profile.profile_version
+            or command.review_digest != command_proposal_digest(command, self.profile.profile_version)
+        ):
+            return "Confirm-tier command review binding is invalid or stale"
+        if capability.risk_level == RiskLevel.HIGH and command.invocation_source.value != "dashboard":
+            return "High-risk command requires Dashboard source"
+        if capability.risk_level == RiskLevel.HIGH and (
+            not command.operator_confirmation_id
+            or command.policy_version != self.profile.profile_version
+            or not command.operator_confirmed
+            or not command.actor_hash
+        ):
+            return "High-risk command is missing authenticated operator confirmation"
         if command.deadline <= utc_now():
             return "Command deadline has expired"
         if set(command.parameters) != set(capability.parameters):
@@ -247,6 +270,9 @@ class FakeRobotAdapter:
                     return f"Parameter {name} is below its minimum"
                 if spec.maximum is not None and value > spec.maximum:
                     return f"Parameter {name} exceeds its maximum"
+            elif spec.value_type == "boolean":
+                if not isinstance(value, bool):
+                    return f"Parameter {name} must be boolean"
             elif spec.value_type == "string":
                 if not isinstance(value, str):
                     return f"Parameter {name} must be text"
@@ -273,3 +299,7 @@ class FakeRobotAdapter:
             error_code=error_code,
             evidence=evidence or {},
         )
+
+
+def create_adapter(profile: RobotProfile) -> FakeRobotAdapter:
+    return FakeRobotAdapter(profile)

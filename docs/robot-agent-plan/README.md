@@ -17,6 +17,9 @@
 - [插件扩展与代码变更生命周期](09-extension-lifecycle.md)
 - [启动监督与自恢复](10-boot-recovery.md)
 - [Agent 选型与 PicoClaw 集成决策](11-agent-tooling-decision.md)
+- [机器人模块组织规范](12-robot-module-standard.md)
+- [工具调用审计记录](13-tool-call-audit.md)
+- [跨平台 C++ 构建工具](14-build-tool.md)
 
 ## 核心决策
 
@@ -49,3 +52,5 @@
 ## 决策状态
 
 这是首版实施规划，不是现有实现的代码审计。机器人型号、传感器型号、云端模型供应方、机器人运行时 Agent、运行时语言和部署拓扑仍需在技术预研后通过 ADR（架构决策记录）确定。PicoClaw 用于替代 Pi coding agent 的决定是阶段性选型，集成与隔离验收见 [Agent 选型与 PicoClaw 集成决策](11-agent-tooling-decision.md)。OpenRobotSoul 为当前项目名。
+
+机器人代码、profile 和该机器人专属第三方依赖按 `adapters/<robot_code>/` 组织；部署目标通过 `config/robot.json` 选择已登记的静态模块。新增模块的目录、registry、profile 和验收规范见[机器人模块组织规范](12-robot-module-standard.md)。

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
+from hashlib import sha256
+import json
 from typing import Any
 
 
@@ -15,6 +17,7 @@ class TaskStatus(StrEnum):
     CONTEXTUALIZING = "contextualizing"
     AWAITING_AGENT = "awaiting_agent"
     VALIDATING_INTENT = "validating_intent"
+    REVIEWING = "reviewing"
     EXECUTING = "executing"
     MONITORING = "monitoring"
     EVALUATING = "evaluating"
@@ -31,6 +34,24 @@ class FeedbackStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class RiskLevel(StrEnum):
+    NORMAL = "normal"
+    CONFIRM = "confirm"
+    HIGH = "high"
+
+
+class InvocationSource(StrEnum):
+    AGENT = "agent"
+    DASHBOARD = "dashboard"
+    MAINTENANCE = "maintenance"
+
+
+class ReviewVerdict(StrEnum):
+    ALLOW = "allow"
+    DENY = "deny"
+    UNCERTAIN = "uncertain"
+
+
 @dataclass(frozen=True)
 class ParameterSpec:
     value_type: str
@@ -43,10 +64,17 @@ class ParameterSpec:
 class CapabilitySpec:
     name: str
     parameters: dict[str, ParameterSpec]
-    safety_class: str = "low"
+    risk_level: RiskLevel = RiskLevel.NORMAL
+    allowed_callers: tuple[str, ...] = ("agent", "dashboard")
+    requires_operator_confirmation: bool = False
     interruptible: bool = True
     timeout_ms: int = 5000
     required: bool = False
+
+    @property
+    def safety_class(self) -> str:
+        """Compatibility label for integrations that still use the old field."""
+        return "low" if self.risk_level == RiskLevel.NORMAL else self.risk_level.value
 
 
 @dataclass(frozen=True)
@@ -76,6 +104,35 @@ class AgentIntent:
 
 
 @dataclass(frozen=True)
+class InvocationContext:
+    source: InvocationSource
+    principal_id: str | None = None
+    session_id: str | None = None
+    role: str | None = None
+    operator_confirmed: bool = False
+    principal_hash: str | None = None
+
+
+@dataclass(frozen=True)
+class ReviewProposal:
+    proposal_id: str
+    command: Command
+    risk_level: RiskLevel
+    policy_version: str
+    arguments_digest: str
+    created_at: datetime
+    expires_at: datetime
+    user_input: str
+
+
+@dataclass(frozen=True)
+class SafetyReviewResult:
+    verdict: ReviewVerdict
+    arguments_digest: str
+    rationale: str
+
+
+@dataclass(frozen=True)
 class Command:
     command_id: str
     task_id: str
@@ -85,6 +142,27 @@ class Command:
     parameters: dict[str, Any]
     deadline: datetime
     cancel_policy: str = "cancel_on_timeout"
+    risk_level: RiskLevel = RiskLevel.NORMAL
+    invocation_source: InvocationSource = InvocationSource.AGENT
+    review_digest: str | None = None
+    policy_version: str | None = None
+    operator_confirmation_id: str | None = None
+    operator_confirmed: bool = False
+    actor_hash: str | None = None
+
+
+def command_proposal_digest(command: Command, policy_version: str) -> str:
+    payload = {
+        "robot_id": command.robot_id,
+        "task_id": command.task_id,
+        "trace_id": command.trace_id,
+        "skill": command.skill,
+        "parameters": command.parameters,
+        "risk_level": command.risk_level.value,
+        "policy_version": policy_version,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,12 @@
+{
+  "profile_schema_version": 2,
+  "profile_id": "unitree-go2-development",
+  "robot_module": "unitree_go2",
+  "profile_version": "0.1.0-dev",
+  "manufacturer": "Unitree",
+  "model": "Go2",
+  "adapter_id": "unitree-go2",
+  "robot_id": "robot-go2-development",
+  "required_capabilities": [],
+  "capabilities": []
+}

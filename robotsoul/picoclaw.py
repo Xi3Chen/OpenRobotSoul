@@ -205,16 +205,27 @@ class PicoClawCodingAgent:
             raise PicoClawError(f"PicoClaw executable was not found: {candidate}")
 
         executable_name = "picoclaw.exe" if os.name == "nt" else "picoclaw"
-        bundled = PROJECT_ROOT / "third_party" / "picoclaw" / "build" / executable_name
-        if bundled.is_file():
-            return bundled
+        try:
+            from robotsoul.build import detect_host_architecture, detect_host_platform
+
+            bundled = (
+                PROJECT_ROOT
+                / "build"
+                / f"{detect_host_platform()}-{detect_host_architecture()}"
+                / "bin"
+                / executable_name
+            )
+            if bundled.is_file():
+                return bundled
+        except (ImportError, RuntimeError):
+            bundled = None
 
         on_path = shutil.which("picoclaw")
         if on_path:
             return Path(on_path).resolve()
         raise PicoClawError(
             "PicoClaw executable was not found. Build it under "
-            f"{bundled.parent} or set OPENROBOTSOUL_PICOCLAW_BINARY."
+            f"{PROJECT_ROOT / 'build'}/<platform>-<arch>/bin or set OPENROBOTSOUL_PICOCLAW_BINARY."
         )
 
     def _build_environment(self, workspace: Path, home: Path) -> dict[str, str]:

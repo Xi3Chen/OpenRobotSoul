@@ -1,0 +1,46 @@
+# 局域网 Dashboard 与接口风险门禁
+
+## 范围与安全边界
+
+Dashboard 是本地 RobotRuntime 的操作界面，不直接连接 SDK、DDS 或 ROS。浏览器只请求服务端注册的 typed operation；调用者身份和角色来自服务端会话，不能由 request body 提供。
+
+风险等级与调用入口独立配置：
+
+| 等级 | Agent | Dashboard | 门禁 |
+|---|---|---|---|
+| `normal` | 按 capability caller policy | 按 capability caller policy | 每次执行参数、机器人状态与适配器检查 |
+| `confirm` | 可提出 | 可提出 | 对不可变命令提案做无工具 AI 复核；没有 reviewer、复核拒绝或 digest 不一致时拒绝执行 |
+| `high` | 禁止 | 仅认证的 Dashboard operator | 本次操作明确确认、PIN step-up、绑定 command/task/args/policy 的确认标识和适配器再次校验 |
+
+AI 复核与人员确认是不同记录和门禁。语音、文字任务或 UI 可见性不会自动授予权限。缺失/冲突策略、未知接口和过期状态默认不可调用。SDK 方法须逐项映射到固定 typed operation，不支持任意 SDK 方法透传。
+
+`SwitchSet(false)` 这类关闭安全保护的操作默认维护专用或禁用。只有相应 SDK/固件行为、运行前置条件、停止与恢复流程经过验证后，才可讨论是否作为 high Dashboard 操作开放。
+
+## Dashboard 页面
+
+- 总览：robot_id、型号、连接/健康、活动任务、最近反馈和策略/profile 版本。
+- 控制：Agent 自然语言任务及经过策略授权的 typed operation 表单。表单显示参数单位、范围和风险；不可用能力展示禁用原因。
+- 能力目录：operation、风险、允许调用入口、参数 schema、超时、可中断性、策略来源和可用状态。
+- 活动：任务与命令状态、AI 复核结论、操作员确认状态和适配器结果。
+- 语音：当前标记为未配置；在本地语音识别、机器人音频链路和 HTTPS/WSS 实现前不请求麦克风权限。
+
+## Dashboard API
+
+- `GET /api/session`：当前会话状态。
+- `POST /api/login`、`POST /api/logout`：操作员 PIN 登录/退出。
+- `GET /api/dashboard/overview`、`GET /api/capabilities`：只读总览和能力目录。
+- `POST /api/tasks`：提交自然语言任务，经 Agent capability surface 和 runtime 策略处理。
+- `POST /api/actions/prepare`：服务端校验 caller、skill、schema、参数边界与当前策略，建立短时挑战；客户端不能设置 caller/risk/确认结果。
+- `POST /api/actions/execute`：提交挑战 ID。服务端原子消费挑战，重验策略与 digest；高危操作还需再次输入 PIN，然后通过 `InvocationContext` 调用 Runtime。
+
+挑战绑定认证 session、robot、task/trace、skill、规范化参数、风险与 callers、profile version、有效期。挑战仅使用一次；登出、过期、重放或策略变化都拒绝。失败不会调用 adapter。
+
+## 认证和部署
+
+初版服务使用标准库 HTTP server，不增加运行依赖。绑定 loopback 可用 HTTP 做本地开发；绑定明确的局域网 IP 必须提供 TLS certificate/key。拒绝 `0.0.0.0`、`::` 通配监听。Session cookie 为 HttpOnly/SameSite，写请求需要 CSRF token 并校验 Host/Origin；登录和 PIN step-up 都有限速。PIN 从环境变量读取或由终端隐藏提示输入，不写入日志。PIN 使用 PBKDF2 派生摘要保存于内存。
+
+Dashboard LAN TLS 是控制操作的部署要求。浏览器麦克风 API 还要求 secure context；HTTPS/WSS/WebRTC 与语音通道仍未实现。HTTP 只能用于 loopback 原型，不应控制真实机器人。
+
+## 实施状态
+
+当前 UI/API 主要用于 simulator。simulator 的移动技能标记 `confirm`；当前默认 CLI 未配置 `SafetyReviewer`，所以该技能在 Dashboard 中显示不可用且 runtime fail closed。Go2 profile 不暴露技能，Go2 SDK bridge 和全公开 API 方法策略清单尚未完成。没有 adapter-boundary 硬件 interlock 前，不启用实机动作。

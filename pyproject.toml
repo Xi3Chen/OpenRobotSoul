@@ -11,6 +11,13 @@ dependencies = []
 
 [project.scripts]
 robotsoul = "robotsoul.cli:main"
+robotsoul-build = "robotsoul.build:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["robotsoul*", "adapters*"]
+exclude = ["tests*", "third_party*"]
 
 [tool.setuptools.package-data]
-robotsoul = ["profiles/*.json"]
+adapters = ["*/module.json", "*/profiles/*.json", "*/third_party/README.md"]
+robotsoul = ["web/*.html", "web/*.css", "web/*.js"]

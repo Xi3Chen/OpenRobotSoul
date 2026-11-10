@@ -1,6 +1,7 @@
 {
-  "profile_schema_version": 1,
+  "profile_schema_version": 2,
   "profile_id": "simulator-compact",
+  "robot_module": "simulator",
   "profile_version": "1.0.0",
   "manufacturer": "OpenRobotSoul",
   "model": "SimulatorCompact",
@@ -10,12 +11,18 @@
   "capabilities": [
     {
       "name": "speech.say",
+      "risk_level": "normal",
+      "allowed_callers": ["agent", "dashboard"],
+      "requires_operator_confirmation": false,
       "parameters": {"text": {"type": "string", "max_length": 160}},
       "timeout_ms": 5000,
       "required": true
     },
     {
       "name": "head.look",
+      "risk_level": "normal",
+      "allowed_callers": ["agent", "dashboard"],
+      "requires_operator_confirmation": false,
       "parameters": {
         "yaw_deg": {"type": "number", "min": -30, "max": 30},
         "pitch_deg": {"type": "number", "min": -10, "max": 15}

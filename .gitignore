@@ -4,6 +4,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .coverage
+logs/
 dist/
 build/
 *.egg-info/

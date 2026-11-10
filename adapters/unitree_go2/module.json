@@ -1,0 +1,4 @@
+{
+  "robot_module": "unitree_go2",
+  "default_profile": "unitree-go2-development"
+}
