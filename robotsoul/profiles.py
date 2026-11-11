@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from importlib.resources import files
 from math import isfinite
 from pathlib import Path
 from typing import Any
@@ -217,9 +218,16 @@ def load_selected_profile(
     selected_path = Path(config_path) if config_path is not None else PROJECT_ROOT / "config" / "robot.json"
     selected_path = selected_path.expanduser().resolve()
     try:
-        config = json.loads(selected_path.read_text(encoding="utf-8"))
+        config_text = selected_path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ValueError(f"Could not read robot selection config: {selected_path}") from exc
+        if config_path is not None:
+            raise ValueError(f"Could not read robot selection config: {selected_path}") from exc
+        try:
+            config_text = files("robotsoul").joinpath("data/robot.json").read_text(encoding="utf-8")
+        except OSError as resource_error:
+            raise ValueError(f"Could not read robot selection config: {selected_path}") from resource_error
+    try:
+        config = json.loads(config_text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Robot selection config is invalid JSON: {selected_path}") from exc
     if not isinstance(config, dict) or set(config) not in (

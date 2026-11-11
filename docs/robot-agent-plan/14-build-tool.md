@@ -12,15 +12,16 @@ python -m robotsoul.build
 
 ## 输出布局
 
-Go2 C++ 示例和 PicoClaw 会由一次构建命令统一构建。所有构建内容都位于项目根目录 `build/`：
+Go2 C++ 示例、只读状态 bridge 和 PicoClaw 会由一次构建命令统一构建。所有构建内容都位于项目根目录 `build/`：
 
 ```text
 build/
   linux-x86_64/
     cmake/       # CMake cache、编译器中间文件和原始构建输出
+    bridge/      # Go2 SDK bridge 的 CMake 构建目录
     go/          # Go build cache、Go module cache 和中间文件
     bin/         # Go2 示例和 PicoClaw 可执行文件
-    lib/         # 运行所需的 Unitree/DDS 库副本
+    lib/         # bridge、Unitree 和 DDS 运行库副本
     manifest.json
 ```
 
@@ -39,4 +40,4 @@ build/
 
 当前 Unitree SDK checkout 的 CMake 工程直接导入 `lib/<arch>/libunitree_sdk2.a`、`thirdparty/lib/<arch>/libddsc.so` 和 `libddscxx.so`，预编译库只适用于 Linux `x86_64`/`aarch64`。构建工具会列出这些实际可用目标；Windows/macOS 或缺失架构必须先放入对应 SDK/依赖并调整 CMake 工程，工具不会假装完成构建。
 
-构建出的二进制包括 Go2 运动、高层服务、视频、VUI 示例和 `picoclaw` CLI。Python coding-agent adapter 默认从 `build/<platform>-<arch>/bin/` 加载 PicoClaw；仍可通过 `OPENROBOTSOUL_PICOCLAW_BINARY` 覆盖。低级示例的二进制仅表示编译成功，不能绕过 `adapters/unitree_go2/CALLABLE_API_REVIEW.md` 中的暴露审阅、控制权、急停和实机验证要求。
+构建出的二进制包括 Go2 官方高层服务、视频、VUI 示例、`picoclaw` CLI 和只读 `libopenrobotsoul_go2_bridge.so`。运行 Go2 只读状态检查还需设置 `OPENROBOTSOUL_GO2_NETWORK_INTERFACE` 为连接机器人网络的本机网卡名；Python coding-agent adapter 默认从 `build/<platform>-<arch>/bin/` 加载 PicoClaw，仍可通过 `OPENROBOTSOUL_PICOCLAW_BINARY` 覆盖。bridge 只读 DDS 运动状态，不包含运动 API；官方示例和 bridge 的编译成功不代表实机动作经过验证。

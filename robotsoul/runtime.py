@@ -69,6 +69,7 @@ class RobotRuntime:
     _used_task_ids: set[str] = field(default_factory=set, init=False, repr=False)
     _used_review_bindings: set[str] = field(default_factory=set, init=False, repr=False)
     _runtime_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
 
     @classmethod
     def from_profile(
@@ -208,6 +209,14 @@ class RobotRuntime:
             for name, capability in self.capabilities.items()
             if "dashboard" in capability.allowed_callers
         }
+
+    def close(self) -> None:
+        """Release adapter resources once the runtime no longer accepts work."""
+        with self._runtime_lock:
+            if self._closed:
+                return
+            self._closed = True
+        self.adapter.close()
 
     def invoke_skill(
         self,

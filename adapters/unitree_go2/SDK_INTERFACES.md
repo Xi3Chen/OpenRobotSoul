@@ -115,6 +115,8 @@ Go2 SDK 还带有以下消息定义，可作为后续传感器接入候选：
 
 ## C++ bridge 边界建议
 
+当前实现提供 `bridge/` 下的只读 C ABI bridge：DDS domain 固定为 `0`，必须显式传入网络接口；进程内只允许一个 bridge handle，以匹配 SDK 的全局 DDS factory；初始化 `SportClient` 并拒绝客户端/服务端 API version 不一致；订阅 `rt/sportmodestate`，只在状态两秒内新鲜时报告健康并输出运动模式、速度、位置、SDK 时间戳和错误码。它不会调用任何 Sport 动作 API，driver 的能力发现为空，所有运动命令均失败关闭。bridge 已在 WSL Linux 上通过当前 checkout 的 x86_64 SDK 完成链接；仍未连接 Go2 实机验证，目标机网络/固件状态行为需要部署确认。
+
 Go2 C++ bridge 应只做厂商 SDK 相关工作：初始化 DDS/client、订阅消息、调用选定的高层客户端、转换单位/坐标系、生成明确成功/失败结果。Python 的 `UnitreeGo2Driver` 继续负责映射到 `CapabilitySpec`、`Observation`、`Command` 和 `Feedback`；不要让客户端方法列表自动变成可发现技能。
 
 每条运动命令至少要有本地参数白名单、最大有效期、重试策略、设备状态前置条件和停止动作。SDK `int32_t` 返回值只表示 API 调用结果，不能单独作为 physical action 的 `succeeded`；完成状态需由后续 `SportModeState_`/`LowState_` 反馈和明确条件证明。断连或反馈过期时，应停止继续发送运动命令并报告 failed/unknown，停止策略必须在本地运行。

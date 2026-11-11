@@ -43,4 +43,4 @@ Dashboard LAN TLS 是控制操作的部署要求。浏览器麦克风 API 还要
 
 ## 实施状态
 
-当前 UI/API 主要用于 simulator。simulator 的移动技能标记 `confirm`；当前默认 CLI 未配置 `SafetyReviewer`，所以该技能在 Dashboard 中显示不可用且 runtime fail closed。Go2 profile 不暴露技能，Go2 SDK bridge 和全公开 API 方法策略清单尚未完成。没有 adapter-boundary 硬件 interlock 前，不启用实机动作。
+当前 UI/API 主要用于 simulator。simulator 的移动技能标记 `confirm`；当前默认 CLI 未配置 `SafetyReviewer`，所以该技能在 Dashboard 中显示不可用且 runtime fail closed。Go2 profile 不暴露技能；Go2 SDK bridge 仅提供只读状态，不启用实机动作。所有公开 API 方法的策略清单仍需逐项审阅。

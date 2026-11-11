@@ -13,6 +13,7 @@ from robotsoul.audit import JsonlToolCallAuditSink
 from robotsoul.dashboard import run_dashboard
 from robotsoul.profiles import list_profiles, load_selected_profile
 from robotsoul.picoclaw import PicoClawCodingAgent, PicoClawError
+from robotsoul.adapters.registry import create_adapter
 from robotsoul.runtime import RobotRuntime
 
 
@@ -37,6 +38,7 @@ def main() -> None:
     parser.add_argument("--robot-config", help="Path to deployment robot selection JSON")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("profiles", help="List profiles registered by robot modules")
+    subparsers.add_parser("status", help="Check the selected robot connection and read-only state")
     run_parser = subparsers.add_parser("run", help="Run a text task using the selected robot module")
     run_parser.add_argument("text", nargs="+", help="Task text, for example: 抬头")
     subparsers.add_parser("demo", help="Run the built-in Chinese head-look demo")
@@ -114,6 +116,45 @@ def main() -> None:
         if not result.succeeded:
             raise SystemExit(1)
         return
+    if args.command == "status":
+        profile = load_selected_profile(args.profile, args.robot_config, args.robot_module)
+        adapter = None
+        try:
+            adapter = create_adapter(profile)
+            adapter.connect()
+            result = {
+                "profile_id": profile.profile_id,
+                "robot_id": profile.robot_id,
+                "manufacturer": profile.manufacturer,
+                "model": profile.model,
+                "connected": adapter.health(),
+                "capabilities": sorted(adapter.discover_capabilities()),
+                "observations": _json_value(adapter.drain_observations()),
+            }
+            if not result["connected"]:
+                result["error"] = "Robot adapter is not healthy"
+        except Exception as exc:
+            result = {
+                "profile_id": profile.profile_id,
+                "robot_id": profile.robot_id,
+                "manufacturer": profile.manufacturer,
+                "model": profile.model,
+                "connected": False,
+                "capabilities": [],
+                "observations": [],
+                "error": str(exc),
+            }
+        finally:
+            if adapter is not None:
+                try:
+                    adapter.close()
+                except Exception as exc:
+                    result["connected"] = False
+                    result["error"] = f"Could not close robot adapter: {exc}"
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if not result["connected"]:
+            raise SystemExit(1)
+        return
     try:
         profile = load_selected_profile(args.profile, args.robot_config, args.robot_module)
         runtime = RobotRuntime.from_profile(profile, audit_sink=JsonlToolCallAuditSink())
@@ -132,12 +173,17 @@ def main() -> None:
             )
         except (RuntimeError, ValueError, OSError) as exc:
             parser.error(str(exc))
+        finally:
+            runtime.close()
         return
-    text = "抬头" if args.command == "demo" else " ".join(args.text)
-    result = runtime.run_text(text)
-    print(json.dumps(_json_value(result), ensure_ascii=False, indent=2))
-    if result.task.status.value != "completed":
-        raise SystemExit(1)
+    try:
+        text = "抬头" if args.command == "demo" else " ".join(args.text)
+        result = runtime.run_text(text)
+        print(json.dumps(_json_value(result), ensure_ascii=False, indent=2))
+        if result.task.status.value != "completed":
+            raise SystemExit(1)
+    finally:
+        runtime.close()
 
 
 if __name__ == "__main__":

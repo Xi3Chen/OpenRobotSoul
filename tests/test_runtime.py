@@ -58,6 +58,18 @@ class ObservationAgent(FixedIntentAgent):
 
 
 class RuntimeContractTests(unittest.TestCase):
+    def test_close_releases_adapter_once(self):
+        from unittest.mock import Mock
+
+        runtime = RobotRuntime.from_profile(load_profile("simulator-basic"))
+        close = runtime.adapter.close
+
+        runtime.adapter.close = Mock(wraps=close)
+        runtime.close()
+        runtime.close()
+
+        runtime.adapter.close.assert_called_once_with()
+
     def test_basic_profile_runs_registered_skill_to_completion(self):
         result = RobotRuntime.from_profile(load_profile("simulator-basic")).run_text("请抬头")
 

@@ -49,7 +49,7 @@ OpenRobotSoul 是一个以人机交互和受控自我探索为核心、可部署
 
 Python MVP 已启动，当前包含确定性模拟适配器、两个能力不同的模拟 profile、可替换的 Agent 接口、任务状态回环、参数限制、命令去重和 JSON 审计轨迹。当前 Agent 使用本地规则匹配，模拟器反馈不能证明任何真实硬件行为。
 
-当前 `config/robot.json` 选择 `unitree_go2`，表示 Go2 是正在准备的目标；由于 SDK bridge 仍未实现，默认运行会明确失败，不会回退到模拟器。要运行模拟器需显式指定 `--robot-module simulator`。机器人模块位于仓库根目录 `adapters/`；每个模块拥有自身 profile、driver bridge 和机器人专属 `third_party/`。runtime 不包含机器人型号分支。
+当前 `config/robot.json` 选择 `unitree_go2`。Go2 SDK bridge 已实现 Linux DDS 连接和只读运动状态读取，但尚未暴露运动命令；需配置网卡并构建 C++ bridge 后，`status` 可检查连接。要运行模拟器需显式指定 `--robot-module simulator`。机器人模块位于仓库根目录 `adapters/`；每个模块拥有自身 profile、driver bridge 和机器人专属 `third_party/`。runtime 不包含机器人型号分支。
 
 PicoClaw 已作为固定提交的 Git 子模块登记在 `third_party/picoclaw`，作为 Pi coding agent 的先行替代方案供隔离工作区编码能力评估；它不是当前 Python MVP 的运行时 Agent。集成约束和验收条件见 [Agent 选型与 PicoClaw 集成决策](docs/robot-agent-plan/11-agent-tooling-decision.md)。
 
@@ -65,6 +65,7 @@ python -m robotsoul demo
 python -m robotsoul --robot-module simulator demo
 python -m robotsoul --robot-module simulator --profile simulator-compact run "抬头"
 python -m robotsoul --robot-module simulator dashboard
+python -m robotsoul status
 python -m robotsoul coding-agent check
 python -m unittest discover -s tests -v
 python -m robotsoul.build --platform linux --arch x86_64
@@ -87,7 +88,7 @@ python -m robotsoul --robot-module simulator dashboard
 python -m robotsoul --robot-module simulator dashboard --host 192.168.1.20 --tls-cert cert.pem --tls-key key.pem
 ```
 
-`confirm` 技能需通过 `RobotRuntime.from_profile(..., safety_reviewer=...)` 配置无工具 SafetyReviewer；未配置或复核失败时会拒绝调用。`high` 技能只允许 Dashboard 操作员调用，并要求重新输入 PIN。当前默认配置仍指向尚无 SDK bridge 的 Go2；示例显式选择 simulator。手机语音通道尚未接入。安全边界、API 和风险级别定义见[Dashboard 与接口风险门禁](docs/robot-agent-plan/15-dashboard.md)。
+`confirm` 技能需通过 `RobotRuntime.from_profile(..., safety_reviewer=...)` 配置无工具 SafetyReviewer；未配置或复核失败时会拒绝调用。`high` 技能只允许 Dashboard 操作员调用，并要求重新输入 PIN。当前默认配置仍指向 Go2，但 profile 没有动作能力；示例显式选择 simulator。手机语音通道尚未接入。安全边界、API 和风险级别定义见[Dashboard 与接口风险门禁](docs/robot-agent-plan/15-dashboard.md)。
 
 ## PicoClaw 编码任务
 
@@ -116,7 +117,7 @@ python -m robotsoul coding-agent run --workspace ..\RobotHarness-coding "检查�
 
 ## Unitree Go2 机器人模块
 
-Go2 全部专属代码放在 `adapters/unitree_go2/`；SDK/驱动放在 `adapters/unitree_go2/third_party/sdk/`。`unitree-go2-development` profile 目前没有声明技能，SDK bridge 接好后也不会执行动作，直到经过实测的能力写入该模块 profile。把 `config/robot.json` 的 `robot_module` 改成 `unitree_go2` 即选择 Go2；SDK bridge 尚未实现时，系统会明确报错并停止。
+Go2 全部专属代码放在 `adapters/unitree_go2/`；SDK/驱动放在 `adapters/unitree_go2/third_party/sdk/`。`unitree-go2-development` profile 目前没有声明技能；bridge 只提供连接、健康检查和只读状态读取，不执行动作。运动能力必须在选定固件上验证单位、限值、完成反馈、超时和停止行为后，才能写入该模块 profile。把 `config/robot.json` 的 `robot_module` 改成 `unitree_go2` 即选择 Go2；运行前还须在 Linux 主机上构建 bridge，并设置 `OPENROBOTSOUL_GO2_NETWORK_INTERFACE`。
 
 ```python
 from robotsoul import RobotRuntime, load_selected_profile
@@ -177,4 +178,4 @@ python -m robotsoul.build --platform linux --guide
 
 不带参数会启动 CLI 向导，依次选择目标系统、架构和构建类型，并检查 CMake/C++ 编译器。`--guide` 只输出当前平台的依赖安装指引。平台可写 `linux`、`windows` 或 `macos`，架构可写 `x86_64`/`amd64` 或 `aarch64`/`arm64`；跨编译必须额外提供 CMake toolchain 文件。
 
-当前 `adapters/unitree_sdk2` checkout 自带的预编译 DDS 和 Unitree SDK 库只有 Linux `x86_64`、Linux `aarch64` 两套，Windows/macOS 只能得到明确的 SDK 缺失诊断，不能直接链接这些 `.so`；PicoClaw 本身支持 Go 交叉编译，但统一构建要求 C++ SDK 目标也可用。构建目标是 SDK 的 Go2 官方示例和 PicoClaw，不是尚未实现的 RobotHarness Go2 bridge；其中 `go2_low_level` 会涉及底层电机控制，构建成功不代表允许在实机上运行。构建会在执行 Go 代码前拒绝 `go.mod`/`go.sum` 有改动的 PicoClaw 子模块，并以只读模块模式编译。
+当前 `adapters/unitree_sdk2` checkout 自带的预编译 DDS 和 Unitree SDK 库只有 Linux `x86_64`、Linux `aarch64` 两套，Windows/macOS 不能直接链接这些 `.so`；统一构建需要在 Linux 主机完成。构建现在会产出 Unitree Go2 官方示例、只读状态 C++ bridge、PicoClaw Go CLI，并把运行所需 DDS 动态库放到 `build/<platform>-<arch>/lib/`。Go2 bridge 使用 `OPENROBOTSOUL_GO2_NETWORK_INTERFACE` 指定连接机器人的网卡，也可用 `OPENROBOTSOUL_GO2_BRIDGE_LIBRARY` 覆盖 bridge 路径；它只检查 DDS 状态、客户端/服务端 API 版本并读取 `rt/sportmodestate`，不发送运动命令。源码 checkout 部署可在项目目录构建后运行 `python -m robotsoul status`。若通过 wheel 部署，把 `build/<platform>-<arch>/lib/` 中的 bridge 与 DDS `.so` 及对应 `.so.0` 一起复制到同一目录，设置 `OPENROBOTSOUL_GO2_BRIDGE_LIBRARY` 指向 bridge，再运行状态检查。Go2 profile 仍不声明动作能力，身份目前只能确认 SDK 返回的厂商/型号，不能确认机身序列号。不要把 `go2_low_level` 等 SDK 示例用于实机控制；成功构建或读取状态不代表运动控制已验证。

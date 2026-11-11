@@ -65,6 +65,10 @@ class BuildToolTests(unittest.TestCase):
                     bin_dir.mkdir(parents=True, exist_ok=True)
                     for target in command[command.index("--target") + 1:]:
                         (bin_dir / target).write_bytes(b"test-binary")
+                    if "unitree_go2_bridge" in command:
+                        output = Path(command[command.index("--build") + 1]).parent / "lib"
+                        output.mkdir(parents=True, exist_ok=True)
+                        (output / "libopenrobotsoul_go2_bridge.so").write_bytes(b"test-bridge")
 
             with patch("robotsoul.build._validate_pico_go_version"), patch(
                 "robotsoul.build._validate_picoclaw_go_module"
@@ -80,10 +84,12 @@ class BuildToolTests(unittest.TestCase):
                     jobs=3,
                 )
 
-            self.assertEqual(len(commands), 3)
+            self.assertEqual(len(commands), 5)
             self.assertTrue(str(root / "build") in " ".join(commands[0]))
             self.assertTrue(str(root / "build") in " ".join(commands[1]))
             self.assertTrue(str(root / "build") in " ".join(commands[2]))
+            self.assertTrue(str(root / "build") in " ".join(commands[3]))
+            self.assertTrue(str(root / "build") in " ".join(commands[4]))
             self.assertEqual(len(result.binaries), 7)
             self.assertTrue(all(path.is_file() for path in result.binaries))
             self.assertTrue(all(path.is_relative_to(root / "build") for path in result.binaries))
@@ -94,7 +100,7 @@ class BuildToolTests(unittest.TestCase):
             self.assertTrue(Path(go_environment["GOCACHE"]).is_relative_to(root / "build"))
             self.assertTrue(Path(go_environment["GOMODCACHE"]).is_relative_to(root / "build"))
             self.assertEqual((picoclaw / "build").exists(), False)
-            self.assertEqual(len(result.staged_dependencies), 3)
+            self.assertEqual(len(result.staged_dependencies), 6)
             manifest = json.loads(result.manifest.read_text(encoding="utf-8"))
             self.assertEqual(manifest["architecture"], "x86_64")
             self.assertEqual(manifest["build_type"], "Release")
@@ -104,6 +110,7 @@ class BuildToolTests(unittest.TestCase):
             self.assertIn("-B", configure)
             self.assertTrue(Path(configure[configure.index("-B") + 1]).is_relative_to(root / "build"))
             self.assertIn("--parallel", commands[1])
+            self.assertIn("unitree_go2_bridge", commands[3])
 
     def test_unsupported_sdk_platform_fails_with_available_targets(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -215,7 +222,9 @@ def _write_sdk_libraries(root: Path, architecture: str) -> None:
     paths = (
         sdk_root / "lib" / architecture / "libunitree_sdk2.a",
         sdk_root / "thirdparty" / "lib" / architecture / "libddsc.so",
+        sdk_root / "thirdparty" / "lib" / architecture / "libddsc.so.0",
         sdk_root / "thirdparty" / "lib" / architecture / "libddscxx.so",
+        sdk_root / "thirdparty" / "lib" / architecture / "libddscxx.so.0",
     )
     for path in paths:
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -20,4 +20,4 @@ exclude = ["tests*", "third_party*"]
 
 [tool.setuptools.package-data]
 adapters = ["*/module.json", "*/profiles/*.json", "*/third_party/README.md"]
-robotsoul = ["web/*.html", "web/*.css", "web/*.js"]
+robotsoul = ["web/*.html", "web/*.css", "web/*.js", "data/*.json"]

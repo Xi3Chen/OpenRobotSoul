@@ -18,6 +18,7 @@ from typing import Callable, Sequence
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SDK_ROOT = Path("adapters") / "unitree_sdk2"
 PICOCLAW_ROOT = Path("third_party") / "picoclaw"
+GO2_BRIDGE_ROOT = Path("adapters") / "unitree_go2" / "bridge"
 GO2_TARGETS = (
     "go2_sport_client",
     "go2_low_level",
@@ -261,6 +262,7 @@ def build_project(
 
     output_dir = project_root / "build" / f"{target_platform}-{target_arch}"
     cmake_build_dir = output_dir / "cmake"
+    bridge_build_dir = output_dir / "bridge"
     go_build_dir = output_dir / "go"
     binary_dir = output_dir / "bin"
     dependency_dir = output_dir / "lib"
@@ -274,7 +276,7 @@ def build_project(
 
     sdk_arch_lib = sdk_dir / "thirdparty" / "lib" / target_arch
     staged_dependencies: list[Path] = []
-    for name in ("libddsc.so", "libddscxx.so"):
+    for name in ("libddsc.so", "libddsc.so.0", "libddscxx.so", "libddscxx.so.0"):
         source = sdk_arch_lib / name
         destination = dependency_dir / name
         if not source.is_file():
@@ -315,6 +317,47 @@ def build_project(
     if jobs is not None:
         build_command.extend(("--parallel", str(jobs)))
     runner(build_command, project_root)
+
+    bridge_configure_command = [
+        dependencies["cmake"],
+        "-S",
+        str(project_root / GO2_BRIDGE_ROOT),
+        "-B",
+        str(bridge_build_dir),
+        f"-DUNITREE_SDK_ROOT={sdk_dir}",
+        f"-DUNITREE_SDK_ARCH={target_arch}",
+        f"-DCMAKE_BUILD_TYPE={normalized_build_type}",
+        f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={dependency_dir}",
+        f"-DCMAKE_RUNTIME_OUTPUT_DIRECTORY={dependency_dir}",
+        f"-DCMAKE_BUILD_RPATH={dependency_dir}",
+        "-DCMAKE_INSTALL_RPATH=$ORIGIN",
+    ]
+    if toolchain_path is not None:
+        bridge_configure_command.append(f"-DCMAKE_TOOLCHAIN_FILE={toolchain_path}")
+    runner(bridge_configure_command, project_root)
+
+    bridge_build_command = [
+        dependencies["cmake"],
+        "--build",
+        str(bridge_build_dir),
+        "--config",
+        normalized_build_type,
+        "--target",
+        "unitree_go2_bridge",
+    ]
+    if jobs is not None:
+        bridge_build_command.extend(("--parallel", str(jobs)))
+    runner(bridge_build_command, project_root)
+
+    bridge_candidates = tuple(dependency_dir.glob("libopenrobotsoul_go2_bridge.so"))
+    if not bridge_candidates:
+        bridge_candidates = tuple(bridge_build_dir.rglob("libopenrobotsoul_go2_bridge.so"))
+        if bridge_candidates:
+            shutil.copy2(bridge_candidates[0], dependency_dir / bridge_candidates[0].name)
+    if not bridge_candidates and not (dependency_dir / "libopenrobotsoul_go2_bridge.so").is_file():
+        raise BuildError("Go2 bridge build completed without producing libopenrobotsoul_go2_bridge.so")
+    bridge_library = dependency_dir / "libopenrobotsoul_go2_bridge.so"
+    staged_dependencies.append(bridge_library)
 
     staged_binaries = []
     for target_name in GO2_TARGETS:
@@ -366,7 +409,7 @@ def build_project(
         "architecture": target_arch,
         "build_type": normalized_build_type,
         "source": [str(SDK_ROOT), str(PICOCLAW_ROOT)],
-        "targets": [*GO2_TARGETS, "picoclaw"],
+        "targets": [*GO2_TARGETS, "unitree_go2_bridge", "picoclaw"],
         "binaries": [path.relative_to(project_root).as_posix() for path in staged_binaries],
         "dependencies": [path.relative_to(project_root).as_posix() for path in staged_dependencies],
         "toolchain": str(toolchain_path) if toolchain_path else None,
