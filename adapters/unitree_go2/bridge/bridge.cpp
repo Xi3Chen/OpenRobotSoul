@@ -6,6 +6,7 @@
 #include <unitree/robot/go2/sport/sport_client.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -31,6 +32,7 @@ void set_error(char* buffer, size_t capacity, const std::string& message) {
 }
 
 struct Bridge {
+  std::mutex command_mutex;
   std::mutex mutex;
   std::unique_ptr<unitree::robot::go2::SportClient> client;
   std::unique_ptr<Subscriber> subscriber;
@@ -60,6 +62,7 @@ struct Bridge {
   }
 
   void close() noexcept {
+    std::lock_guard<std::mutex> command_lock(command_mutex);
     {
       std::lock_guard<std::mutex> lock(mutex);
       if (closed) return;
@@ -124,6 +127,146 @@ std::string json_escape(const std::string& value) {
 }
 
 bool valid(const Bridge* bridge) { return bridge != nullptr; }
+
+using SportClient = unitree::robot::go2::SportClient;
+
+double ranged_number(const double* numbers, size_t index, double minimum, double maximum,
+                     const char* name) {
+  const double value = numbers[index];
+  if (!std::isfinite(value) || value < minimum || value > maximum) {
+    throw std::runtime_error(std::string(name) + " is outside the Sport API range");
+  }
+  return value;
+}
+
+void require_shape(size_t number_count, size_t expected, int has_flag, bool flag_expected) {
+  if (number_count != expected || static_cast<bool>(has_flag) != flag_expected) {
+    throw std::runtime_error("unexpected sport parameters");
+  }
+}
+
+struct SportResult {
+  int32_t code = 0;
+  std::string extra;
+};
+
+int32_t call_named(SportClient& client, const std::string& action) {
+  using NoneCall = int32_t (SportClient::*)();
+  static const struct {
+    const char* name;
+    NoneCall call;
+  } actions[] = {
+      {"stop_move", &SportClient::StopMove},
+      {"balance_stand", &SportClient::BalanceStand},
+      {"stand_up", &SportClient::StandUp},
+      {"stand_down", &SportClient::StandDown},
+      {"sit", &SportClient::Sit},
+      {"rise_sit", &SportClient::RiseSit},
+      {"hello", &SportClient::Hello},
+      {"stretch", &SportClient::Stretch},
+      {"content", &SportClient::Content},
+      {"heart", &SportClient::Heart},
+      {"scrape", &SportClient::Scrape},
+      {"free_walk", &SportClient::FreeWalk},
+      {"static_walk", &SportClient::StaticWalk},
+      {"trot_run", &SportClient::TrotRun},
+      {"economic_gait", &SportClient::EconomicGait},
+      {"recovery_stand", &SportClient::RecoveryStand},
+      {"front_flip", &SportClient::FrontFlip},
+      {"front_jump", &SportClient::FrontJump},
+      {"front_pounce", &SportClient::FrontPounce},
+      {"dance1", &SportClient::Dance1},
+      {"dance2", &SportClient::Dance2},
+      {"left_flip", &SportClient::LeftFlip},
+      {"back_flip", &SportClient::BackFlip},
+      {"switch_avoid_mode", &SportClient::SwitchAvoidMode},
+  };
+  for (const auto& item : actions) {
+    if (action == item.name) return (client.*item.call)();
+  }
+  throw std::runtime_error("unknown Go2 sport action");
+}
+
+int32_t call_flag(SportClient& client, const std::string& action, bool enabled) {
+  using FlagCall = int32_t (SportClient::*)(bool);
+  static const struct {
+    const char* name;
+    FlagCall call;
+  } actions[] = {
+      {"pose", &SportClient::Pose},
+      {"classic_walk", &SportClient::ClassicWalk},
+      {"switch_joystick", &SportClient::SwitchJoystick},
+      {"handstand", &SportClient::HandStand},
+      {"free_bound", &SportClient::FreeBound},
+      {"free_jump", &SportClient::FreeJump},
+      {"free_avoid", &SportClient::FreeAvoid},
+      {"walk_upright", &SportClient::WalkUpright},
+      {"cross_step", &SportClient::CrossStep},
+      {"auto_recover_set", &SportClient::AutoRecoverSet},
+  };
+  for (const auto& item : actions) {
+    if (action == item.name) return (client.*item.call)(enabled);
+  }
+  throw std::runtime_error("unknown Go2 sport action");
+}
+
+SportResult invoke_sport(SportClient& client, const std::string& action,
+                         const double* numbers, size_t number_count,
+                         int has_flag, int flag) {
+  if (action == "damp") throw std::runtime_error("damp is not exposed");
+  if (has_flag != 0 && has_flag != 1) throw std::runtime_error("unexpected sport parameters");
+  if (flag != 0 && flag != 1) throw std::runtime_error("unexpected sport parameters");
+  if ((number_count > 0 && numbers == nullptr) || action.empty() || action.size() > 64) {
+    throw std::runtime_error("unexpected sport parameters");
+  }
+
+  SportResult result;
+  if (action == "move") {
+    require_shape(number_count, 3, has_flag, false);
+    result.code = client.Move(
+        static_cast<float>(ranged_number(numbers, 0, -2.5, 3.8, "vx")),
+        static_cast<float>(ranged_number(numbers, 1, -1.0, 1.0, "vy")),
+        static_cast<float>(ranged_number(numbers, 2, -4.0, 4.0, "vyaw")));
+    return result;
+  }
+  if (action == "euler") {
+    require_shape(number_count, 3, has_flag, false);
+    result.code = client.Euler(
+        static_cast<float>(ranged_number(numbers, 0, -0.75, 0.75, "roll")),
+        static_cast<float>(ranged_number(numbers, 1, -0.75, 0.75, "pitch")),
+        static_cast<float>(ranged_number(numbers, 2, -0.6, 0.6, "yaw")));
+    return result;
+  }
+  if (action == "speed_level") {
+    require_shape(number_count, 1, has_flag, false);
+    const double level = ranged_number(numbers, 0, -1.0, 1.0, "level");
+    if (level != std::trunc(level)) throw std::runtime_error("level must be an integer");
+    result.code = client.SpeedLevel(static_cast<int>(level));
+    return result;
+  }
+  if (action == "auto_recover_get") {
+    require_shape(number_count, 0, has_flag, false);
+    bool enabled = false;
+    result.code = client.AutoRecoverGet(enabled);
+    result.extra = std::string("\"enabled\":") + (enabled ? "true" : "false");
+    return result;
+  }
+  if (has_flag) {
+    require_shape(number_count, 0, has_flag, true);
+    result.code = call_flag(client, action, flag == 1);
+    return result;
+  }
+  require_shape(number_count, 0, has_flag, false);
+  result.code = call_named(client, action);
+  return result;
+}
+
+bool write_call_result(char* output, size_t capacity, const SportResult& result) {
+  const int needed = result.extra.empty()
+      ? std::snprintf(output, capacity, "{\"api_code\":%d}", result.code)
+      : std::snprintf(output, capacity, "{\"api_code\":%d,%s}", result.code, result.extra.c_str());
+  return needed > 0 && static_cast<size_t>(needed) < capacity;
+}
 }  // namespace
 
 extern "C" {
@@ -244,6 +387,51 @@ int go2_bridge_read_state(void* handle, char* output, size_t output_capacity,
     return 0;
   }
   return 1;
+}
+
+int go2_bridge_call(void* handle, const char* action, const double* numbers,
+                    size_t number_count, int has_flag, int flag,
+                    char* output, size_t output_capacity,
+                    char* error, size_t error_capacity) {
+  if (error && error_capacity) error[0] = '\0';
+  auto* bridge = static_cast<Bridge*>(handle);
+  if (!valid(bridge) || !action || !output || !output_capacity) {
+    set_error(error, error_capacity, "bridge handle, action, and output buffer are required");
+    return 0;
+  }
+  try {
+    std::lock_guard<std::mutex> command_lock(bridge->command_mutex);
+    SportClient* client = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(bridge->mutex);
+      const bool versions_match = !bridge->client_version.empty() &&
+          bridge->client_version == bridge->server_version;
+      if (bridge->closed || !bridge->client) {
+        set_error(error, error_capacity, "bridge is closed");
+        return 0;
+      }
+      if (!versions_match) {
+        set_error(error, error_capacity, "client/server API versions do not match");
+        return 0;
+      }
+      if (!bridge->fresh_locked()) {
+        set_error(error, error_capacity, "sport mode state is missing or stale");
+        return 0;
+      }
+      client = bridge->client.get();
+    }
+    const SportResult result = invoke_sport(*client, action, numbers, number_count, has_flag, flag);
+    if (!write_call_result(output, output_capacity, result)) {
+      set_error(error, error_capacity, "action output buffer is too small");
+      return 0;
+    }
+    return 1;
+  } catch (const std::exception& e) {
+    set_error(error, error_capacity, e.what());
+  } catch (...) {
+    set_error(error, error_capacity, "unknown error calling Unitree Go2 sport action");
+  }
+  return 0;
 }
 
 int go2_bridge_close(void* handle, char* error, size_t error_capacity) {

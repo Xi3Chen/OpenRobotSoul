@@ -10,7 +10,8 @@ from adapters.unitree_go2.sdk_driver import (
     _validate_state,
     create_sdk_driver,
 )
-from robotsoul.models import CapabilitySpec, ParameterSpec, utc_now
+from adapters.unitree_go2.actions import sport_capabilities
+from robotsoul.models import CapabilitySpec, ParameterSpec, RiskLevel, utc_now
 
 
 class FakeGo2Driver:
@@ -64,9 +65,18 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
     def setUp(self):
         self.profile = load_profile("unitree-go2-development")
 
-    def test_development_profile_loads_without_declaring_motion_skills(self):
-        adapter = UnitreeGo2Adapter(self.profile, FakeGo2Driver(self.profile.robot_id))
+    def test_development_profile_matches_the_sport_catalog(self):
+        declared = {item.name: item for item in self.profile.capabilities}
+        catalog = {item.name: item for item in sport_capabilities()}
 
+        self.assertEqual(declared, catalog)
+        self.assertEqual(self.profile.required_capabilities, ("sport.stop_move",))
+        self.assertNotIn("sport.damp", declared)
+        source = __import__("pathlib").Path("adapters/unitree_go2/bridge/bridge.cpp").read_text(encoding="utf-8")
+        for name in declared:
+            self.assertIn(f'"{name.removeprefix("sport.")}"', source)
+        self.assertIn("damp is not exposed", source)
+        adapter = UnitreeGo2Adapter(self.profile, FakeGo2Driver(self.profile.robot_id))
         adapter.connect()
 
         self.assertTrue(adapter.health())
@@ -135,19 +145,18 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "GO2_NETWORK_INTERFACE"):
                 create_sdk_driver(self.profile)
 
-    def test_sdk_driver_has_no_motion_capabilities_or_dispatch(self):
-        from unittest.mock import Mock
-
+    def test_disconnected_driver_advertises_nothing_and_rejects_motion(self):
         driver = UnitreeGo2SdkDriver(
             self.profile, "eth0", bridge_library="bridge.so", library_loader=lambda _path: None
         )
         self.assertEqual(driver.discover_capabilities(), {})
         command = Command(
             "command-1", "task-1", "trace-1", self.profile.robot_id,
-            "base.move_distance", {"distance_m": 0.1, "max_speed_mps": 0.1},
-            utc_now() + timedelta(seconds=1),
+            "sport.stand_up", {},
+            utc_now() + timedelta(seconds=2),
+            risk_level=RiskLevel.CONFIRM,
         )
-        self.assertEqual(driver.execute(command)[0].error_code, "motion_disabled")
+        self.assertEqual(driver.execute(command)[0].error_code, "bridge_unhealthy")
         self.assertEqual(driver.cancel(command).error_code, "no_active_command")
 
     def test_sdk_driver_requires_bridge_library_and_linux(self):
@@ -266,19 +275,22 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         self.assertEqual(observations[0].robot_id, self.profile.robot_id)
         self.assertEqual(observations[0].event_type, "robot.sport_state")
         self.assertEqual(observations[0].payload["velocity"], [0.1, 0.0, 0.0])
-        self.assertEqual(driver.discover_capabilities(), {})
+        self.assertIn("sport.stop_move", driver.discover_capabilities())
+        self.assertNotIn("sport.damp", driver.discover_capabilities())
 
         state["observed_at"] = (utc_now() - timedelta(seconds=3)).isoformat()
         self.assertEqual(driver.drain_observations(), ())
 
-    def test_empty_profile_rejects_commands_without_calling_vendor_bridge(self):
+    def test_unadvertised_action_is_rejected_without_calling_the_driver(self):
         driver = FakeGo2Driver(self.profile.robot_id)
         adapter = UnitreeGo2Adapter(self.profile, driver)
-        runtime = RobotRuntime.from_profile(self.profile, agent=_FixedAgent(), adapter=adapter)
+        adapter.connect()
+        adapter.discover_capabilities()
         command = Command(
             "command-1", "task-1", "trace-1", self.profile.robot_id,
-            "base.move_distance", {"distance_m": 0.1, "max_speed_mps": 0.1},
-            utc_now() + timedelta(seconds=1),
+            "sport.stand_up", {},
+            utc_now() + timedelta(seconds=2),
+            risk_level=RiskLevel.CONFIRM,
         )
 
         feedback = adapter.execute(command)
@@ -286,7 +298,74 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         self.assertEqual(feedback[0].status, FeedbackStatus.FAILED)
         self.assertEqual(feedback[0].error_code, "command_rejected")
         self.assertEqual(driver.executed, [])
-        self.assertEqual(runtime.available_tools(), {})
+
+    def test_runtime_requires_the_stop_action(self):
+        driver = FakeGo2Driver(self.profile.robot_id)
+        adapter = UnitreeGo2Adapter(self.profile, driver)
+
+        with self.assertRaisesRegex(RuntimeError, "sport.stop_move"):
+            RobotRuntime.from_profile(self.profile, agent=_FixedAgent(), adapter=adapter)
+
+        self.assertTrue(driver.closed)
+
+    def test_runtime_exposes_advertised_sport_actions_by_risk(self):
+        capabilities = {item.name: item for item in sport_capabilities()}
+        driver = FakeGo2Driver(self.profile.robot_id, capabilities)
+        adapter = UnitreeGo2Adapter(self.profile, driver)
+        runtime = RobotRuntime.from_profile(self.profile, agent=_FixedAgent(), adapter=adapter)
+        self.addCleanup(runtime.close)
+
+        self.assertIn("sport.stand_up", runtime.available_tools())
+        self.assertIn("sport.move", runtime.available_tools())
+        self.assertNotIn("sport.front_flip", runtime.available_tools())
+        self.assertIn("sport.front_flip", runtime.dashboard_tools())
+
+    def test_sdk_driver_dispatches_stand_up_and_rejects_ranges_locally(self):
+        calls = []
+        driver = _connected_driver(self.profile, calls)
+        accepted = driver.execute(_sport_command(
+            self.profile, "sport.stand_up", {}, RiskLevel.CONFIRM,
+        ))
+        rejected = driver.execute(_sport_command(
+            self.profile, "sport.move",
+            {"vx": 9, "vy": 0, "vyaw": 0, "duration_ms": 200},
+            RiskLevel.CONFIRM,
+        ))
+
+        self.assertEqual([item.status for item in accepted], [
+            FeedbackStatus.ACCEPTED, FeedbackStatus.RUNNING, FeedbackStatus.SUCCEEDED,
+        ])
+        self.assertTrue(accepted[-1].evidence["condition_met"])
+        self.assertEqual(calls, ["stand_up"])
+        self.assertEqual(rejected[0].error_code, "invalid_parameters")
+
+    def test_sdk_driver_bounds_move_with_stop_and_cancel(self):
+        import threading
+
+        calls = []
+        entered = threading.Event()
+        driver = _connected_driver(self.profile, calls, on_move=entered.set)
+        command = _sport_command(
+            self.profile, "sport.move",
+            {"vx": 0.2, "vy": 0.0, "vyaw": 0.0, "duration_ms": 1500},
+            RiskLevel.CONFIRM,
+        )
+        box = {}
+
+        def run():
+            box["feedback"] = driver.execute(command)
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        self.assertTrue(entered.wait(1))
+        cancellation = driver.cancel(command)
+        worker.join(2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(cancellation.status, FeedbackStatus.CANCELLED)
+        self.assertEqual(box["feedback"][0].status, FeedbackStatus.CANCELLED)
+        self.assertEqual(calls[0], "move")
+        self.assertIn("stop_move", calls)
 
     def test_profile_bounds_intersect_driver_capability_bounds(self):
         move = CapabilitySpec(
@@ -337,6 +416,37 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
 class _FixedAgent:
     def plan(self, *_args, **_kwargs):
         return None
+
+
+def _sport_command(profile, skill, parameters, risk, seconds=8):
+    return Command(
+        "command-1", "task-1", "trace-1", profile.robot_id,
+        skill, parameters,
+        utc_now() + timedelta(seconds=seconds),
+        risk_level=risk,
+    )
+
+
+def _connected_driver(profile, calls, on_move=None):
+    import ctypes
+    from unittest.mock import Mock
+
+    def call(_handle, action, _numbers, _count, _has_flag, _flag, output, _output_capacity, _error, _error_capacity):
+        name = action.decode("utf-8") if isinstance(action, (bytes, bytearray)) else str(action)
+        calls.append(name)
+        if name == "move" and on_move is not None:
+            on_move()
+        payload = b'{"api_code":0}\0'
+        ctypes.memmove(output, payload, len(payload))
+        return 1
+
+    driver = UnitreeGo2SdkDriver(profile, "eth0", bridge_library="bridge.so")
+    driver._handle = 1
+    driver._library = Mock()
+    driver._library.go2_bridge_health.return_value = 1
+    driver._library.go2_bridge_call.side_effect = call
+    driver._library.go2_bridge_read_state.return_value = 0
+    return driver
 
 
 def _write_robot_config(robot_module, profile_id=None):

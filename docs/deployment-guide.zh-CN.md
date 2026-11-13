@@ -1,16 +1,16 @@
 # OpenRobotSoul 开发与部署指南
 
-本文按当前 `main` 分支编写，覆盖 Windows 开发、常见 Linux 发行版依赖安装，以及在 aarch64 Go2 主机上构建和验证只读状态 bridge。
+本文按当前 `main` 分支编写，覆盖 Windows 开发、常见 Linux 发行版依赖安装，以及在 aarch64 Go2 主机上构建和验证 Sport 动作 bridge。
 
-**能力边界：**当前版本只连接 Unitree SDK 并读取 `rt/sportmodestate`，Go2 profile 的 `capabilities` 为空。它不会让机器人站立、移动或执行其他动作。`status` 通过只表示只读通信链路可用，不代表动作安全已经验证。
+**能力边界：**当前版本连接 Unitree SDK，读取 `rt/sportmodestate`，并暴露 profile 中的 SportClient 动作。速度移动有本地时长上限，到时或取消会调用 `StopMove`。`Damp` 和低级电机控制没有接入。`status` 通过表示通信和动作接口可用，不代表身体姿态、断连和急停已经验收。
 
 ## 1. 环境选择
 
 | 场景 | 推荐环境 | 结果 |
 | --- | --- | --- |
 | Windows 开发 | Windows 10/11、Python 3.11+ | Python 测试、模拟器、Dashboard、wheel |
-| Linux x86_64 开发机 | Ubuntu/Debian、Fedora、Arch 等 | 构建 x86_64 SDK 示例和只读 bridge |
-| Go2 实机 | Linux aarch64 | 在机器人本机编译并运行 aarch64 只读 bridge |
+| Linux x86_64 开发机 | Ubuntu/Debian、Fedora、Arch 等 | 构建 x86_64 SDK 示例和 Sport bridge |
+| Go2 实机 | Linux aarch64 | 在机器人本机编译并运行 aarch64 Sport bridge |
 
 SDK checkout 目前只包含 Linux `x86_64` 和 `aarch64` 预编译库。Windows/macOS 不能直接链接这些 Linux `.so`。Windows 可用 WSL 做 Linux x86_64 编译验证，但 x86_64 产物不能部署到 aarch64 机器人。最简单可靠的 aarch64 路径是在机器人本机编译。
 
@@ -233,7 +233,7 @@ set +a
 export OPENROBOTSOUL_GO2_BRIDGE_LIBRARY=/opt/OpenRobotSoul/build/linux-aarch64/lib/libopenrobotsoul_go2_bridge.so
 ```
 
-### 6.5 检查动态库并验证只读状态
+### 6.5 检查动态库并验证连接
 
 ```bash
 cd /opt/OpenRobotSoul
@@ -295,4 +295,4 @@ libddscxx.so  libddscxx.so.0
 
 ## 10. 动作能力上线前仍需完成
 
-当前文档完成的是只读状态部署。若之后要让 Go2 执行动作，仍需针对实际固件验证并记录：单位与限值、动作完成反馈、超时停止、取消和断连行为、API 控制权与遥控器优先级、实体急停。完成这些之前，不要在 profile 中添加运动能力，也不要使用 `go2_low_level` 等 SDK 示例替代安全闭环。
+Sport 动作已经接入 profile。上实机前仍需针对实际固件记录：单位与限值是否和 SDK 公布范围一致、动作完成反馈、超时停止、取消和断连行为、API 控制权与遥控器优先级、实体急停。不要使用 `go2_low_level` 等 SDK 示例替代这套高层动作闭环。

@@ -12,7 +12,7 @@ python -m robotsoul.build
 
 ## 输出布局
 
-Go2 C++ 示例、只读状态 bridge 和 PicoClaw 会由一次构建命令统一构建。所有构建内容都位于项目根目录 `build/`：
+Go2 C++ 示例、Sport 动作 bridge 和 PicoClaw 会由一次构建命令统一构建。所有构建内容都位于项目根目录 `build/`：
 
 ```text
 build/
@@ -40,4 +40,4 @@ build/
 
 当前 Unitree SDK checkout 的 CMake 工程直接导入 `lib/<arch>/libunitree_sdk2.a`、`thirdparty/lib/<arch>/libddsc.so` 和 `libddscxx.so`，预编译库只适用于 Linux `x86_64`/`aarch64`。构建工具会列出这些实际可用目标；Windows/macOS 或缺失架构必须先放入对应 SDK/依赖并调整 CMake 工程，工具不会假装完成构建。
 
-构建出的二进制包括 Go2 官方高层服务、视频、VUI 示例、`picoclaw` CLI 和只读 `libopenrobotsoul_go2_bridge.so`。运行 Go2 只读状态检查还需设置 `OPENROBOTSOUL_GO2_NETWORK_INTERFACE` 为连接机器人网络的本机网卡名；Python coding-agent adapter 默认从 `build/<platform>-<arch>/bin/` 加载 PicoClaw，仍可通过 `OPENROBOTSOUL_PICOCLAW_BINARY` 覆盖。bridge 只读 DDS 运动状态，不包含运动 API；官方示例和 bridge 的编译成功不代表实机动作经过验证。
+构建出的二进制包括 Go2 官方高层服务、视频、VUI 示例、`picoclaw` CLI 和带 Sport 动作的 `libopenrobotsoul_go2_bridge.so`。运行 Go2 还需设置 `OPENROBOTSOUL_GO2_NETWORK_INTERFACE` 为连接机器人网络的本机网卡名；Python coding-agent adapter 默认从 `build/<platform>-<arch>/bin/` 加载 PicoClaw，仍可通过 `OPENROBOTSOUL_PICOCLAW_BINARY` 覆盖。bridge 读取 DDS 运动状态并调用 profile 中的 Sport 动作；官方示例和 bridge 的编译成功不代表实机动作经过验证。

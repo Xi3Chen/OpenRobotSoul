@@ -6,7 +6,7 @@ from robotsoul.profiles import RobotProfile
 
 
 def create_driver(profile: RobotProfile):
-    """Create the read-only driver for the pinned Unitree SDK2 bridge."""
+    """Create the SportClient driver for the pinned Unitree SDK2 bridge."""
     return create_sdk_driver(profile)
 
 

@@ -2,11 +2,574 @@
   "profile_schema_version": 2,
   "profile_id": "unitree-go2-development",
   "robot_module": "unitree_go2",
-  "profile_version": "0.1.0-dev",
+  "profile_version": "0.2.0-dev",
   "manufacturer": "Unitree",
   "model": "Go2",
   "adapter_id": "unitree-go2",
   "robot_id": "robot-go2-development",
-  "required_capabilities": [],
-  "capabilities": []
+  "required_capabilities": [
+    "sport.stop_move"
+  ],
+  "capabilities": [
+    {
+      "name": "sport.stop_move",
+      "risk_level": "normal",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": true
+    },
+    {
+      "name": "sport.balance_stand",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.stand_up",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.stand_down",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.sit",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.rise_sit",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.hello",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.stretch",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.content",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.heart",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.scrape",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.free_walk",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.static_walk",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.trot_run",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.economic_gait",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.recovery_stand",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.front_flip",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.front_jump",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.front_pounce",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.dance1",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.dance2",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.left_flip",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.back_flip",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.switch_avoid_mode",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.pose",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.classic_walk",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.switch_joystick",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.handstand",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.free_bound",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.free_jump",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.free_avoid",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.walk_upright",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.cross_step",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.auto_recover_set",
+      "risk_level": "high",
+      "allowed_callers": [
+        "dashboard"
+      ],
+      "requires_operator_confirmation": true,
+      "parameters": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.euler",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {
+        "roll": {
+          "type": "number",
+          "min": -0.75,
+          "max": 0.75
+        },
+        "pitch": {
+          "type": "number",
+          "min": -0.75,
+          "max": 0.75
+        },
+        "yaw": {
+          "type": "number",
+          "min": -0.6,
+          "max": 0.6
+        }
+      },
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.move",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {
+        "vx": {
+          "type": "number",
+          "min": -2.5,
+          "max": 3.8
+        },
+        "vy": {
+          "type": "number",
+          "min": -1.0,
+          "max": 1.0
+        },
+        "vyaw": {
+          "type": "number",
+          "min": -4.0,
+          "max": 4.0
+        },
+        "duration_ms": {
+          "type": "number",
+          "min": 200.0,
+          "max": 2000.0
+        }
+      },
+      "interruptible": true,
+      "timeout_ms": 8000,
+      "required": false
+    },
+    {
+      "name": "sport.speed_level",
+      "risk_level": "confirm",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {
+        "level": {
+          "type": "number",
+          "min": -1.0,
+          "max": 1.0
+        }
+      },
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    },
+    {
+      "name": "sport.auto_recover_get",
+      "risk_level": "normal",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false
+    }
+  ]
 }

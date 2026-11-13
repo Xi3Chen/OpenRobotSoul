@@ -31,7 +31,7 @@ adapters/
 }
 ```
 
-仓库当前配置选择 `unitree_go2`，表示当前开发目标为 Unitree Go2。SDK bridge 只读链路需要 Linux 构建产物与显式网卡配置；缺少时启动失败属于预期，不得静默回退到 simulator。本地模拟运行显式传入 `--robot-module simulator`。运动能力保持关闭，直到目标固件的单位、限制、反馈和停止语义经过验证。
+仓库当前配置选择 `unitree_go2`，表示当前开发目标为 Unitree Go2。SDK bridge 需要 Linux 构建产物与显式网卡配置；缺少时启动失败属于预期，不得静默回退到 simulator。本地模拟运行显式传入 `--robot-module simulator`。profile 已声明 Sport 动作；目标固件的单位、完成反馈和断连语义仍待实机验收。
 
 `robot_module` 是必填的静态注册 ID；`profile_id` 可选，缺省时使用该模块 `module.json` 中的 `default_profile`。不得在配置中放 Python import path、动态库路径、可执行代码或命令。CLI 的 `--robot-module` / `--profile` 只覆盖本次运行，不会修改部署配置。
 

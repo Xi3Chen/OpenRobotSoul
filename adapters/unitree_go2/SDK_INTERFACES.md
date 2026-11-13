@@ -28,14 +28,14 @@ Go2 专属的 C++ bridge、参数转换和 RobotHarness 契约映射应放在本
 |---|---|---|---|
 | P0 | SDK 初始化、服务 API 版本、连接健康、状态订阅 | 适配器连接、健康检查和遥测 | 先做只读和诊断；接口存在不等于已实现连接检测 |
 | P0 | `LowState`、`SportModeState` | IMU、运动模式、电池、电机和足端等观测 | 只读；检查数据新鲜度、CRC/丢包和单位后再规范化 |
-| P1 | `StopMove`、站起/趴下/坐下 | 基础运动技能和本地停止请求 | 只有实机验证后才加入非空 profile；`StopMove` 不是硬件急停 |
-| P1 | `Move(vx, vy, vyaw)` | 有限时长的底盘速度控制 | 不直接暴露 SDK 原始参数；必须由 profile 与本地策略限幅、设定有效期并实现超时停止 |
+| P1 | `StopMove`、站起/趴下/坐下 | 基础运动技能和本地停止请求 | 已进入 development profile；`StopMove` 不是硬件急停 |
+| P1 | `Move(vx, vy, vyaw)` | 有限时长的底盘速度控制 | 已进入 development profile；按 SDK 公布范围限幅，本地 200–2000 毫秒后调用 `StopMove` |
 | P2 | 障碍物避让移动、速度等级、步态、姿态控制 | 受控导航或运动模式 | 单独能力、默认关闭；先验证坐标系、单位、控制权和中断语义 |
 | P2 | Video、VUI、Utrack、配置和服务控制 | 感知数据、设备设置及维护 | 根据隐私和权限单独启用，不与一般运动技能混为一组 |
 | P3 | `rt/lowcmd` 和逐电机控制 | 研究、硬件实验或受信任的本地控制器 | 不提供给 Agent；需单独的实时、安全与控制权设计 |
-| 禁用 | 翻滚、跳跃、倒立、舞蹈等特技 | SDK 示例/厂商动作 | 默认不注册，不纳入 MVP 可执行能力 |
+| 高风险 | 翻滚、跳跃、倒立、舞蹈等特技 | SDK 示例/厂商动作 | 已包装，只允许 Dashboard 操作员确认；不是普通 Agent 技能 |
 
-当前 `profiles/unitree-go2-development.json` 没有声明技能，因此即使 bridge 实现，也不会因 SDK API 可用而自动启用运动命令。
+当前 `profiles/unitree-go2-development.json` 声明 bridge 已包装的 SportClient 动作。未列入 profile 的 SDK API 不会变成技能。
 
 ## 高层运动与模式
 
@@ -115,7 +115,7 @@ Go2 SDK 还带有以下消息定义，可作为后续传感器接入候选：
 
 ## C++ bridge 边界建议
 
-当前实现提供 `bridge/` 下的只读 C ABI bridge：DDS domain 固定为 `0`，必须显式传入网络接口；进程内只允许一个 bridge handle，以匹配 SDK 的全局 DDS factory；初始化 `SportClient` 并拒绝客户端/服务端 API version 不一致；订阅 `rt/sportmodestate`，只在状态两秒内新鲜时报告健康并输出运动模式、速度、位置、SDK 时间戳和错误码。它不会调用任何 Sport 动作 API，driver 的能力发现为空，所有运动命令均失败关闭。bridge 已在 WSL Linux 上通过当前 checkout 的 x86_64 SDK 完成链接；仍未连接 Go2 实机验证，目标机网络/固件状态行为需要部署确认。
+当前实现提供 `bridge/` 下的 C ABI bridge：DDS domain 固定为 `0`，必须显式传入网络接口；进程内只允许一个 bridge handle，以匹配 SDK 的全局 DDS factory；初始化 `SportClient` 并拒绝客户端/服务端 API version 不一致；订阅 `rt/sportmodestate`，只在状态两秒内新鲜时报告健康并输出运动模式、速度、位置、SDK 时间戳和错误码。`go2_bridge_call` 调用除 `Damp` 以外的 SportClient 动作，并在 bridge 内拒绝超出 SDK 公布范围的 Move、Euler 和 SpeedLevel 参数。速度指令的持续时间由 Python driver 控制，结束或取消时调用 `StopMove`。低级电机命令和避障位移没有接入。bridge 仍需在目标机网络和固件上确认实机行为。
 
 Go2 C++ bridge 应只做厂商 SDK 相关工作：初始化 DDS/client、订阅消息、调用选定的高层客户端、转换单位/坐标系、生成明确成功/失败结果。Python 的 `UnitreeGo2Driver` 继续负责映射到 `CapabilitySpec`、`Observation`、`Command` 和 `Feedback`；不要让客户端方法列表自动变成可发现技能。
 
@@ -133,4 +133,4 @@ Go2 C++ bridge 应只做厂商 SDK 相关工作：初始化 DDS/client、订阅�
 - 验证 DDS 消息频率、时间戳质量、丢包/CRC、字段单位/坐标系和关节索引；过期或异常反馈不参与成功判定。
 - 按需验证视频格式与隐私边界；确认 UWB/LiDAR/点云/音频的 topic、设备选配和 Go2 固件支持情况。
 
-完成以上验证之前，Go2 development profile 保持无运动技能；API 清单仅用于确定后续 C++ bridge 的实现候选。
+以上实机核对仍未完成。development profile 已经声明包装后的 Sport 动作，但 API 返回 0 不能代替这些核对结果。

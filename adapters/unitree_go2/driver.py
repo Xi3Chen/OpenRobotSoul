@@ -10,7 +10,8 @@ class UnitreeGo2Driver(Protocol):
 
     Implementations own SDK-specific imports, connection/authentication details,
     unit/frame conversion, hardware feedback mapping, and local stop behavior.
-    They must never treat a successful SDK call as proof that a skill completed.
+    A zero Sport API code means the service accepted the request. It does not prove
+    that the body finished the pose.
     Report only skills supported by the connected device/firmware; the adapter
     intersects that list with profile-declared safety bounds before exposure.
     """

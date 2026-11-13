@@ -31,4 +31,4 @@ JSONL 中只有 `started` 而缺少 `completed` 的 `call_id` 表示调用未留
 - 默认 JSONL 文件以仅当前用户读写权限创建；运行目录仍应按设备数据策略保护并定期轮转。
 - 普通动作的 `started` 事件写入失败时，runtime 拒绝开始该 tool，避免发生无法审计的动作。取消/停止调用属于 fail-safe 路径，即使开始事件写入失败仍会尝试停止机器人。完成记录写入失败不会抹掉或伪造 adapter 的实际返回，普通动作的问题会添加到本次 `TaskResult.history` 的 `tool.audit_write_failed` 事件中。
 
-该机制记录的是 Python adapter tool 边界。Go2 C++ bridge 当前提供只读状态接口，不发动作调用；后续如需 DDS transport 诊断或设备端原始日志，应在 bridge 内增加结构化事件，不应将高频遥测全量写入同一个动作审计文件。
+该机制记录的是 Python adapter tool 边界。Go2 C++ bridge 会发出 Sport 动作调用；DDS transport 诊断或设备端原始日志应在 bridge 内增加结构化事件，不应将高频遥测全量写入同一个动作审计文件。
