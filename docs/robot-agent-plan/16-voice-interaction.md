@@ -111,6 +111,8 @@ VAD 只回答“此刻有语音”，不回答“这句话是对机器人说的�
 
 `input_device` / `output_device` 只允许 `default`、`usb-microphone` 和 `usb-speaker`；实际设备可由对应的 `ROBOTSOUL_VOICE_INPUT_DEVICE` / `ROBOTSOUL_VOICE_OUTPUT_DEVICE` 环境变量覆盖。`follow_up_seconds`、唤醒阈值、静音端点和 call grace 均须在目标环境调参。配置项不能绕过控制策略、扩大技能或允许任意模型代码。
 
+Dashboard 设置页的「音频」可以修改机器人名称、唤醒短语、语言、输入/输出设备和三段会话时间，并写回这份 `config/voice.json`。名称和会话时间会作用于当前正在运行的语音服务；唤醒短语、语言和设备在下次启动语音服务后生效。模型 ID 不能从设置页改成静态 registry 之外的值。
+
 ## 语音事件日志
 
 Dashboard 启动语音服务时，把唤醒命中和最终识别文本追加到 `logs/voice_events.jsonl`。每一行是一个 JSON 事件，字段为 `event_id`、`kind`、`timestamp`、`source`、`state` 和 `text`。

@@ -32,7 +32,8 @@ Primary persona: robot operator or maintainer using a phone near the robot or a 
 - Controls: authorized typed operation forms and text task entry.
 - Capabilities: risk, callers, parameter constraints, state and unavailable reason.
 - Activity: action, review and audit timeline.
-- Authentication: pairing/login and operator session state.
+- Authentication: operator username and password. Usernames are stored in plaintext; passwords are stored as salted PBKDF2-HMAC-SHA256 digests, not MD5 or recoverable ciphertext.
+- Settings: cloud model path, voice/audio configuration, and operator accounts.
 
 Voice interaction is a later surface under Controls. It must share the runtime policy path and use secure browser media APIs.
 

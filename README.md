@@ -54,7 +54,7 @@ Python MVP 已启动，当前包含确定性模拟适配器、两个能力不同
 
 PicoClaw 已作为固定提交的 Git 子模块登记在 `third_party/picoclaw`，作为 Pi coding agent 的先行替代方案供隔离工作区编码能力评估；它不是当前 Python MVP 的运行时 Agent。集成约束和验收条件见 [Agent 选型与 PicoClaw 集成决策](docs/robot-agent-plan/11-agent-tooling-decision.md)。
 
-Go2 已接入 SportClient 高层动作：普通姿态和限时移动走确认流程，翻滚、跳跃、舞蹈、倒立和控制源切换只允许 Dashboard 操作员确认后调用。`Damp` 与低级电机控制没有接入。速度指令到时或取消时会发送 `StopMove`。语音 Voice Service、中文唤醒/流式识别、TTS 路由和 Dashboard 局域网通话代码已接入主仓库；模型、ARM64 运行包和 Python wheel 仍需按资源清单下载并在目标板安装。Go2 机身麦克风/扬声器路由、真实 WebRTC/PyAV 兼容性和 10 小时长跑尚未验证。这些动作的单位、完成姿态、断连后的机身行为仍没有在目标固件上完成验收；API 接受请求不等于身体动作已经完成。
+Go2 已接入 SportClient 高层动作：普通姿态、步态和限时移动走确认流程，翻滚、跳跃、舞蹈、倒立、摔倒恢复、手柄控制源和自动恢复开关只允许 Dashboard 操作员确认后调用。`Damp` 与低级电机控制没有接入。速度指令到时或取消时会发送 `StopMove`。语音 Voice Service、中文唤醒/流式识别、TTS 路由和 Dashboard 局域网通话代码已接入主仓库；模型、ARM64 运行包和 Python wheel 仍需按资源清单下载并在目标板安装。Go2 机身麦克风/扬声器路由、真实 WebRTC/PyAV 兼容性和 10 小时长跑尚未验证。这些动作的单位、完成姿态、断连后的机身行为仍没有在目标固件上完成验收；API 接受请求不等于身体动作已经完成。
 
 ## 运行 MVP
 
@@ -76,12 +76,15 @@ python -m robotsoul.build --platform linux --arch x86_64
 
 ### Dashboard
 
-本地试用时启动 simulator Dashboard，PIN 至少 8 个字符；未设置环境变量时会在终端安全提示输入：
+本地试用时启动 simulator Dashboard。首次启动会创建操作员账户，密码至少 8 个字符；未设置环境变量时会在终端询问用户名，并隐藏输入密码：
 
 ```powershell
-$env:ROBOTSOUL_DASHBOARD_PIN = "替换为本地操作员PIN"
+$env:ROBOTSOUL_DASHBOARD_USER = "operator"
+$env:ROBOTSOUL_DASHBOARD_PASSWORD = "替换为至少8个字符的密码"
 python -m robotsoul --robot-module simulator dashboard
 ```
+
+账户名明文写入 `config/operators.json`，密码以独立盐的 PBKDF2-HMAC-SHA256 摘要保存，不使用 MD5 或明文。该文件已有账户后，再次启动不再读取上面两个环境变量。
 
 浏览器打开 `http://127.0.0.1:8765`。该 HTTP 地址只绑定本机，手机或其他局域网设备不能通过它控制机器人。局域网访问需绑定具体 LAN IP 并提供 TLS 证书，证书需包含该 IP 的 SAN，且手机应信任签发证书的 CA：
 
@@ -89,7 +92,7 @@ python -m robotsoul --robot-module simulator dashboard
 python -m robotsoul --robot-module simulator dashboard --host 192.168.1.20 --tls-cert cert.pem --tls-key key.pem
 ```
 
-`confirm` 技能需通过 `RobotRuntime.from_profile(..., safety_reviewer=...)` 配置无工具 SafetyReviewer；未配置或复核失败时会拒绝调用。`high` 技能只允许 Dashboard 操作员调用，并要求重新输入 PIN。当前默认配置仍指向 Go2，但 profile 没有动作能力；示例显式选择 simulator。Dashboard 已接入 WebRTC 局域网通话 API 与网页通话界面；模型资源、目标板设备路由、ARM64 PyAV/WebRTC 兼容性和实机长跑尚待验收。安全边界、API 和风险等级定义见[Dashboard 与接口风险门禁](docs/robot-agent-plan/15-dashboard.md)。
+Agent 调用 `confirm` 技能需通过 `RobotRuntime.from_profile(..., safety_reviewer=...)` 配置无工具 SafetyReviewer；未配置或复核失败时会拒绝 Agent 调用。已登录的 Dashboard 操作员可以确认并执行这些技能。`high` 技能只允许 Dashboard 操作员调用，并要求重新输入当前账户密码。设置页可以修改这一条云端模型路径、音频配置和登录账户。当前默认配置仍指向 Go2，但 profile 没有动作能力；示例显式选择 simulator。Dashboard 已接入 WebRTC 局域网通话 API 与网页通话界面；模型资源、目标板设备路由、ARM64 PyAV/WebRTC 兼容性和实机长跑尚待验收。安全边界、API 和风险等级定义见[Dashboard 与接口风险门禁](docs/robot-agent-plan/15-dashboard.md)。
 
 ## PicoClaw 编码任务
 

@@ -10,4 +10,6 @@ build/
 *.egg-info/
 .omx/
 certs/
+config/operators.json
+config/llm.json
 third_party/mihomo/

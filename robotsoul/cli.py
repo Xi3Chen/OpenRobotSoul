@@ -7,6 +7,7 @@ import os
 import sys
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from robotsoul.audit import JsonlToolCallAuditSink
@@ -44,7 +45,11 @@ def main() -> None:
     run_parser.add_argument("text", nargs="+", help="Task text, for example: 抬头")
     subparsers.add_parser("demo", help="Run the built-in Chinese head-look demo")
     dashboard_parser = subparsers.add_parser("dashboard", help="Run the local operator Dashboard")
-    dashboard_parser.add_argument("--operator-pin-env", default="ROBOTSOUL_DASHBOARD_PIN", help="Environment variable for the operator PIN; prompted securely when unset")
+    dashboard_parser.add_argument("--operator-user-env", default="ROBOTSOUL_DASHBOARD_USER", help="Environment variable for the initial operator username")
+    dashboard_parser.add_argument("--operator-password-env", default="ROBOTSOUL_DASHBOARD_PASSWORD", help="Environment variable for the initial operator password; prompted securely when unset")
+    dashboard_parser.add_argument("--operators", help="Operator account file; usernames are plaintext and passwords are PBKDF2 digests")
+    dashboard_parser.add_argument("--llm-config", help="Local cloud model settings file")
+    dashboard_parser.add_argument("--voice-config", help="Voice configuration file edited by Dashboard audio settings")
     dashboard_parser.add_argument("--host", default="127.0.0.1", help="Bind address; LAN addresses require TLS")
     dashboard_parser.add_argument("--port", type=int, default=8765, help="Dashboard port")
     dashboard_parser.add_argument("--tls-cert", help="PEM certificate for LAN HTTPS")
@@ -186,7 +191,27 @@ def main() -> None:
     except (RuntimeError, ValueError) as exc:
         parser.error(str(exc))
     if args.command == "dashboard":
-        operator_pin = os.environ.get(args.operator_pin_env) or getpass.getpass("Dashboard operator PIN: ")
+        from robotsoul.settings import OperatorDirectory, default_llm_path, default_operators_path, default_voice_config_path
+
+        operators_path = Path(args.operators) if args.operators else default_operators_path()
+        llm_path = Path(args.llm_config) if args.llm_config else default_llm_path()
+        voice_config_path = Path(args.voice_config) if args.voice_config else default_voice_config_path()
+        try:
+            directory = OperatorDirectory(operators_path)
+            if not directory.usernames():
+                username = os.environ.get(args.operator_user_env)
+                password = os.environ.get(args.operator_password_env)
+                if not username:
+                    if not sys.stdin.isatty():
+                        parser.error(f"Set {args.operator_user_env} or create {operators_path}")
+                    username = input("Dashboard operator username: ")
+                if not password:
+                    if not sys.stdin.isatty():
+                        parser.error(f"Set {args.operator_password_env} or create {operators_path}")
+                    password = getpass.getpass("Dashboard operator password: ")
+                directory.upsert(username, password)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
         voice_service = None
         voice_media = None
         voice_event_log = None
@@ -197,12 +222,16 @@ def main() -> None:
                 from robotsoul.voice.media import VoiceMediaBridge
 
                 voice_event_log = JsonlVoiceEventLog()
-                voice_service, _voice_config = create_voice_service(runtime, event_log=voice_event_log)
+                voice_service, _voice_config = create_voice_service(
+                    runtime, config_path=voice_config_path, event_log=voice_event_log
+                )
                 voice_service.start()
                 voice_media = VoiceMediaBridge(voice_service)
             run_dashboard(
                 runtime,
-                operator_pin=operator_pin,
+                operators_path=operators_path,
+                llm_path=llm_path,
+                voice_config_path=voice_config_path,
                 host=args.host,
                 port=args.port,
                 tls_cert=args.tls_cert,

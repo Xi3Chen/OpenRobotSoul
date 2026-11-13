@@ -27,14 +27,17 @@
         <button class="nav-item" type="button" data-view="capabilities">能力</button>
         <button class="nav-item" type="button" data-view="activity">活动</button>
         <button class="nav-item" type="button" data-view="monitor">监控</button>
+        <button class="nav-item" type="button" data-view="settings">设置</button>
       </nav>
 
       <section id="login-view" class="login-view">
         <form id="login-form" class="login-form">
           <p class="eyebrow">本地操作员会话</p>
           <h1>登录机器人控制台</h1>
-          <label for="operator-pin">操作员 PIN</label>
-          <input id="operator-pin" name="pin" type="password" inputmode="numeric" autocomplete="current-password" required>
+          <label for="operator-username">账户</label>
+          <input id="operator-username" name="username" type="text" autocomplete="username" required>
+          <label for="operator-password">密码</label>
+          <input id="operator-password" name="password" type="password" autocomplete="current-password" required>
           <button class="primary-button" type="submit">登录</button>
           <p id="login-error" class="form-error" role="alert"></p>
         </form>
@@ -52,10 +55,19 @@
 
           <div class="status-band">
             <div class="status-primary">
-              <span id="health-indicator" class="health-dot unknown"></span>
-              <div>
-                <span class="field-label">连接与健康</span>
-                <strong id="health-label">状态未知</strong>
+              <div class="status-health">
+                <span id="health-indicator" class="health-dot unknown"></span>
+                <div>
+                  <span class="field-label">连接与健康</span>
+                  <strong id="health-label">状态未知</strong>
+                </div>
+              </div>
+              <div id="battery-status" class="battery-status hidden">
+                <span id="battery-meter" class="battery-meter" aria-hidden="true"><span id="battery-fill"></span></span>
+                <div>
+                  <span class="field-label">电池</span>
+                  <strong id="battery-label">—</strong>
+                </div>
               </div>
             </div>
             <dl class="status-metrics">
@@ -102,7 +114,7 @@
           </section>
 
           <section class="control-section" aria-labelledby="skills-title">
-            <div class="section-heading"><h2 id="skills-title">可用操作</h2><span class="subtle">参数会在本地再次校验</span></div>
+            <div class="section-heading"><h2 id="skills-title">可用操作</h2><span class="subtle">确认级由当前操作员确认；高危动作需要再次核对并输入当前账户密码</span></div>
             <div id="controls-list" class="control-list"></div>
           </section>
 
@@ -133,9 +145,9 @@
           </div>
           <div class="monitor-layout">
             <nav class="monitor-list" aria-label="监控项目">
-              <button class="monitor-item active" type="button" data-monitor="logs">日志</button>
-              <button class="monitor-item" type="button" data-monitor="input">声音输入</button>
-              <button class="monitor-item" type="button" data-monitor="output">声音输出</button>
+              <label class="monitor-item"><input type="checkbox" data-monitor="logs" checked><span>日志</span></label>
+              <label class="monitor-item"><input type="checkbox" data-monitor="input"><span>声音输入</span></label>
+              <label class="monitor-item"><input type="checkbox" data-monitor="output"><span>声音输出</span></label>
             </nav>
             <div class="monitor-stage">
               <section data-monitor-panel="logs" aria-labelledby="monitor-log-title">
@@ -152,6 +164,83 @@
               </section>
             </div>
           </div>
+        </section>
+
+        <section class="view-panel" data-panel="settings" aria-labelledby="settings-title" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">本机配置</p><h1 id="settings-title">设置</h1></div>
+          </div>
+
+          <section class="control-section" aria-labelledby="llm-settings-title">
+            <div class="section-heading">
+              <h2 id="llm-settings-title">大语言模型</h2>
+              <span class="subtle">只保存一条云端模型路径，密钥不会回显</span>
+            </div>
+            <form id="llm-settings-form" class="settings-form">
+              <div class="settings-grid">
+                <label>提供方<input id="llm-provider" name="provider" type="text" maxlength="64" required></label>
+                <label>模型名称<input id="llm-model" name="model" type="text" maxlength="128"></label>
+                <label>接口地址<input id="llm-base-url" name="base_url" type="url" maxlength="300" placeholder="https://example.com/v1"></label>
+                <label>超时（秒）<input id="llm-timeout" name="timeout_seconds" type="number" min="1" max="180" step="1" required></label>
+              </div>
+              <label>API 密钥<input id="llm-api-key" name="api_key" type="password" maxlength="512" autocomplete="off"></label>
+              <label class="explicit-confirm"><input id="llm-clear-key" type="checkbox"><span>清除已保存的 API 密钥</span></label>
+              <div class="settings-actions"><button class="primary-button" type="submit">保存模型设置</button></div>
+              <p id="llm-settings-status" class="form-status" role="status"></p>
+            </form>
+          </section>
+
+          <section class="control-section" aria-labelledby="audio-settings-title">
+            <div class="section-heading">
+              <h2 id="audio-settings-title">音频</h2>
+              <span class="subtle">唤醒短语、语言和设备在下次启动语音服务后生效</span>
+            </div>
+            <form id="audio-settings-form" class="settings-form">
+              <div class="settings-grid">
+                <label>机器人名称<input id="audio-robot-name" name="robot_name" type="text" maxlength="64" required></label>
+                <label>唤醒短语<input id="audio-wake-phrase" name="wake_phrase" type="text" maxlength="64" required></label>
+                <label>语言<input id="audio-language" name="language" type="text" maxlength="32" required></label>
+                <label>输入设备
+                  <select id="audio-input-device" name="input_device">
+                    <option value="default">default</option>
+                    <option value="usb-microphone">usb-microphone</option>
+                    <option value="usb-speaker">usb-speaker</option>
+                  </select>
+                </label>
+                <label>输出设备
+                  <select id="audio-output-device" name="output_device">
+                    <option value="default">default</option>
+                    <option value="usb-microphone">usb-microphone</option>
+                    <option value="usb-speaker">usb-speaker</option>
+                  </select>
+                </label>
+                <label>跟进窗口（秒）<input id="audio-follow-up" name="follow_up_seconds" type="number" min="1" step="1" required></label>
+                <label>会话上限（秒）<input id="audio-session-max" name="session_max_seconds" type="number" min="1" step="1" required></label>
+                <label>通话重连宽限（秒）<input id="audio-reconnect" name="call_reconnect_grace_seconds" type="number" min="1" step="1" required></label>
+              </div>
+              <label>语音模型<input id="audio-models" type="text" readonly></label>
+              <div class="settings-actions"><button class="primary-button" type="submit">保存音频设置</button></div>
+              <p id="audio-settings-status" class="form-status" role="status"></p>
+            </form>
+          </section>
+
+          <section class="control-section" aria-labelledby="account-settings-title">
+            <div class="section-heading">
+              <h2 id="account-settings-title">登录账户</h2>
+              <span class="subtle">账户名明文保存；密码以 PBKDF2-HMAC-SHA256 加盐摘要保存</span>
+            </div>
+            <div id="account-list" class="account-list"></div>
+            <form id="account-settings-form" class="settings-form">
+              <div class="settings-grid">
+                <label>账户名<input id="account-username" name="username" type="text" maxlength="64" autocomplete="off" required></label>
+                <label>当前账户密码<input id="account-current-password" name="current_password" type="password" autocomplete="current-password" required></label>
+                <label>新密码<input id="account-password" name="password" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
+                <label>确认新密码<input id="account-password-confirm" name="password_confirm" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
+              </div>
+              <div class="settings-actions"><button class="primary-button" type="submit">保存账户</button></div>
+              <p id="account-settings-status" class="form-status" role="status"></p>
+            </form>
+          </section>
         </section>
         <p id="global-error" class="global-error" role="alert"></p>
       </div>

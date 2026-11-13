@@ -1,5 +1,5 @@
 (() => {
-  const state = { csrf: null, overview: null, pendingAction: null, voice: null, voiceBusy: false, monitor: "logs", levels: null };
+  const state = { csrf: null, overview: null, pendingAction: null, voice: null, voiceBusy: false, levels: null };
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -20,11 +20,17 @@
 
   function showLogin() {
     state.csrf = null;
+    $("#operator-password").value = "";
+    $("#account-current-password").value = "";
+    $("#account-password").value = "";
+    $("#account-password-confirm").value = "";
+    $("#llm-api-key").value = "";
     $("#dashboard-nav").classList.add("hidden");
     $("#dashboard-view").classList.add("hidden");
     $("#login-view").classList.remove("hidden");
     $("#sign-out").classList.add("hidden");
     setConnection("pending", "未登录");
+    selectView("overview");
   }
 
   function showDashboard() {
@@ -139,7 +145,18 @@
   }
 
   function riskLabel(risk) {
-    return ({ normal: "正常", confirm: "AI 复核", high: "高危" })[risk] || "未分类";
+    return ({ normal: "常规", confirm: "确认", high: "高危" })[risk] || "未分类";
+  }
+
+  function disabledLabel(reason) {
+    return ({
+      "AI reviewer is not configured": "未配置 AI 复核，暂时不能执行",
+      "Dashboard caller is not authorized by policy": "当前策略不允许在控制台执行",
+    })[reason] || text(reason, "不可用");
+  }
+
+  function capabilityLabel(capability) {
+    return text(capability.label, capability.name || capability.operation);
   }
 
   function riskClass(risk) {
@@ -151,6 +168,28 @@
     node.className = `status-pill ${className}`;
     node.textContent = label;
     return node;
+  }
+
+  function renderBattery(battery) {
+    const node = $("#battery-status");
+    const fill = $("#battery-fill");
+    const label = $("#battery-label");
+    if (!node || !fill || !label) return;
+    const level = battery && Number.isInteger(battery.level_percent) ? battery.level_percent : null;
+    const visible = level !== null && level >= 0 && level <= 100;
+    node.classList.toggle("hidden", !visible);
+    if (!visible) {
+      node.classList.remove("charging", "low");
+      fill.style.width = "0";
+      label.textContent = "—";
+      return;
+    }
+    const charging = battery.charging === true ? true : battery.charging === false ? false : null;
+    node.classList.toggle("charging", charging === true);
+    node.classList.toggle("low", charging !== true && level <= 20);
+    fill.style.width = `${level}%`;
+    const chargeText = charging === true ? "充电中" : charging === false ? "未充电" : "";
+    label.textContent = chargeText ? `${level}% · ${chargeText}` : `${level}%`;
   }
 
   function renderOverview(data) {
@@ -165,6 +204,7 @@
     $("#health-indicator").className = `health-dot ${healthy ? "good" : known ? "bad" : "unknown"}`;
     $("#health-label").textContent = healthy ? "已连接 · 健康" : known ? "断开或异常" : "状态未知";
     setConnection(healthy ? "connected" : known ? "disconnected" : "pending", healthy ? "已连接" : known ? "异常" : "状态未知");
+    renderBattery(robot.battery);
     $("#active-task").textContent = text(data.active_task, "无");
     $("#latest-feedback").textContent = text(data.latest_feedback, "暂无");
     $("#policy-version").textContent = text(data.policy_version);
@@ -179,8 +219,10 @@
       setVoiceStatus(...details);
     }
     renderRobotInformation(data.robot_configuration || {});
-    renderVoiceLog(data.voice_events || [], "#voice-log");
-    renderVoiceLog(data.voice_events || [], "#monitor-log");
+    if (Array.isArray(data.voice_events)) {
+      renderVoiceLog(data.voice_events, "#voice-log");
+      if (monitorEnabled("logs")) renderVoiceLog(data.voice_events, "#monitor-log");
+    }
     renderActions(data.actions || [], "#overview-actions", 5);
     renderCapabilities(data.capabilities || []);
     renderControls(data.capabilities || []);
@@ -255,14 +297,16 @@
       const name = document.createElement("div");
       name.className = "capability-name";
       const strong = document.createElement("strong");
-      strong.textContent = capability.name;
+      strong.textContent = capabilityLabel(capability);
+      strong.title = capability.name;
       const stateLabel = document.createElement("span");
-      stateLabel.textContent = capability.enabled ? "可用" : text(capability.disabled_reason, "不可用");
+      stateLabel.textContent = capability.enabled ? "可用" : disabledLabel(capability.disabled_reason);
       name.append(strong, stateLabel);
 
       const parameterText = Object.entries(capability.parameters || {}).map(([key, value]) => {
+        const caption = value.label || key;
         const range = value.type === "number" ? `${text(value.min, "−∞")} … ${text(value.max, "+∞")}` : value.type;
-        return `${key}: ${range}`;
+        return `${caption}: ${range}`;
       }).join(" · ") || "无参数";
       const parameters = document.createElement("div");
       parameters.className = "capability-detail";
@@ -286,75 +330,127 @@
   function renderControls(capabilities) {
     const root = $("#controls-list");
     root.replaceChildren();
-    const available = capabilities.filter(item => item.enabled && item.dashboard_allowed);
+    const available = capabilities.filter(item => item.dashboard_allowed);
     if (!available.length) {
       root.append(empty("当前没有开放给 Dashboard 的控制操作"));
       return;
     }
-    for (const capability of available) {
-      const row = document.createElement("form");
-      row.className = "control-row";
-      row.dataset.skill = capability.name;
-
-      const meta = document.createElement("div");
-      meta.className = "control-meta";
-      const name = document.createElement("strong");
-      name.textContent = capability.name;
-      meta.append(name, pill(riskLabel(capability.risk_level), riskClass(capability.risk_level)));
-
-      const fields = document.createElement("div");
-      fields.className = "parameter-fields";
-      for (const [parameter, spec] of Object.entries(capability.parameters || {})) {
-        const label = document.createElement("label");
-        label.className = "parameter-field";
-        const caption = document.createElement("span");
-        caption.textContent = parameter;
-        let input;
-        if (spec.type === "boolean") {
-          input = document.createElement("select");
-          input.add(new Option("开启", "true"));
-          input.add(new Option("关闭", "false"));
-        } else {
-          input = document.createElement("input");
-          input.type = spec.type === "string" ? "text" : "number";
-          if (spec.min !== null && spec.min !== undefined) input.min = spec.min;
-          if (spec.max !== null && spec.max !== undefined) input.max = spec.max;
-          if (spec.max_length) input.maxLength = spec.max_length;
-          if (input.type === "number") input.step = "any";
-        }
-        input.name = parameter;
-        input.required = true;
-        label.append(caption, input);
-        fields.append(label);
-      }
-
-      const execute = document.createElement("button");
-      execute.className = capability.risk_level === "high" ? "danger-button" : "primary-button";
-      execute.type = "submit";
-      execute.textContent = capability.risk_level === "high" || capability.operator_confirmation_required ? "确认操作" : "执行";
-      row.append(meta, fields, execute);
-      row.addEventListener("submit", event => {
-        event.preventDefault();
-        const parameters = {};
-        for (const [key, value] of new FormData(row).entries()) {
-          const spec = capability.parameters[key];
-          parameters[key] = spec.type === "number" ? Number(value) : spec.type === "boolean" ? value === "true" : value;
-        }
-        const needsReview = capability.risk_level === "confirm";
-        const needsOperator = capability.risk_level === "high" || capability.operator_confirmation_required;
-        if (needsReview || needsOperator) openConfirmation(capability, parameters);
-        else invokeAction(capability, parameters);
-      });
-      root.append(row);
+    const posture = ["sport.stand_up", "sport.stand_down"]
+      .map(name => available.find(item => item.name === name))
+      .filter(Boolean);
+    const grouped = new Set(posture);
+    if (posture.length) {
+      const heading = document.createElement("h3");
+      heading.className = "control-group";
+      heading.textContent = "站立与卧倒";
+      root.append(heading);
+      for (const capability of posture) root.append(controlRow(capability));
     }
+    const groups = [
+      ["normal", "常规"],
+      ["confirm", "需确认"],
+      ["high", "高危"],
+    ];
+    for (const [risk, title] of groups) {
+      const items = available.filter(item => item.risk_level === risk && !grouped.has(item));
+      if (!items.length) continue;
+      items.forEach(item => grouped.add(item));
+      const heading = document.createElement("h3");
+      heading.className = "control-group";
+      heading.textContent = `${title} · ${items.length}`;
+      root.append(heading);
+      for (const capability of items) root.append(controlRow(capability));
+    }
+    for (const capability of available) {
+      if (!grouped.has(capability)) root.append(controlRow(capability));
+    }
+  }
+
+  function controlRow(capability) {
+    const row = document.createElement("form");
+    row.className = "control-row";
+    if (!capability.enabled) row.classList.add("is-disabled");
+    row.dataset.skill = capability.name;
+
+    const meta = document.createElement("div");
+    meta.className = "control-meta";
+    const name = document.createElement("strong");
+    name.textContent = capabilityLabel(capability);
+    name.title = capability.name;
+    meta.append(name, pill(riskLabel(capability.risk_level), riskClass(capability.risk_level)));
+    if (!capability.enabled) {
+      const note = document.createElement("p");
+      note.className = "control-note";
+      note.textContent = disabledLabel(capability.disabled_reason);
+      meta.append(note);
+    }
+
+    const fields = document.createElement("div");
+    fields.className = "parameter-fields";
+    for (const [parameter, spec] of Object.entries(capability.parameters || {})) {
+      const label = document.createElement("label");
+      label.className = "parameter-field";
+      const caption = document.createElement("span");
+      const bounds = spec.type === "number" ? `（${text(spec.min, "−∞")} … ${text(spec.max, "+∞")}）` : "";
+      caption.textContent = `${spec.label || parameter}${bounds}`;
+      let input;
+      if (spec.type === "boolean") {
+        input = document.createElement("select");
+        input.add(new Option("开启", "true"));
+        input.add(new Option("关闭", "false"));
+      } else {
+        input = document.createElement("input");
+        input.type = spec.type === "string" ? "text" : "number";
+        if (spec.min !== null && spec.min !== undefined) input.min = spec.min;
+        if (spec.max !== null && spec.max !== undefined) input.max = spec.max;
+        if (spec.max_length) input.maxLength = spec.max_length;
+        if (input.type === "number") input.step = "any";
+      }
+      input.name = parameter;
+      input.required = true;
+      input.disabled = !capability.enabled;
+      label.append(caption, input);
+      fields.append(label);
+    }
+
+    const execute = document.createElement("button");
+    execute.className = capability.risk_level === "high" ? "danger-button" : "primary-button";
+    execute.type = "submit";
+    execute.disabled = !capability.enabled;
+    execute.textContent = !capability.enabled
+      ? "不可用"
+      : capability.risk_level === "high" || capability.operator_confirmation_required
+        ? "确认操作"
+        : capability.risk_level === "confirm"
+          ? "确认执行"
+          : "执行";
+    row.append(meta, fields, execute);
+    row.addEventListener("submit", event => {
+      event.preventDefault();
+      if (!capability.enabled) return;
+      const parameters = {};
+      for (const [key, value] of new FormData(row).entries()) {
+        const spec = capability.parameters[key];
+        parameters[key] = spec.type === "number" ? Number(value) : spec.type === "boolean" ? value === "true" : value;
+      }
+      const needsReview = capability.risk_level === "confirm";
+      const needsOperator = capability.risk_level === "high" || capability.operator_confirmation_required;
+      if (needsReview || needsOperator) openConfirmation(capability, parameters);
+      else invokeAction(capability, parameters);
+    });
+    return row;
   }
 
   function openConfirmation(capability, parameters) {
     state.pendingAction = { capability, parameters };
-    $("#dialog-risk").textContent = `${riskLabel(capability.risk_level)} · ${capability.name}`;
+    $("#dialog-risk").textContent = `${riskLabel(capability.risk_level)} · ${capabilityLabel(capability)}`;
     $("#dialog-risk").className = `eyebrow ${riskClass(capability.risk_level)}`;
     $("#dialog-title").textContent = "确认本次操作";
-    const reviewText = capability.risk_level === "confirm" ? "服务端将先对这组固定参数进行 AI 复核。" : "";
+    const reviewText = capability.risk_level !== "confirm"
+      ? ""
+      : capability.ai_review_required
+        ? "服务端将先对这组固定参数进行 AI 复核。"
+        : "本次由已登录的操作员确认后执行。";
     const operatorText = capability.risk_level === "high" || capability.operator_confirmation_required ? "本次执行会记录为当前操作员的明确确认。" : "";
     $("#dialog-description").textContent = `目标机器人：${text(state.overview?.robot?.robot_id)}。${reviewText}${operatorText}操作仍会经过服务端策略和适配器本地检查。`;
     const summary = $("#dialog-parameters");
@@ -363,7 +459,7 @@
       const item = document.createElement("div");
       const dt = document.createElement("dt");
       const dd = document.createElement("dd");
-      dt.textContent = key;
+      dt.textContent = capability.parameters?.[key]?.label || key;
       dd.textContent = String(value);
       item.append(dt, dd);
       summary.append(item);
@@ -384,17 +480,17 @@
       });
       const body = {};
       if (prepared.requires_operator_confirmation) {
-        const pin = window.prompt("请输入当前操作员 PIN 以确认本次操作");
-        if (pin === null) throw new Error("已取消操作员确认");
-        body.operator_pin = pin;
+        const password = window.prompt("请输入当前账户密码以确认本次操作");
+        if (password === null) throw new Error("已取消操作员确认");
+        body.operator_password = password;
       }
       const data = await request("/api/actions/execute", {
         method: "POST",
         body: JSON.stringify({ ...body, challenge_id: prepared.challenge_id }),
       });
-      if (prepared.risk_level === "confirm") {
+      if (prepared.ai_review_required) {
         const review = data.action?.review;
-        if (!review || review.verdict !== "allow") {
+        if (!review || review.verdict !== "allow" || review.reviewer === "dashboard_operator") {
           showError("AI 复核未通过；操作未执行");
           return;
         }
@@ -417,10 +513,12 @@
       const row = document.createElement("article");
       row.className = "activity-row";
       const operation = document.createElement("strong");
-      operation.textContent = action.operation || "机器人任务";
+      operation.textContent = action.label || action.operation || "机器人任务";
+      operation.title = action.operation || "";
       const detail = document.createElement("span");
       detail.textContent = `${callerLabel(action.source || "dashboard")} · ${riskLabel(action.risk_level)}`;
-      if (action.review) detail.textContent += ` · AI 复核：${action.review.verdict || "已记录"}`;
+      if (action.review?.reviewer === "dashboard_operator") detail.textContent += " · 操作员已确认";
+      else if (action.review) detail.textContent += ` · AI 复核：${action.review.verdict || "已记录"}`;
       if (action.operator_confirmed) detail.textContent += " · 操作员已确认";
       const time = document.createElement("time");
       time.dateTime = action.timestamp || "";
@@ -451,7 +549,7 @@
 
   async function refresh() {
     try {
-      const data = await request("/api/dashboard/overview");
+      const data = await request(`/api/dashboard/overview${voiceEventsNeeded() ? "" : "?voice_events=0"}`);
       state.overview = data;
       renderOverview(data);
       renderActions(data.actions || [], "#activity-list");
@@ -468,17 +566,38 @@
       panel.classList.toggle("active", active);
       panel.hidden = !active;
     });
-    if (name === "monitor") startMonitor();
-    else stopMonitor();
+    if (name === "monitor") {
+      syncMonitorPanels();
+      if (monitorEnabled("logs") && state.csrf && !Array.isArray(state.overview?.voice_events)) refresh();
+    } else stopMonitor();
+    if (name === "overview" && state.csrf && !Array.isArray(state.overview?.voice_events)) refresh();
+    if (name === "settings") loadSettings();
   }
 
-  function selectMonitor(name) {
-    state.monitor = name;
-    $$(".monitor-item").forEach(button => button.classList.toggle("active", button.dataset.monitor === name));
+  function monitorEnabled(name) {
+    return Boolean($(`input[data-monitor="${name}"]`)?.checked);
+  }
+
+  function selectedAudioChannels() {
+    return ["input", "output"].filter(monitorEnabled);
+  }
+
+  function voiceEventsNeeded() {
+    const overviewOpen = !$("[data-panel=overview]")?.hidden;
+    const monitorOpen = !$("[data-panel=monitor]")?.hidden;
+    return overviewOpen || (monitorOpen && monitorEnabled("logs"));
+  }
+
+  function syncMonitorPanels() {
     $$("[data-monitor-panel]").forEach(panel => {
-      panel.hidden = panel.dataset.monitorPanel !== name;
+      panel.hidden = !monitorEnabled(panel.dataset.monitorPanel);
     });
-    if (state.levels) drawLevels(state.levels);
+    const monitorOpen = !$("[data-panel=monitor]")?.hidden;
+    if (monitorOpen && selectedAudioChannels().length) startMonitor();
+    else stopMonitor();
+    if (monitorEnabled("logs") && Array.isArray(state.overview?.voice_events)) {
+      renderVoiceLog(state.overview.voice_events, "#monitor-log");
+    }
   }
 
   function startMonitor() {
@@ -494,22 +613,37 @@
   }
 
   async function pollMonitor() {
+    const channels = selectedAudioChannels();
+    if (!channels.length) {
+      stopMonitor();
+      return;
+    }
     if (!state.csrf || document.hidden) return;
     try {
-      state.levels = await request("/api/voice/monitor");
-      const inputStatus = $("#monitor-input-status");
-      const outputStatus = $("#monitor-output-status");
-      if (inputStatus) inputStatus.textContent = state.levels.input_active ? "正在采集" : "当前没有输入";
-      if (outputStatus) outputStatus.textContent = state.levels.output_active ? "正在输出" : "当前没有输出";
-      drawLevels(state.levels);
+      const levels = await request(`/api/voice/monitor?channels=${channels.join(",")}`);
+      state.levels = levels;
+      if (channels.includes("input")) {
+        const inputStatus = $("#monitor-input-status");
+        if (inputStatus) inputStatus.textContent = levels.input_active ? "正在采集" : "当前没有输入";
+      }
+      if (channels.includes("output")) {
+        const outputStatus = $("#monitor-output-status");
+        if (outputStatus) outputStatus.textContent = levels.output_active ? "正在输出" : "当前没有输出";
+      }
+      drawLevels(levels);
     } catch (error) {
       if (state.csrf) showError(error.message);
     }
   }
 
   function drawLevels(levels) {
-    drawWaveform($("#waveform-input"), levels.input || [], levels.input_active);
-    drawWaveform($("#waveform-output"), levels.output || [], levels.output_active);
+    if (!levels) return;
+    if (monitorEnabled("input") && Object.prototype.hasOwnProperty.call(levels, "input")) {
+      drawWaveform($("#waveform-input"), levels.input || [], levels.input_active);
+    }
+    if (monitorEnabled("output") && Object.prototype.hasOwnProperty.call(levels, "output")) {
+      drawWaveform($("#waveform-output"), levels.output || [], levels.output_active);
+    }
   }
 
   function drawWaveform(canvas, points, active) {
@@ -546,18 +680,205 @@
     });
   }
 
+  function setFormStatus(selector, message, isError = false) {
+    const node = $(selector);
+    if (!node) return;
+    node.textContent = message || "";
+    node.classList.toggle("error", Boolean(isError && message));
+  }
+
+  function integerValue(selector) {
+    const value = Number.parseInt($(selector).value, 10);
+    if (!Number.isInteger(value)) throw new Error("请填写整数");
+    return value;
+  }
+
+  function renderAccounts(accounts, currentUsername) {
+    const root = $("#account-list");
+    root.replaceChildren();
+    if (!accounts.length) {
+      root.append(empty("还没有登录账户"));
+      return;
+    }
+    for (const account of accounts) {
+      const row = document.createElement("div");
+      row.className = "account-row";
+      const name = document.createElement("strong");
+      name.textContent = account.username;
+      if (account.username === currentUsername) {
+        const mark = document.createElement("span");
+        mark.className = "subtle";
+        mark.textContent = "当前登录";
+        name.append(mark);
+      }
+      row.append(name);
+      if (account.username !== currentUsername) {
+        const remove = document.createElement("button");
+        remove.className = "quiet-button";
+        remove.type = "button";
+        remove.textContent = "删除";
+        remove.setAttribute("aria-label", `删除账户 ${account.username}`);
+        remove.addEventListener("click", () => deleteAccount(account.username));
+        row.append(remove);
+      }
+      root.append(row);
+    }
+  }
+
+  function applySettings(data) {
+    state.settings = data;
+    const llm = data.llm || {};
+    $("#llm-provider").value = llm.provider || "openai-compatible";
+    $("#llm-model").value = llm.model || "";
+    $("#llm-base-url").value = llm.base_url || "";
+    $("#llm-timeout").value = llm.timeout_seconds || 30;
+    $("#llm-api-key").value = "";
+    $("#llm-api-key").placeholder = llm.api_key_configured ? "已保存，留空则保持不变" : "未设置";
+    $("#llm-clear-key").checked = false;
+    const audio = data.audio || {};
+    $("#audio-robot-name").value = audio.robot_name || "";
+    $("#audio-wake-phrase").value = audio.wake_phrase || "";
+    $("#audio-language").value = audio.language || "";
+    $("#audio-input-device").value = audio.input_device || "default";
+    $("#audio-output-device").value = audio.output_device || "default";
+    $("#audio-follow-up").value = audio.follow_up_seconds ?? "";
+    $("#audio-session-max").value = audio.session_max_seconds ?? "";
+    $("#audio-reconnect").value = audio.call_reconnect_grace_seconds ?? "";
+    const models = audio.models || {};
+    $("#audio-models").value = `KWS ${text(models.kws)}；ASR ${text(models.asr)}；VAD ${text(models.vad)}；TTS ${text(models.tts)}`;
+    renderAccounts(data.accounts || [], data.current_username);
+  }
+
+  async function loadSettings() {
+    try {
+      applySettings(await request("/api/settings"));
+    } catch (error) {
+      if (state.csrf) showError(error.message);
+    }
+  }
+
+  async function deleteAccount(username) {
+    const currentPassword = $("#account-current-password").value;
+    if (!currentPassword) {
+      setFormStatus("#account-settings-status", "删除账户前请先填写当前账户密码", true);
+      $("#account-current-password").focus();
+      return;
+    }
+    try {
+      const data = await request("/api/settings/accounts/delete", {
+        method: "POST",
+        body: JSON.stringify({ username, current_password: currentPassword }),
+      });
+      $("#account-current-password").value = "";
+      renderAccounts(data.accounts || [], data.current_username);
+      setFormStatus("#account-settings-status", "账户已删除", false);
+    } catch (error) {
+      setFormStatus("#account-settings-status", error.message, true);
+    }
+  }
+
   $("#login-form").addEventListener("submit", async event => {
     event.preventDefault();
     $("#login-error").textContent = "";
-    const pin = $("#operator-pin").value;
+    const username = $("#operator-username").value;
+    const password = $("#operator-password").value;
     try {
-      const data = await request("/api/login", { method: "POST", body: JSON.stringify({ pin }) });
+      const data = await request("/api/login", { method: "POST", body: JSON.stringify({ username, password }) });
       state.csrf = data.csrf_token;
-      $("#operator-pin").value = "";
+      $("#operator-password").value = "";
       showDashboard();
       await refresh();
     } catch (error) {
       $("#login-error").textContent = error.message;
+    }
+  });
+
+  $("#llm-settings-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const submit = $("#llm-settings-form button[type=submit]");
+    submit.disabled = true;
+    setFormStatus("#llm-settings-status", "");
+    try {
+      const payload = {
+        provider: $("#llm-provider").value,
+        base_url: $("#llm-base-url").value,
+        model: $("#llm-model").value,
+        timeout_seconds: integerValue("#llm-timeout"),
+      };
+      const apiKey = $("#llm-api-key").value;
+      if (apiKey) payload.api_key = apiKey;
+      else if ($("#llm-clear-key").checked) payload.api_key = "";
+      const data = await request("/api/settings/llm", { method: "POST", body: JSON.stringify(payload) });
+      state.settings = { ...(state.settings || {}), llm: data.llm };
+      $("#llm-api-key").value = "";
+      $("#llm-api-key").placeholder = data.llm?.api_key_configured ? "已保存，留空则保持不变" : "未设置";
+      $("#llm-clear-key").checked = false;
+      setFormStatus("#llm-settings-status", data.llm?.api_key_configured ? "模型设置已保存，密钥不会回显" : "模型设置已保存", false);
+    } catch (error) {
+      setFormStatus("#llm-settings-status", error.message, true);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  $("#audio-settings-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const submit = $("#audio-settings-form button[type=submit]");
+    submit.disabled = true;
+    setFormStatus("#audio-settings-status", "");
+    try {
+      const data = await request("/api/settings/audio", {
+        method: "POST",
+        body: JSON.stringify({
+          robot_name: $("#audio-robot-name").value,
+          wake_phrase: $("#audio-wake-phrase").value,
+          language: $("#audio-language").value,
+          input_device: $("#audio-input-device").value,
+          output_device: $("#audio-output-device").value,
+          follow_up_seconds: integerValue("#audio-follow-up"),
+          session_max_seconds: integerValue("#audio-session-max"),
+          call_reconnect_grace_seconds: integerValue("#audio-reconnect"),
+        }),
+      });
+      state.settings = { ...(state.settings || {}), audio: data.audio };
+      const models = data.audio?.models || {};
+      $("#audio-models").value = `KWS ${text(models.kws)}；ASR ${text(models.asr)}；VAD ${text(models.vad)}；TTS ${text(models.tts)}`;
+      setFormStatus("#audio-settings-status", "音频设置已保存。唤醒短语、语言和设备将在下次启动语音服务后生效", false);
+    } catch (error) {
+      setFormStatus("#audio-settings-status", error.message, true);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  $("#account-settings-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const password = $("#account-password").value;
+    if (password !== $("#account-password-confirm").value) {
+      setFormStatus("#account-settings-status", "两次输入的新密码不一致", true);
+      return;
+    }
+    const submit = $("#account-settings-form button[type=submit]");
+    submit.disabled = true;
+    setFormStatus("#account-settings-status", "");
+    try {
+      const data = await request("/api/settings/accounts", {
+        method: "POST",
+        body: JSON.stringify({
+          username: $("#account-username").value,
+          password,
+          current_password: $("#account-current-password").value,
+        }),
+      });
+      $("#account-password").value = "";
+      $("#account-password-confirm").value = "";
+      $("#account-current-password").value = "";
+      renderAccounts(data.accounts || [], data.current_username);
+      setFormStatus("#account-settings-status", "账户已保存", false);
+    } catch (error) {
+      setFormStatus("#account-settings-status", error.message, true);
+    } finally {
+      submit.disabled = false;
     }
   });
 
@@ -617,7 +938,10 @@
     if (state.csrf && !document.hidden) refresh();
   }, 5000);
   $$(".nav-item").forEach(button => button.addEventListener("click", () => selectView(button.dataset.view)));
-  $$(".monitor-item").forEach(button => button.addEventListener("click", () => selectMonitor(button.dataset.monitor)));
+  $$("input[data-monitor]").forEach(input => input.addEventListener("change", () => {
+    syncMonitorPanels();
+    if (input.dataset.monitor === "logs" && input.checked && state.csrf && !Array.isArray(state.overview?.voice_events)) refresh();
+  }));
   window.addEventListener("resize", () => { if (state.levels) drawLevels(state.levels); });
   $$('[data-open-view]').forEach(button => button.addEventListener("click", () => selectView(button.dataset.openView)));
 

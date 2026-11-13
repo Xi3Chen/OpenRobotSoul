@@ -19,6 +19,18 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from robotsoul.models import InvocationContext, InvocationSource, TaskResult
 from robotsoul.runtime import RobotRuntime
+from robotsoul.settings import (
+    LlmConfigStore,
+    OperatorDirectory,
+    audio_settings_view,
+    default_llm_path,
+    default_operators_path,
+    default_voice_config_path,
+    load_audio_settings,
+    save_audio_settings,
+    validate_username,
+)
+from robotsoul.voice.config import VoiceConfig
 from robotsoul.voice.core import CaptureArbiter
 from robotsoul.voice.webrtc import WebRtcUnavailable
 
@@ -27,6 +39,67 @@ SESSION_TTL_SECONDS = 30 * 60
 ACTION_TTL_SECONDS = 30
 MAX_REQUEST_BYTES = 64 * 1024
 ASSET_ROOT = Path(__file__).with_name("web")
+
+CAPABILITY_LABELS = {
+    "speech.say": "语音播报",
+    "head.look": "转动头部",
+    "base.move_distance": "直行一段距离",
+    "flash.toggle": "开关闪光灯",
+    "sport.stop_move": "停止移动",
+    "sport.balance_stand": "平衡站立",
+    "sport.stand_up": "站立",
+    "sport.stand_down": "卧倒",
+    "sport.sit": "坐下",
+    "sport.rise_sit": "从坐姿起身",
+    "sport.hello": "打招呼",
+    "sport.stretch": "伸懒腰",
+    "sport.content": "表现开心",
+    "sport.heart": "比心",
+    "sport.scrape": "作揖",
+    "sport.free_walk": "灵动行走",
+    "sport.static_walk": "静步行走",
+    "sport.trot_run": "小跑",
+    "sport.economic_gait": "节能步态",
+    "sport.recovery_stand": "摔倒后恢复站立",
+    "sport.front_flip": "前空翻",
+    "sport.front_jump": "向前跳",
+    "sport.front_pounce": "向前扑",
+    "sport.dance1": "舞蹈一",
+    "sport.dance2": "舞蹈二",
+    "sport.left_flip": "向左侧翻",
+    "sport.back_flip": "后空翻",
+    "sport.switch_avoid_mode": "切换避障模式",
+    "sport.pose": "摆姿势",
+    "sport.classic_walk": "经典步态",
+    "sport.switch_joystick": "切换手柄控制",
+    "sport.handstand": "倒立",
+    "sport.free_bound": "自由弹跳",
+    "sport.free_jump": "自由跳跃",
+    "sport.free_avoid": "行走时主动避让",
+    "sport.walk_upright": "直立行走",
+    "sport.cross_step": "交叉步",
+    "sport.auto_recover_set": "设置摔倒自动恢复",
+    "sport.euler": "调整身体倾角",
+    "sport.move": "按速度移动",
+    "sport.speed_level": "设置速度档位",
+    "sport.auto_recover_get": "查询摔倒自动恢复",
+}
+PARAMETER_LABELS = {
+    "text": "播报内容",
+    "yaw_deg": "水平转角",
+    "pitch_deg": "俯仰角",
+    "distance_m": "距离（米）",
+    "max_speed_mps": "最高速度（米/秒）",
+    "vx": "前进速度",
+    "vy": "侧向速度",
+    "vyaw": "转向速度",
+    "duration_ms": "持续时间（毫秒）",
+    "roll": "横滚",
+    "pitch": "俯仰",
+    "yaw": "偏航",
+    "level": "速度档位",
+    "enabled": "开关",
+}
 
 
 @dataclass
@@ -58,7 +131,9 @@ class DashboardService:
         self,
         runtime: RobotRuntime,
         *,
-        operator_pin: str,
+        operators: OperatorDirectory,
+        llm_store: LlmConfigStore | None = None,
+        voice_config_path: str | Path | None = None,
         session_ttl_seconds: int = SESSION_TTL_SECONDS,
         action_ttl_seconds: int = ACTION_TTL_SECONDS,
         capture_arbiter: CaptureArbiter | None = None,
@@ -66,11 +141,12 @@ class DashboardService:
         voice_event_log: Any | None = None,
         clock=time.monotonic,
     ) -> None:
-        if not isinstance(operator_pin, str) or len(operator_pin) < 8:
-            raise ValueError("Dashboard operator PIN must contain at least 8 characters")
+        if not operators.usernames():
+            raise ValueError("Dashboard operator account is not configured")
         self.runtime = runtime
-        self._pin_salt = secrets.token_bytes(16)
-        self._pin_digest = hashlib.pbkdf2_hmac("sha256", operator_pin.encode("utf-8"), self._pin_salt, 200_000)
+        self._operators = operators
+        self._llm = llm_store or LlmConfigStore(None)
+        self._voice_config_path = Path(voice_config_path or default_voice_config_path())
         self.session_ttl_seconds = session_ttl_seconds
         self.action_ttl_seconds = action_ttl_seconds
         self._clock = clock
@@ -84,7 +160,7 @@ class DashboardService:
         self._actions: list[dict[str, Any]] = []
         self._lock = Lock()
 
-    def login(self, client_key: str, pin: str) -> tuple[_Session | None, str | None]:
+    def login(self, client_key: str, username: str, password: str) -> tuple[_Session | None, str | None]:
         now = self._clock()
         with self._lock:
             count, window_start = self._attempts.get(client_key, (0, now))
@@ -92,14 +168,20 @@ class DashboardService:
                 count, window_start = 0, now
             if count >= 5:
                 return None, "Too many login attempts; try again in one minute"
-            if not self._verify_pin(pin):
+        candidate = username.strip() if isinstance(username, str) else ""
+        if not self._operators.verify(candidate, password):
+            with self._lock:
+                count, window_start = self._attempts.get(client_key, (0, now))
+                if now - window_start >= 60:
+                    count, window_start = 0, now
                 self._attempts[client_key] = (count + 1, window_start)
-                return None, "Invalid operator PIN"
+            return None, "Invalid operator username or password"
+        with self._lock:
             self._attempts.pop(client_key, None)
             session = _Session(
                 session_id=secrets.token_urlsafe(32),
                 csrf_token=secrets.token_urlsafe(32),
-                principal_id=f"operator-{secrets.token_hex(8)}",
+                principal_id=candidate,
                 role="operator",
                 expires_at=now + self.session_ttl_seconds,
             )
@@ -226,13 +308,7 @@ class DashboardService:
     def close(self) -> None:
         self.end_call_for_session()
 
-    def _verify_pin(self, pin: str) -> bool:
-        return isinstance(pin, str) and hmac.compare_digest(
-            hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), self._pin_salt, 200_000),
-            self._pin_digest,
-        )
-
-    def verify_stepup_pin(self, session: _Session, pin: str | None) -> bool:
+    def check_operator_password(self, session: _Session, password: str | None, *, failure_message: str) -> str | None:
         now = self._clock()
         key = f"stepup:{session.session_id}"
         with self._lock:
@@ -240,12 +316,85 @@ class DashboardService:
             if now - window_start >= 60:
                 count, window_start = 0, now
             if count >= 5:
-                return False
-            if not self._verify_pin(pin):
+                return "Too many password attempts; try again in one minute"
+        if not self._operators.verify(session.principal_id, password if isinstance(password, str) else ""):
+            with self._lock:
+                count, window_start = self._attempts.get(key, (0, now))
+                if now - window_start >= 60:
+                    count, window_start = 0, now
                 self._attempts[key] = (count + 1, window_start)
-                return False
+            return failure_message
+        with self._lock:
             self._attempts.pop(key, None)
-            return True
+        return None
+
+    def settings_view(self, session: _Session) -> dict[str, Any]:
+        return {
+            "llm": self._llm.public(),
+            "audio": load_audio_settings(self._voice_config_path),
+            "accounts": [{"username": name} for name in self._operators.usernames()],
+            "current_username": session.principal_id,
+        }
+
+    def update_llm(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"llm": self._llm.update(payload)}
+
+    def update_audio(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = save_audio_settings(self._voice_config_path, payload)
+        self._apply_audio(config)
+        return {
+            "audio": audio_settings_view(config),
+            "restart_required": ["wake_phrase", "language", "input_device", "output_device"],
+        }
+
+    def upsert_account(self, session: _Session, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_account_payload(payload, ("username", "password", "current_password"))
+        self._require_current_password(session, payload)
+        self._operators.upsert(payload.get("username"), payload.get("password"))
+        return self._account_view(session)
+
+    def delete_account(self, session: _Session, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_account_payload(payload, ("username", "current_password"))
+        self._require_current_password(session, payload)
+        username = validate_username(payload.get("username"))
+        if username == session.principal_id:
+            raise ValueError("The signed-in account cannot be removed")
+        self._operators.delete(username)
+        return self._account_view(session)
+
+    def _require_account_payload(self, payload: dict[str, Any], allowed: tuple[str, ...]) -> None:
+        if not isinstance(payload, dict):
+            raise ValueError("account settings must be an object")
+        unknown = sorted(set(payload) - set(allowed))
+        if unknown:
+            raise ValueError(f"Unsupported account field: {unknown[0]}")
+
+    def _require_current_password(self, session: _Session, payload: dict[str, Any]) -> None:
+        error = self.check_operator_password(
+            session,
+            payload.get("current_password"),
+            failure_message="Current operator password is incorrect",
+        )
+        if error:
+            raise PermissionError(error)
+
+    def _account_view(self, session: _Session) -> dict[str, Any]:
+        return {
+            "accounts": [{"username": name} for name in self._operators.usernames()],
+            "current_username": session.principal_id,
+        }
+
+    def _apply_audio(self, config: VoiceConfig) -> None:
+        voice = self.capture_arbiter
+        if voice is None or not hasattr(voice, "gate"):
+            return
+        voice.robot_name = config.robot_name
+        voice.gate.follow_up_seconds = config.follow_up_seconds
+        voice.gate.session_max_seconds = config.session_max_seconds
+        if hasattr(voice, "call_reconnect_grace_seconds"):
+            voice.call_reconnect_grace_seconds = config.call_reconnect_grace_seconds
+        if hasattr(voice, "_call_reconnect_grace_seconds"):
+            voice._call_reconnect_grace_seconds = config.call_reconnect_grace_seconds
 
     def _expire_session_challenges(self, session_id: str) -> None:
         for challenge_id in [
@@ -253,7 +402,7 @@ class DashboardService:
         ]:
             self._challenges.pop(challenge_id, None)
 
-    def overview(self) -> dict[str, Any]:
+    def overview(self, *, include_voice_events: bool = True) -> dict[str, Any]:
         robot = self.runtime.adapter
         try:
             connected = bool(robot.health())
@@ -270,13 +419,14 @@ class DashboardService:
         voice_state = getattr(self.capture_arbiter, "state", None)
         voice_state = getattr(voice_state, "value", voice_state)
         voice_health = self.capture_arbiter.health() if hasattr(self.capture_arbiter, "health") else None
-        return {
+        payload = {
             "robot": {
                 "robot_id": self.runtime.profile.robot_id,
                 "manufacturer": manufacturer,
                 "model": model,
                 "connected": connected,
                 "healthy": connected,
+                "battery": self._battery_view(robot),
             },
             "robot_configuration": {
                 "robot_id": self.runtime.profile.robot_id,
@@ -295,11 +445,31 @@ class DashboardService:
                 "error": getattr(voice_health, "error", None),
             },
             "latest_feedback": self._actions[-1]["message"] if self._actions else None,
-            "voice_events": self.voice_events(),
             "policy_version": getattr(self.runtime.profile, "profile_version", "unknown"),
             "capabilities": [self._capability_view(name, spec) for name, spec in capabilities.items()],
             "actions": list(reversed(self._actions[-100:])),
         }
+        if include_voice_events:
+            payload["voice_events"] = self.voice_events()
+        return payload
+
+    def _battery_view(self, robot: Any) -> dict[str, Any] | None:
+        reader = getattr(robot, "battery", None)
+        if not callable(reader):
+            return None
+        try:
+            status = reader()
+        except Exception:
+            return None
+        if status is None:
+            return None
+        level = getattr(status, "level_percent", None)
+        charging = getattr(status, "charging", None)
+        if isinstance(level, bool) or not isinstance(level, int) or not 0 <= level <= 100:
+            return None
+        if charging is not None and not isinstance(charging, bool):
+            return None
+        return {"level_percent": level, "charging": charging}
 
     def voice_events(self, limit: int = 30) -> list[dict[str, Any]]:
         log = self.voice_event_log
@@ -311,23 +481,37 @@ class DashboardService:
             return []
         return events if isinstance(events, list) else []
 
-    def audio_monitor(self) -> dict[str, Any]:
+    def audio_monitor(self, channels: set[str] | None = None) -> dict[str, Any]:
+        wanted = {"input", "output"} if channels is None else {name for name in channels if name in {"input", "output"}}
+
+        def empty() -> dict[str, Any]:
+            payload: dict[str, Any] = {}
+            if "input" in wanted:
+                payload["input"] = []
+                payload["input_active"] = False
+            if "output" in wanted:
+                payload["output"] = []
+                payload["output_active"] = False
+            return payload
+
         monitor = getattr(self.capture_arbiter, "monitor", None)
         snapshot = getattr(monitor, "snapshot", None)
         if snapshot is None:
-            return {"input": [], "output": [], "input_active": False, "output_active": False}
+            return empty()
         try:
             data = snapshot()
         except Exception:
-            return {"input": [], "output": [], "input_active": False, "output_active": False}
+            return empty()
         if not isinstance(data, dict):
-            return {"input": [], "output": [], "input_active": False, "output_active": False}
-        return {
-            "input": data.get("input") if isinstance(data.get("input"), list) else [],
-            "output": data.get("output") if isinstance(data.get("output"), list) else [],
-            "input_active": bool(data.get("input_active")),
-            "output_active": bool(data.get("output_active")),
-        }
+            return empty()
+        payload = empty()
+        if "input" in wanted:
+            payload["input"] = data.get("input") if isinstance(data.get("input"), list) else []
+            payload["input_active"] = bool(data.get("input_active"))
+        if "output" in wanted:
+            payload["output"] = data.get("output") if isinstance(data.get("output"), list) else []
+            payload["output_active"] = bool(data.get("output_active"))
+        return payload
 
     def _capability_view(self, name: str, capability: Any) -> dict[str, Any]:
         risk = getattr(capability, "risk_level", "normal")
@@ -335,22 +519,23 @@ class DashboardService:
         dashboard_allowed = "dashboard" in callers
         enabled = True
         reason = None
-        if risk == "confirm" and self.runtime.safety_reviewer is None:
-            enabled, reason = False, "AI reviewer is not configured"
-        elif risk == "high" and not dashboard_allowed:
+        if risk == "high" and not dashboard_allowed:
             enabled, reason = False, "Dashboard caller is not authorized by policy"
         return {
             "name": name,
+            "label": CAPABILITY_LABELS.get(name, name),
             "description": getattr(capability, "description", name),
             "risk_level": risk,
             "allowed_callers": callers,
             "dashboard_allowed": dashboard_allowed,
             "operator_confirmation_required": getattr(capability, "requires_operator_confirmation", risk == "high"),
+            "ai_review_required": risk == "confirm" and self.runtime.safety_reviewer is not None,
             "enabled": enabled,
             "disabled_reason": reason,
             "parameters": {
                 parameter: {
                     "type": spec.value_type,
+                    "label": PARAMETER_LABELS.get(parameter, parameter),
                     "min": spec.minimum,
                     "max": spec.maximum,
                     "max_length": spec.max_length,
@@ -377,8 +562,6 @@ class DashboardService:
         validation_error = self.runtime.validate_skill_request(skill, parameters, context)
         if validation_error is not None:
             raise PermissionError(validation_error)
-        if getattr(capability, "risk_level", "normal") == "confirm" and self.runtime.safety_reviewer is None:
-            raise PermissionError("AI reviewer is not configured; operation is unavailable")
         canonical = json.dumps(parameters, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         challenge_id = secrets.token_urlsafe(24)
         task_id = secrets.token_urlsafe(18)
@@ -398,6 +581,7 @@ class DashboardService:
         ).hexdigest()
         risk = getattr(capability, "risk_level", "normal")
         requires_operator = risk == "high" or getattr(capability, "requires_operator_confirmation", False)
+        ai_review_required = risk == "confirm" and self.runtime.safety_reviewer is not None
         challenge = _ActionChallenge(
             challenge_id=challenge_id,
             session_id=session.session_id,
@@ -416,8 +600,10 @@ class DashboardService:
             "digest": digest,
             "expires_in_seconds": self.action_ttl_seconds,
             "operation": skill,
+            "label": CAPABILITY_LABELS.get(skill, skill),
             "parameters": challenge.parameters,
             "risk_level": getattr(capability, "risk_level", "normal"),
+            "ai_review_required": ai_review_required,
             "requires_operator_confirmation": requires_operator,
         }
 
@@ -425,7 +611,7 @@ class DashboardService:
         self,
         session: _Session,
         challenge_id: str,
-        operator_pin: str | None = None,
+        operator_password: str | None = None,
     ) -> dict[str, Any]:
         now = self._clock()
         with self._lock:
@@ -454,8 +640,14 @@ class DashboardService:
             )
             if requires_operator != challenge.requires_operator:
                 raise PermissionError("Confirmation policy changed; prepare a new action")
-            if requires_operator and not self.verify_stepup_pin(session, operator_pin):
-                raise PermissionError("A fresh operator PIN is required for this action")
+            if requires_operator:
+                password_error = self.check_operator_password(
+                    session,
+                    operator_password,
+                    failure_message="A fresh operator password is required for this action",
+                )
+                if password_error:
+                    raise PermissionError(password_error)
             operator_confirmed = risk == "high" or getattr(
                 capability, "requires_operator_confirmation", False
             )
@@ -476,6 +668,7 @@ class DashboardService:
             )
             action = {
                 "operation": challenge.skill,
+                "label": CAPABILITY_LABELS.get(challenge.skill, challenge.skill),
                 "source": "dashboard",
                 "risk_level": risk,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -594,6 +787,22 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return 30
         return min(100, max(1, limit))
 
+    def _monitor_channels(self) -> set[str] | None:
+        query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+        if "channels" not in query:
+            return None
+        selected: set[str] = set()
+        for raw in query["channels"]:
+            for part in raw.split(","):
+                name = part.strip()
+                if name in {"input", "output"}:
+                    selected.add(name)
+        return selected
+
+    def _voice_events_requested(self) -> bool:
+        raw = parse_qs(urlsplit(self.path).query).get("voice_events", ["1"])
+        return raw[0] not in {"0", "false", "no"}
+
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
         if path == "/" or path == "/index.html":
@@ -622,7 +831,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         if session is None:
             return
         if path == "/api/dashboard/overview":
-            self._json(HTTPStatus.OK, self.server.service.overview())
+            self._json(HTTPStatus.OK, self.server.service.overview(include_voice_events=self._voice_events_requested()))
             return
         if path == "/api/capabilities":
             data = self.server.service.overview()
@@ -635,7 +844,13 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, {"events": self.server.service.voice_events(self._event_limit())})
             return
         if path == "/api/voice/monitor":
-            self._json(HTTPStatus.OK, self.server.service.audio_monitor())
+            self._json(HTTPStatus.OK, self.server.service.audio_monitor(self._monitor_channels()))
+            return
+        if path == "/api/settings":
+            try:
+                self._json(HTTPStatus.OK, self.server.service.settings_view(session))
+            except (OSError, ValueError) as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
         self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
@@ -695,16 +910,28 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("skill and parameters are required")
                 self._json(HTTPStatus.CREATED, self.server.service.prepare_action(session, skill, parameters))
                 return
+            if path == "/api/settings/llm":
+                self._json(HTTPStatus.OK, self.server.service.update_llm(body))
+                return
+            if path == "/api/settings/audio":
+                self._json(HTTPStatus.OK, self.server.service.update_audio(body))
+                return
+            if path == "/api/settings/accounts":
+                self._json(HTTPStatus.OK, self.server.service.upsert_account(session, body))
+                return
+            if path == "/api/settings/accounts/delete":
+                self._json(HTTPStatus.OK, self.server.service.delete_account(session, body))
+                return
             if path == "/api/actions/execute":
                 challenge_id = body.get("challenge_id")
                 if not isinstance(challenge_id, str) or not challenge_id:
                     raise ValueError("challenge_id is required")
-                result = self.server.service.execute_action(session, challenge_id, body.get("operator_pin"))
+                result = self.server.service.execute_action(session, challenge_id, body.get("operator_password"))
                 self._json(HTTPStatus.OK, result)
                 return
             if path.startswith("/api/actions/") and path.endswith("/execute"):
                 challenge_id = unquote(path[len("/api/actions/") : -len("/execute")].strip("/"))
-                result = self.server.service.execute_action(session, challenge_id, body.get("operator_pin"))
+                result = self.server.service.execute_action(session, challenge_id, body.get("operator_password"))
                 self._json(HTTPStatus.OK, result)
                 return
             if path.startswith("/api/proposals/"):
@@ -740,7 +967,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             ):
                 self._json(HTTPStatus.FORBIDDEN, {"error": "Origin is not allowed"})
                 return
-        session, error = self.server.service.login(self.client_address[0], body.get("pin"))
+        session, error = self.server.service.login(self.client_address[0], body.get("username"), body.get("password"))
         if session is None:
             self._json(HTTPStatus.UNAUTHORIZED, {"error": error or "Login failed"})
             return
@@ -862,7 +1089,11 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 def create_dashboard_server(
     runtime: RobotRuntime,
     *,
-    operator_pin: str,
+    operator_username: str = "operator",
+    operator_password: str | None = None,
+    operators_path: str | Path | None = None,
+    llm_path: str | Path | None = None,
+    voice_config_path: str | Path | None = None,
     host: str = "127.0.0.1",
     port: int = 8765,
     tls_cert: str | Path | None = None,
@@ -881,9 +1112,19 @@ def create_dashboard_server(
         raise ValueError("Binding the Dashboard to a LAN interface requires TLS certificate and key files")
     if bool(tls_cert) != bool(tls_key):
         raise ValueError("Both TLS certificate and key must be provided")
+    if operator_password is not None and operators_path is None:
+        operators = OperatorDirectory.from_credentials(operator_username, operator_password)
+    else:
+        operators = OperatorDirectory(Path(operators_path) if operators_path else default_operators_path())
+        if not operators.usernames():
+            if not operator_password:
+                raise ValueError("Dashboard operator account is not configured")
+            operators.upsert(operator_username, operator_password)
     service = DashboardService(
         runtime,
-        operator_pin=operator_pin,
+        operators=operators,
+        llm_store=LlmConfigStore(Path(llm_path) if llm_path else None),
+        voice_config_path=voice_config_path,
         capture_arbiter=capture_arbiter,
         call_media=call_media,
         voice_event_log=voice_event_log,
@@ -902,7 +1143,11 @@ def create_dashboard_server(
 def run_dashboard(
     runtime: RobotRuntime,
     *,
-    operator_pin: str,
+    operator_username: str = "operator",
+    operator_password: str | None = None,
+    operators_path: str | Path | None = None,
+    llm_path: str | Path | None = None,
+    voice_config_path: str | Path | None = None,
     host: str = "127.0.0.1",
     port: int = 8765,
     tls_cert: str | Path | None = None,
@@ -913,7 +1158,11 @@ def run_dashboard(
 ) -> None:
     server = create_dashboard_server(
         runtime,
-        operator_pin=operator_pin,
+        operator_username=operator_username,
+        operator_password=operator_password,
+        operators_path=operators_path,
+        llm_path=llm_path if llm_path is not None else default_llm_path(),
+        voice_config_path=voice_config_path,
         host=host,
         port=port,
         tls_cert=tls_cert,
