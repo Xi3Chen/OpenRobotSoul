@@ -249,6 +249,7 @@ class ConversationGate:
         self.session_max_seconds = session_max_seconds
         self._started_at: float | None = None
         self._follow_up_deadline: float | None = None
+        self._command_deadline: float | None = None
 
     @property
     def active(self) -> bool:
@@ -260,11 +261,18 @@ class ConversationGate:
             return
         self._started_at = current
         self._follow_up_deadline = None
+        self._command_deadline = current + self.follow_up_seconds
+
+    def note_command_audio(self) -> None:
+        """Keep listening once speech arrives; do not close the session for silence."""
+        if self.active:
+            self._command_deadline = None
 
     def reply_finished(self, *, now: float | None = None) -> None:
         if not self.active or self._follow_up_deadline is not None:
             return
         current = monotonic() if now is None else now
+        self._command_deadline = None
         self._follow_up_deadline = current + self.follow_up_seconds
 
     def expired(self, *, now: float | None = None) -> bool:
@@ -272,17 +280,19 @@ class ConversationGate:
             return False
         current = monotonic() if now is None else now
         hard_deadline = self._started_at + self.session_max_seconds
-        if current >= hard_deadline or (
-            self._follow_up_deadline is not None and current >= self._follow_up_deadline
-        ):
+        command_expired = self._command_deadline is not None and current >= self._command_deadline
+        follow_expired = self._follow_up_deadline is not None and current >= self._follow_up_deadline
+        if current >= hard_deadline or command_expired or follow_expired:
             self._started_at = None
             self._follow_up_deadline = None
+            self._command_deadline = None
             return True
         return False
 
     def reset(self) -> None:
         self._started_at = None
         self._follow_up_deadline = None
+        self._command_deadline = None
 
 
 R = TypeVar("R")

@@ -22,11 +22,12 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": true
+      "required": true,
+      "description": "停止高层速度运动。SDK 示例 go2w_sport_client.cpp 注释为「停止运动」，不是卸力。"
     },
     {
       "name": "sport.balance_stand",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -35,11 +36,12 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "进入平衡站立。SDK 示例注释为「平衡站立」；go2_sport_client.cpp 写明该姿态可由 roll、pitch、yaw 调整。"
     },
     {
       "name": "sport.stand_up",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -48,11 +50,12 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "切换到站立锁定。SDK 示例 go2w_sport_client.cpp 注释为「站立锁定」，go2_sport_client.cpp 注释为 position stand up，也作为默认站立。"
     },
     {
       "name": "sport.stand_down",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -61,11 +64,12 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "趴下。SDK 示例注释为「趴下」和 position stand down。"
     },
     {
       "name": "sport.sit",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -74,11 +78,12 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "请求坐下。SDK 示例 go2_sport_client.cpp 将 Sit() 列为特殊动作，头文件没有更多说明。"
     },
     {
       "name": "sport.rise_sit",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -87,11 +92,12 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "请求从坐姿起身。SDK 示例将 RiseSit() 列为特殊动作，头文件没有更多说明。"
     },
     {
       "name": "sport.hello",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -100,11 +106,12 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::Hello()。SDK 只有方法名，无参数，头文件没有肢体动作说明。"
     },
     {
       "name": "sport.stretch",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -113,11 +120,12 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::Stretch()。SDK 只有方法名，无参数，头文件没有肢体动作说明。"
     },
     {
       "name": "sport.content",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -126,11 +134,12 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::Content()。SDK 只有方法名，无参数，头文件没有说明具体表现。"
     },
     {
       "name": "sport.heart",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -139,11 +148,12 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::Heart()。SDK 只有方法名，无参数，头文件没有说明具体表现。"
     },
     {
       "name": "sport.scrape",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -152,11 +162,12 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::Scrape()。SDK 只有方法名，无参数，头文件没有说明具体表现。"
     },
     {
       "name": "sport.free_walk",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -165,11 +176,12 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::FreeWalk()。SDK 只有方法名，无参数，头文件没有进一步说明。"
     },
     {
       "name": "sport.static_walk",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -178,11 +190,12 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::StaticWalk()。SDK 只有方法名，无参数，头文件没有进一步说明。"
     },
     {
       "name": "sport.trot_run",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -191,11 +204,12 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::TrotRun()。SDK 只有方法名，无参数，头文件没有进一步说明。"
     },
     {
       "name": "sport.economic_gait",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -204,7 +218,8 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::EconomicGait()。SDK 只有方法名，无参数，头文件没有进一步说明。"
     },
     {
       "name": "sport.recovery_stand",
@@ -216,7 +231,8 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "恢复站立。SDK 示例注释为「恢复站立」和 recovery stand。"
     },
     {
       "name": "sport.front_flip",
@@ -228,7 +244,8 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::FrontFlip()，前空翻。无参数，头文件没有更多说明。"
     },
     {
       "name": "sport.front_jump",
@@ -240,7 +257,8 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::FrontJump()，向前跳。无参数，头文件没有更多说明。"
     },
     {
       "name": "sport.front_pounce",
@@ -252,7 +270,8 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::FrontPounce()，向前扑。无参数，头文件没有更多说明。"
     },
     {
       "name": "sport.dance1",
@@ -264,7 +283,8 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::Dance1()，舞蹈动作 1。无参数，头文件没有说明舞步内容。"
     },
     {
       "name": "sport.dance2",
@@ -276,7 +296,8 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::Dance2()，舞蹈动作 2。无参数，头文件没有说明舞步内容。"
     },
     {
       "name": "sport.left_flip",
@@ -288,7 +309,8 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::LeftFlip()，向左侧翻。无参数，头文件没有更多说明。"
     },
     {
       "name": "sport.back_flip",
@@ -300,7 +322,8 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::BackFlip()，后空翻。无参数，头文件没有更多说明。"
     },
     {
       "name": "sport.switch_avoid_mode",
@@ -313,11 +336,12 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::SwitchAvoidMode()，切换避障模式。无参数，头文件没有说明切换后的具体模式。"
     },
     {
       "name": "sport.pose",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -330,11 +354,12 @@
       },
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::Pose(flag)。enabled 为真时进入，为假时退出。头文件没有说明姿势内容。"
     },
     {
       "name": "sport.classic_walk",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -347,7 +372,8 @@
       },
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::ClassicWalk(flag)，经典步态。enabled 为真时进入，为假时退出。头文件没有更多说明。"
     },
     {
       "name": "sport.switch_joystick",
@@ -363,7 +389,8 @@
       },
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::SwitchJoystick(flag)，切换手柄控制。enabled 为真时启用，为假时关闭。"
     },
     {
       "name": "sport.handstand",
@@ -379,7 +406,8 @@
       },
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::HandStand(flag)，倒立。enabled 为真时进入，为假时退出。"
     },
     {
       "name": "sport.free_bound",
@@ -395,7 +423,8 @@
       },
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::FreeBound(flag)，自由弹跳。enabled 为真时进入，为假时退出。头文件没有更多说明。"
     },
     {
       "name": "sport.free_jump",
@@ -411,11 +440,12 @@
       },
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::FreeJump(flag)，自由跳跃。enabled 为真时进入，为假时退出。头文件没有更多说明。"
     },
     {
       "name": "sport.free_avoid",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -428,11 +458,12 @@
       },
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::FreeAvoid(flag)，行走时避让。enabled 为真时进入，为假时退出。头文件没有说明具体避让行为。"
     },
     {
       "name": "sport.walk_upright",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -445,11 +476,12 @@
       },
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::WalkUpright(flag)，直立行走。enabled 为真时进入，为假时退出。头文件没有更多说明。"
     },
     {
       "name": "sport.cross_step",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -462,7 +494,8 @@
       },
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::CrossStep(flag)，交叉步。enabled 为真时进入，为假时退出。头文件没有更多说明。"
     },
     {
       "name": "sport.auto_recover_set",
@@ -478,11 +511,12 @@
       },
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::AutoRecoverSet(flag)，设置摔倒后是否自动恢复。enabled 为真时开启，为假时关闭。"
     },
     {
       "name": "sport.euler",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -507,11 +541,12 @@
       },
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::Euler(roll, pitch, yaw)，调整机身滚转、俯仰和偏航。SDK 示例写明平衡站立可由这三个值控制，但没有标明单位。"
     },
     {
       "name": "sport.move",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -541,11 +576,12 @@
       },
       "interruptible": true,
       "timeout_ms": 8000,
-      "required": false
+      "required": false,
+      "description": "SportClient::Move(vx, vy, vyaw)，速度控制。SDK 示例 go2w_sport_client.cpp 写明调用一次后机器人大约移动 1 秒并停下，持续移动需要重复发送。本技能用 duration_ms 到时调用 StopMove。SDK 没有标明速度单位。"
     },
     {
       "name": "sport.speed_level",
-      "risk_level": "confirm",
+      "risk_level": "normal",
       "allowed_callers": [
         "agent",
         "dashboard"
@@ -560,7 +596,8 @@
       },
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::SpeedLevel(level)，速度档位。SDK 示例注释为「速度档位」，没有说明每个档位对应的速度。"
     },
     {
       "name": "sport.auto_recover_get",
@@ -573,7 +610,8 @@
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
-      "required": false
+      "required": false,
+      "description": "SportClient::AutoRecoverGet()，查询摔倒后自动恢复开关的当前值。"
     }
   ]
 }

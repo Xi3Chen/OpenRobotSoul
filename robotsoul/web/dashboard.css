@@ -86,6 +86,24 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .status-pill.muted { color: #626e6e; }
 
 .control-section { margin: 0 0 26px; }
+.control-layout { display: grid; grid-template-columns: minmax(0, 1fr) 148px; gap: 22px; align-items: start; }
+.control-layout:has(.operations-panel:not(.is-collapsed)) { grid-template-columns: minmax(0, 1fr) minmax(280px, 42%); }
+.conversation-panel { margin: 0; min-width: 0; }
+.conversation-log { display: flex; flex-direction: column; gap: 12px; max-height: 420px; margin-bottom: 12px; overflow-y: auto; }
+.chat-turn { display: flex; flex-direction: column; max-width: min(100%, 520px); gap: 6px; }
+.chat-turn.user { align-self: end; align-items: end; }
+.chat-turn.agent { align-self: start; align-items: start; }
+.chat-bubble { margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); overflow-wrap: anywhere; font-size: 14px; line-height: 1.45; }
+.chat-turn.user .chat-bubble { background: #e8f1ef; }
+.chat-turn.agent .chat-bubble { background: var(--surface); }
+.chat-action { margin: 0; padding: 4px 8px; border: 1px solid #bdd8c8; border-radius: 3px; color: #205f40; background: #edf6f0; font-size: 12px; font-weight: 650; }
+.chat-action.is-denied { border-color: #e2c2b6; color: #8a3d24; background: #fbf1ec; }
+.operations-panel { margin: 0; min-width: 0; }
+.operations-panel .section-heading { align-items: center; }
+.operations-panel.is-collapsed .operations-note,
+.operations-panel.is-collapsed .control-list { display: none; }
+.operations-panel:not(.is-collapsed) .control-list { max-height: min(70vh, 640px); overflow-y: auto; }
+.operations-panel .control-row { grid-template-columns: 1fr; }
 .task-form { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: end; }
 textarea, input[type="text"], input[type="password"], input[type="url"], input[type="number"], select, .parameter-field input, .parameter-field select { width: 100%; border: 1px solid #aeb9b7; border-radius: var(--radius); background: var(--surface); color: var(--ink); padding: 10px 12px; }
 textarea { min-height: 74px; resize: vertical; }
@@ -107,7 +125,7 @@ textarea { min-height: 74px; resize: vertical; }
 .parameter-field { display: grid; gap: 5px; min-width: 0; }
 .parameter-field span { color: var(--muted); font-size: 11px; }
 .parameter-field input, .parameter-field select { min-height: 38px; padding: 7px 9px; }
-.voice-log-section { margin-top: 8px; }
+.run-log-line { margin: 0; padding: 8px 4px; border-bottom: 1px solid var(--line); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
 .monitor-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 28px; align-items: start; }
 .monitor-list { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
 .monitor-item { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 14px; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); font-weight: 600; cursor: pointer; }
@@ -177,6 +195,7 @@ textarea { min-height: 74px; resize: vertical; }
   .activity-row { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; padding: 12px 2px; }
   .activity-row time { grid-column: 1; grid-row: 2; }
   .activity-row .activity-result { grid-column: 2; grid-row: 1 / span 2; text-align: right; }
+  .control-layout, .control-layout:has(.operations-panel:not(.is-collapsed)) { grid-template-columns: 1fr; }
   .task-form { grid-template-columns: 1fr; }
   .task-form button { width: 100%; }
   .control-row { grid-template-columns: 1fr; gap: 12px; padding: 16px 2px; }

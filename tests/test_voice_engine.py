@@ -8,11 +8,21 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from robotsoul.runlog import configure, current
 from robotsoul.voice.audio import SoundDeviceCapture, SoundDeviceOutput, VoiceAudioError
 from robotsoul.voice.engine import SherpaVoiceEngine, VoiceEngineError
 
 
 class VoiceAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self._logs = tempfile.TemporaryDirectory()
+        self._previous_log = current().directory
+        configure(self._logs.name)
+
+    def tearDown(self):
+        configure(self._previous_log)
+        self._logs.cleanup()
+
     def test_sherpa_models_use_cpu_and_streaming_contracts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "models"
@@ -31,6 +41,7 @@ class VoiceAdapterTests(unittest.TestCase):
                     (target / filename).touch()
 
             calls = {}
+
             class Stream:
                 def accept_waveform(self, rate, samples): calls["waveform"] = (rate, tuple(samples))
             class Kws:
@@ -90,6 +101,7 @@ class VoiceAdapterTests(unittest.TestCase):
                 self.assertTrue(calls["kws_reset"])
                 calls["asr_ready"] = True
                 result = engine.accept_asr([0.2], 16000)
+                self.assertEqual(calls["asr_args"]["rule3_min_utterance_length"], 20.0)
                 self.assertEqual((result.text, result.is_endpoint), ("向前", True))
                 self.assertTrue(calls["asr_decoded"])
                 self.assertTrue(calls["asr_reset"])
@@ -98,6 +110,14 @@ class VoiceAdapterTests(unittest.TestCase):
                 engine.accept_vad([0.3])
                 self.assertEqual(engine.drain_speech_segments(), [])
                 self.assertEqual(engine.synthesize("你好").sample_rate, 22050)
+                keyword_text = Path(calls["kws_args"]["keywords_file"]).read_text(encoding="utf-8")
+                self.assertIn("suǒ lā :3.0 #0.1 @索拉", keyword_text)
+                lines = current().recent(20)
+                self.assertTrue(any("语音模型加载完成" in line for line in lines))
+                self.assertTrue(any("唤醒模型已加载" in line and "门槛=0.1" in line and "加权=3.0" in line for line in lines))
+                self.assertTrue(any("识别模型已加载" in line for line in lines))
+                self.assertTrue(any("端点模型已加载" in line for line in lines))
+                self.assertTrue(any("合成模型已加载" in line for line in lines))
                 engine.close()
 
     def test_missing_sherpa_is_reported_lazily(self):
@@ -119,6 +139,48 @@ class VoiceAdapterTests(unittest.TestCase):
             with patch.dict(sys.modules, {"sherpa_onnx": types.ModuleType("sherpa_onnx")}):
                 with self.assertRaisesRegex(VoiceEngineError, "kws-zh-en-3m model file tokens.txt"):
                     SherpaVoiceEngine(tmp, "索拉").load()
+
+    def test_vad_front_property_is_drained_without_calling_the_segment(self):
+        class Segment:
+            def __call__(self):
+                raise AssertionError("SpeechSegment must not be called")
+
+        class PropertyVad:
+            def __init__(self):
+                self.items = [Segment()]
+
+            @property
+            def front(self):
+                return self.items[0]
+
+            def empty(self):
+                return not self.items
+
+            def pop(self):
+                self.items.pop(0)
+
+        engine = SherpaVoiceEngine(tempfile.gettempdir(), "索拉")
+        engine._sherpa = object()
+        engine._vad = PropertyVad()
+        segments = engine.drain_speech_segments()
+        self.assertEqual(len(segments), 1)
+        self.assertIsInstance(segments[0], Segment)
+
+        class MethodVad:
+            def __init__(self):
+                self.items = ["method-segment"]
+
+            def front(self):
+                return self.items[0]
+
+            def empty(self):
+                return not self.items
+
+            def pop(self):
+                self.items.pop(0)
+
+        engine._vad = MethodVad()
+        self.assertEqual(engine.drain_speech_segments(), ["method-segment"])
 
     def test_audio_devices_are_lazy_and_capture_copies_mono_data(self):
         events = []

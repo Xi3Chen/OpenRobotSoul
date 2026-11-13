@@ -4,12 +4,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import inspect
 import tempfile
 from typing import Any, Sequence
 
 
 class VoiceEngineError(RuntimeError):
     """A required inference dependency or model resource is unavailable."""
+
+
+_KEYWORD_BOOST = 3.0
+_KEYWORD_THRESHOLD = 0.1
+_KEYWORD_TRAILING_BLANKS = 0
+_KEYWORD_ACTIVE_PATHS = 8
+# Sherpa treats rule 3 as "endpoint once the utterance reaches this many seconds".
+# Zero makes the first audio chunk an endpoint, so the command after the wake word is discarded.
+_ASR_MAX_UTTERANCE_SECONDS = 20.0
 
 
 @dataclass(frozen=True)
@@ -85,6 +95,15 @@ class SherpaVoiceEngine:
         self._keywords_file: Any = None
 
     def load(self) -> None:
+        _voice_log("Info", "开始加载语音模型")
+        try:
+            self._load_models()
+        except VoiceEngineError as exc:
+            _voice_log("Error", f"语音模型加载失败：{exc}")
+            raise
+        _voice_log("Info", "语音模型加载完成")
+
+    def _load_models(self) -> None:
         try:
             import sherpa_onnx
         except ImportError as exc:
@@ -111,6 +130,7 @@ class SherpaVoiceEngine:
         lexicons = sorted((self.resource_root / "models" / "tts-zh-xiao-ya-int8").rglob("lexicon.txt"))
 
         try:
+            _voice_log("Info", "开始加载唤醒模型")
             try:
                 encoded = sherpa_onnx.text2token(
                     [self.wake_phrase],
@@ -122,7 +142,8 @@ class SherpaVoiceEngine:
                 encoded = [_fallback_phone_pinyin(self.wake_phrase, kws["tokens.txt"])]
             if not encoded or not encoded[0]:
                 raise VoiceEngineError(f"Wake phrase cannot be encoded by the configured KWS model: {self.wake_phrase}")
-            keyword = " ".join(encoded[0]) + f" :2.0 #0.6 @{self.wake_phrase.replace(' ', '_')}"
+            phones = " ".join(encoded[0])
+            keyword = f"{phones} :{_KEYWORD_BOOST} #{_KEYWORD_THRESHOLD} @{self.wake_phrase.replace(' ', '_')}"
             self._keywords_file = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".keywords", delete=False)
             self._keywords_file.write(keyword + "\n")
             self._keywords_file.flush()
@@ -130,16 +151,27 @@ class SherpaVoiceEngine:
                 tokens=str(kws["tokens.txt"]), encoder=str(kws["encoder-epoch-13-avg-2-chunk-8-left-64.int8.onnx"]),
                 decoder=str(kws["decoder-epoch-13-avg-2-chunk-8-left-64.onnx"]),
                 joiner=str(kws["joiner-epoch-13-avg-2-chunk-8-left-64.int8.onnx"]),
-                num_threads=1, provider="cpu", keywords_file=self._keywords_file.name, max_active_paths=4, keywords_score=1.0,
+                num_threads=1, provider="cpu", keywords_file=self._keywords_file.name,
+                max_active_paths=_KEYWORD_ACTIVE_PATHS, keywords_score=_KEYWORD_BOOST,
+                keywords_threshold=_KEYWORD_THRESHOLD, num_trailing_blanks=_KEYWORD_TRAILING_BLANKS,
             )
             self._kws_stream = self._kws.create_stream()
+            _voice_log(
+                "Info",
+                f"唤醒模型已加载 短语={self.wake_phrase} 音素={phones} "
+                f"门槛={_KEYWORD_THRESHOLD} 加权={_KEYWORD_BOOST}",
+            )
+            _voice_log("Info", "开始加载识别模型")
             self._recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
                 tokens=str(asr["tokens.txt"]), encoder=str(asr["encoder.int8.onnx"]),
                 decoder=str(asr["decoder.onnx"]), joiner=str(asr["joiner.int8.onnx"]),
                 num_threads=1, sample_rate=self.sample_rate, feature_dim=80, enable_endpoint_detection=True,
-                rule1_min_trailing_silence=0.5, rule2_min_trailing_silence=0.3, rule3_min_utterance_length=0.0,
+                rule1_min_trailing_silence=0.5, rule2_min_trailing_silence=0.3,
+                rule3_min_utterance_length=_ASR_MAX_UTTERANCE_SECONDS,
                 decoding_method="greedy_search", provider="cpu",)
             self._asr_stream = self._recognizer.create_stream()
+            _voice_log("Info", f"识别模型已加载 目录={asr['encoder.int8.onnx'].parent.name}")
+            _voice_log("Info", "开始加载端点模型")
             vad_config = sherpa_onnx.VadModelConfig()
             vad_config.silero_vad.model = str(vad_files["silero_vad.int8.onnx"])
             vad_config.silero_vad.threshold = 0.5
@@ -153,6 +185,8 @@ class SherpaVoiceEngine:
             if not vad_config.validate():
                 raise VoiceEngineError("Invalid Silero VAD configuration")
             self._vad = sherpa_onnx.VoiceActivityDetector(vad_config, buffer_size_in_seconds=30)
+            _voice_log("Info", "端点模型已加载")
+            _voice_log("Info", "开始加载合成模型")
 
             tts_config = sherpa_onnx.OfflineTtsConfig(
                 model=sherpa_onnx.OfflineTtsModelConfig(
@@ -164,6 +198,7 @@ class SherpaVoiceEngine:
             if not tts_config.validate():
                 raise VoiceEngineError("Invalid Xiao-Ya TTS configuration")
             self._tts = sherpa_onnx.OfflineTts(tts_config)
+            _voice_log("Info", "合成模型已加载")
         except VoiceEngineError:
             self.close()
             raise
@@ -214,11 +249,15 @@ class SherpaVoiceEngine:
         self._vad.accept_waveform(self._np.asarray(samples, dtype=self._np.float32))
         return not self._vad.empty()
 
+    def speech_detected(self) -> bool:
+        self._ensure_loaded()
+        return bool(self._vad.is_speech_detected())
+
     def drain_speech_segments(self) -> list[Any]:
         self._ensure_loaded()
         segments = []
         while not self._vad.empty():
-            segments.append(self._vad.front())
+            segments.append(_vad_segment(self._vad))
             self._vad.pop()
         return segments
 
@@ -242,3 +281,17 @@ class SherpaVoiceEngine:
             self._keywords_file.close()
             self._keywords_file = None
             path.unlink(missing_ok=True)
+
+
+def _voice_log(level: str, message: str) -> None:
+    from robotsoul.runlog import log
+
+    log("Voice", level, message)
+
+
+def _vad_segment(vad: Any) -> Any:
+    """Read one VAD segment. sherpa-onnx exposes ``front`` as a property."""
+    front = vad.front
+    if inspect.ismethod(front) or inspect.isfunction(front):
+        return front()
+    return front

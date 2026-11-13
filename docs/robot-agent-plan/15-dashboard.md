@@ -19,12 +19,12 @@ AI 复核与人员确认是不同记录和门禁。语音、文字任务或 UI �
 ## Dashboard 页面
 
 - 总览：robot_id、型号、连接/健康、活动任务、最近反馈和策略/profile 版本。
-- 控制：Agent 自然语言任务及经过策略授权的 typed operation 表单。表单显示参数单位、范围和风险；不可用能力展示禁用原因。
+- 控制：对话界面提交自然语言，由语言模型根据技能介绍选择技能。以 `/技能名` 或 `/技能名 参数=值` 开头的文本才在本地直接调用，不再对自由文本做关键词匹配。Agent 调用了动作时，在对应气泡下显示动作名称和技能 ID；拒绝时只显示理由。可用操作与对话水平并排，默认折叠，展开后在面板内滚动查看。操作表单显示参数单位、范围和风险；不可用能力展示禁用原因。
 - 能力目录：operation、风险、允许调用入口、参数 schema、超时、可中断性、策略来源和可用状态。
 - 活动：任务与命令状态、AI 复核结论、操作员确认状态和适配器结果。
+- 监控：勾选后同时查看运行日志、麦克风输入波形和播放输出波形。运行日志来自当天的 `logs/YYYY-MM-DD.log`，唤醒、识别、提交运行时和技能执行结果也写在这里。总览页不再展示语音日志。格式和隐私边界见[运行日志](17-runtime-log.md)。
 - 设置：大语言模型、音频和登录账户。模型设置只保存一条云端路径，字段为 provider、base_url、model、timeout 和 API key。音频设置写回 `config/voice.json` 的机器人名称、唤醒短语、语言、输入/输出设备和会话时间；模型 ID 仍只能使用静态 registry 中的值。登录账户替换原先的操作员 PIN。
 - 语音目标设计：本地 PASSIVE 唤醒和 Dashboard WebRTC 通话共享 Voice Service；通话开始前须确认机器人本地麦克风已经关闭并释放，只有此后才接收浏览器音轨。登录或打开页面不自动请求麦克风权限。
-- 总览页的「语音日志」预览展示最近的唤醒命中和最终识别文本，数据来自 `logs/voice_events.jsonl`。该预览和 `GET /api/voice/events` 都要求已登录的操作员会话。记录范围见[语音交互子系统](16-voice-interaction.md)。
 
 ## Dashboard API
 
@@ -34,7 +34,8 @@ AI 复核与人员确认是不同记录和门禁。语音、文字任务或 UI �
 - `POST /api/settings/llm`、`POST /api/settings/audio`：保存云端模型路径和音频配置。留空的 `api_key` 保持原值；显式空字符串会清除密钥。
 - `POST /api/settings/accounts`、`POST /api/settings/accounts/delete`：新增或更新账户，以及删除其他账户。两次都要提交当前登录账户的密码。不能删除当前登录账户，也不能删除最后一个账户。
 - `GET /api/dashboard/overview`、`GET /api/capabilities`：只读总览和能力目录。
-- `POST /api/tasks`：提交自然语言任务，经 Agent capability surface 和 runtime 策略处理。
+- `GET /api/logs`：已登录会话读取当天运行日志。可选 `limit`（1 到 200，默认 100）和 `level`。返回原文文本行。
+- `POST /api/tasks`：提交自然语言任务。它与本地语音最终转写、Dashboard 通话最终转写进入同一条 `robotsoul.language_gateway` 规划入口，再经 capability surface 和 runtime 策略处理。这个进程不是 Go 版 PicoClaw。
 - `POST /api/actions/prepare`：服务端校验 caller、skill、schema、参数边界与当前策略，建立短时挑战；客户端不能设置 caller/risk/确认结果。
 - `POST /api/actions/execute`：提交挑战 ID。服务端原子消费挑战，重验策略与 digest；高危操作还需再次输入当前账户密码，然后通过 `InvocationContext` 调用 Runtime。
 
@@ -52,6 +53,6 @@ Dashboard LAN TLS 是控制操作的部署要求。浏览器麦克风 API 还要
 
 ## 实施状态
 
-当前 UI/API 主要用于 simulator。simulator 的移动技能标记 `confirm`。未配置 `SafetyReviewer` 时，Agent 不能执行确认级技能；已登录的 Dashboard 操作员确认后可以执行。Go2 profile 暴露 SportClient 动作。普通姿态、步态和限时移动是 `confirm`。翻滚、跳跃、倒立、舞蹈，以及摔倒恢复、手柄控制源和自动恢复开关是 `high`，只允许 Dashboard 操作员确认。`Damp` 没有暴露。所有公开 API 方法的策略清单仍需逐项审阅。
+当前 UI/API 主要用于 simulator。simulator 的移动技能标记 `confirm`。未配置 `SafetyReviewer` 时，Agent 不能执行确认级技能；已登录的 Dashboard 操作员确认后可以执行。Go2 profile 暴露 SportClient 动作。普通姿态、步态和限时移动是 `normal`。只有 `sport.switch_avoid_mode` 是 `confirm`。翻滚、跳跃、倒立、舞蹈，以及摔倒恢复、手柄控制源和自动恢复开关是 `high`，只允许 Dashboard 操作员确认。`Damp` 没有暴露。所有公开 API 方法的策略清单仍需逐项审阅。
 
 Dashboard 通话的第一方代码、单通话 WebRTC 媒体端点和浏览器控制已进入主仓库。通话租约由 Voice Service 音源仲裁器提供，本地音频设备必须先关闭并释放；模型/运行包下载和目标板安装见[部署指南](../deployment-guide.zh-CN.md)。浏览器端 `aiortc`/PyAV ARM64 wheel、麦克风/扬声器路由、实机低延迟及 10 小时稳定性仍未验证。

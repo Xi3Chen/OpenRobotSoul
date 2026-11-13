@@ -141,6 +141,20 @@ class VoiceCoreTests(unittest.TestCase):
         gate.reply_finished(now=31)
         self.assertTrue(gate.expired(now=50))
 
+    def test_wake_without_command_returns_to_listening_before_the_session_limit(self):
+        gate = ConversationGate(follow_up_seconds=5, session_max_seconds=30)
+        gate.wake(now=10)
+        self.assertFalse(gate.expired(now=14))
+        self.assertTrue(gate.expired(now=15))
+        self.assertFalse(gate.active)
+
+    def test_command_audio_keeps_the_session_until_the_hard_limit(self):
+        gate = ConversationGate(follow_up_seconds=5, session_max_seconds=30)
+        gate.wake(now=10)
+        gate.note_command_audio()
+        self.assertFalse(gate.expired(now=20))
+        self.assertTrue(gate.expired(now=40))
+
     def test_follow_up_deadline_expires_without_a_new_interaction(self):
         gate = ConversationGate(follow_up_seconds=5, session_max_seconds=30)
         gate.wake(now=10)

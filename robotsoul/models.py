@@ -70,6 +70,7 @@ class CapabilitySpec:
     interruptible: bool = True
     timeout_ms: int = 5000
     required: bool = False
+    description: str = ""
 
     @property
     def safety_class(self) -> str:

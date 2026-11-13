@@ -22,7 +22,8 @@ from robotsoul.audit import (
 )
 from robotsoul.adapters.base import RobotAdapter
 from robotsoul.adapters.registry import create_adapter
-from robotsoul.agent import AgentProvider, DemoAgent
+from robotsoul.agent import AgentProvider, AgentRejected, DemoAgent, resolve_slash_command
+from robotsoul.runlog import log as runtime_log
 from robotsoul.models import (
     AgentIntent,
     AuditRecord,
@@ -48,11 +49,18 @@ from robotsoul.models import (
 from robotsoul.profiles import RobotProfile
 
 
+_REVIEW_WINDOW = timedelta(seconds=120)
+
+
 class SafetyReviewer:
     """Tool-free reviewer contract for immutable confirm-tier proposals."""
 
     def review(self, proposal: ReviewProposal) -> SafetyReviewResult:
         raise NotImplementedError
+
+
+def _trace(level: str, task_id: str, message: str) -> None:
+    runtime_log("Runtime", level, f"id={task_id} {message}")
 
 
 def _authenticated_dashboard_operator(context: InvocationContext) -> bool:
@@ -190,6 +198,7 @@ class RobotRuntime:
             interruptible=declared.interruptible and discovered.interruptible,
             timeout_ms=min(declared.timeout_ms, discovered.timeout_ms),
             required=declared.required,
+            description=declared.description,
         )
 
     def available_tools(self) -> dict[str, dict[str, Any]]:
@@ -417,6 +426,7 @@ class RobotRuntime:
             record("task.status", {"status": status.value})
 
         record("task.received", {"input_chars": len(text)})
+        _trace("Info", task.task_id, f"收到指令：{text.strip()}")
         if not text.strip():
             return self._failed_result(task, history, "Task input is empty", transition, record)
         transition(TaskStatus.CONTEXTUALIZING)
@@ -425,9 +435,22 @@ class RobotRuntime:
             return self._failed_result(task, history, observation_error, transition, record)
         transition(TaskStatus.AWAITING_AGENT)
         try:
-            intent = _intent if _intent is not None else self.agent.plan(text, self.capabilities, observations)
+            if _intent is not None:
+                intent = _intent
+            else:
+                slash_intent = resolve_slash_command(text, self.capabilities)
+                if isinstance(slash_intent, str):
+                    return self._failed_result(task, history, slash_intent, transition, record)
+                if slash_intent is not None:
+                    _trace("Info", task.task_id, "使用直接指令")
+                    intent = slash_intent
+                else:
+                    _trace("Info", task.task_id, "等待语言决策")
+                    intent = self.agent.plan(text, self.capabilities, observations)
         except TimeoutError:
             return self._failed_result(task, history, "Agent request timed out", transition, record)
+        except AgentRejected as exc:
+            return self._failed_result(task, history, exc.reason, transition, record)
         except Exception as exc:
             return self._failed_result(task, history, f"Agent request failed: {exc}", transition, record)
         if intent is None:
@@ -435,6 +458,8 @@ class RobotRuntime:
         if not isinstance(intent, AgentIntent):
             return self._failed_result(task, history, "Agent returned an invalid intent", transition, record)
         record("agent.intent", {"skill": intent.skill, "parameter_names": sorted(intent.parameters) if isinstance(intent.parameters, dict) else []})
+        rationale = intent.rationale.strip() if isinstance(intent.rationale, str) else ""
+        _trace("Info", task.task_id, f"已选择技能 {intent.skill}" + (f" 理由={rationale}" if rationale else ""))
         transition(TaskStatus.VALIDATING_INTENT)
         validation_error = self._validate_intent(intent)
         if validation_error:
@@ -468,6 +493,7 @@ class RobotRuntime:
             operator_confirmation_id = str(uuid4())
         if capability.risk_level == RiskLevel.CONFIRM:
             transition(TaskStatus.REVIEWING)
+            _trace("Info", task.task_id, f"开始安全复核 技能={intent.skill} 风险={capability.risk_level.value}")
             dashboard_operator = _authenticated_dashboard_operator(context)
             if self.safety_reviewer is None and not dashboard_operator:
                 return self._failed_result(task, history, "Safety reviewer unavailable; operation was not executed", transition, record)
@@ -493,11 +519,12 @@ class RobotRuntime:
                     "safety.review.completed",
                     {"verdict": "allow", "reviewer": "dashboard_operator", "arguments_digest": digest},
                 )
+                _trace("Info", task.task_id, f"安全复核通过 技能={intent.skill} 复核者=操作员")
             else:
                 proposal = ReviewProposal(
                     proposal_id=str(uuid4()), command=proposal_command, risk_level=capability.risk_level,
                     policy_version=self.profile.profile_version, arguments_digest=digest,
-                    created_at=now, expires_at=min(proposal_command.deadline, now + timedelta(seconds=30)),
+                    created_at=now, expires_at=now + _REVIEW_WINDOW,
                     user_input=text,
                 )
                 try:
@@ -507,8 +534,37 @@ class RobotRuntime:
                     return self._failed_result(task, history, "Safety review failed closed", transition, record)
                 record("safety.review.completed", {"proposal_id": proposal.proposal_id, "verdict": getattr(getattr(review, "verdict", None), "value", "invalid"), "arguments_digest": digest})
                 reviewed_digest = command_proposal_digest(proposal.command, self.profile.profile_version)
-                if not isinstance(review, SafetyReviewResult) or review.verdict != ReviewVerdict.ALLOW or review.arguments_digest != digest or reviewed_digest != digest or utc_now() >= proposal.expires_at:
-                    return self._failed_result(task, history, "Safety review denied or mismatched proposal", transition, record)
+                expired = utc_now() >= proposal.expires_at
+                verdict = review.verdict if isinstance(review, SafetyReviewResult) else None
+                digest_matches = (
+                    isinstance(review, SafetyReviewResult)
+                    and review.arguments_digest == digest
+                    and reviewed_digest == digest
+                )
+                if verdict == ReviewVerdict.ALLOW and digest_matches and not expired:
+                    _trace("Info", task.task_id, f"安全复核通过 技能={intent.skill}")
+                if verdict != ReviewVerdict.ALLOW or not digest_matches or expired:
+                    reason = f"安全复核没有通过，没有执行 {intent.skill}"
+                    if (
+                        isinstance(review, SafetyReviewResult)
+                        and verdict != ReviewVerdict.ALLOW
+                        and digest_matches
+                        and not expired
+                        and review.rationale.strip()
+                    ):
+                        reason = review.rationale.strip()
+                    elif expired:
+                        reason = f"{intent.skill} 的安全复核超时，没有执行"
+                    elif not digest_matches:
+                        reason = f"{intent.skill} 的复核结果与提案不一致，没有执行"
+                    return self._failed_result(task, history, reason, transition, record)
+        if proposal_command is not None:
+            proposal_command = Command(
+                **{
+                    **proposal_command.__dict__,
+                    "deadline": utc_now() + timedelta(milliseconds=capability.timeout_ms),
+                }
+            )
         command = proposal_command or Command(
             command_id=str(uuid4()),
             task_id=task.task_id,
@@ -544,6 +600,7 @@ class RobotRuntime:
                 self._used_review_bindings.add(command.review_digest)
         record("command.created", {"command_id": command.command_id, "skill": command.skill})
         transition(TaskStatus.EXECUTING)
+        _trace("Info", task.task_id, f"开始执行 技能={command.skill}")
         tool_arguments = safe_tool_arguments(command, capability)
         tool_call_id = str(uuid4())
         private_values = (*private_command_values(command), text)
@@ -669,6 +726,7 @@ class RobotRuntime:
             )
         if any(item.status == FeedbackStatus.CANCELLED for item in feedback):
             transition(TaskStatus.CANCELLED)
+            _trace("Warning", task.task_id, f"执行已取消 技能={command.skill}")
             return TaskResult(task, feedback, None, tuple(history))
         terminal = next(
             (item for item in reversed(feedback) if item.status in {FeedbackStatus.SUCCEEDED, FeedbackStatus.FAILED}),
@@ -699,6 +757,7 @@ class RobotRuntime:
         record("task.evaluation", {"success": evaluation.success, "evidence": list(evaluation.evidence)})
         if evaluation.success:
             transition(TaskStatus.COMPLETED)
+            _trace("Info", task.task_id, f"执行完成 技能={command.skill} 结论={evaluation.conclusion}")
         else:
             return self._failed_result(task, history, evaluation.conclusion, transition, record, feedback, evaluation)
         return TaskResult(task, feedback, evaluation, tuple(history))
@@ -868,4 +927,5 @@ class RobotRuntime:
         task.error = error
         record("task.failed", {"error": error})
         transition(TaskStatus.FAILED)
+        _trace("Warning", task.task_id, f"指令未执行 原因={error}")
         return TaskResult(task, feedback, evaluation, tuple(history))

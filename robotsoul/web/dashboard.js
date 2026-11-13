@@ -219,10 +219,6 @@
       setVoiceStatus(...details);
     }
     renderRobotInformation(data.robot_configuration || {});
-    if (Array.isArray(data.voice_events)) {
-      renderVoiceLog(data.voice_events, "#voice-log");
-      if (monitorEnabled("logs")) renderVoiceLog(data.voice_events, "#monitor-log");
-    }
     renderActions(data.actions || [], "#overview-actions", 5);
     renderCapabilities(data.capabilities || []);
     renderControls(data.capabilities || []);
@@ -251,37 +247,20 @@
     }
   }
 
-  function renderVoiceLog(events, selector) {
-    const root = $(selector);
+  function renderRunLog(lines) {
+    const root = $("#monitor-log");
     if (!root) return;
     root.replaceChildren();
-    if (!events.length) {
-      root.append(empty("还没有唤醒或识别记录"));
+    if (!lines.length) {
+      root.append(empty("还没有运行日志"));
       return;
     }
-    for (const event of events) {
-      const row = document.createElement("article");
-      row.className = "activity-row";
-      const title = document.createElement("strong");
-      title.textContent = event.kind === "wake" ? "已唤醒" : "识别文本";
-      const when = document.createElement("time");
-      when.dateTime = event.timestamp || "";
-      when.textContent = formatVoiceTime(event.timestamp);
-      const source = document.createElement("span");
-      source.textContent = event.source === "call" ? "网页通话" : "本地麦克风";
-      const spoken = document.createElement("span");
-      spoken.className = "activity-result";
-      spoken.textContent = text(event.text, "（空）");
-      row.append(title, when, source, spoken);
+    for (const line of lines) {
+      const row = document.createElement("p");
+      row.className = "run-log-line";
+      row.textContent = line;
       root.append(row);
     }
-  }
-
-  function formatVoiceTime(value) {
-    if (!value) return "时间未知";
-    const parsed = new Date(value);
-    if (Number.isNaN(parsed.getTime())) return text(value);
-    return parsed.toLocaleString("zh-CN", { hour12: false });
   }
 
   function renderCapabilities(capabilities) {
@@ -549,7 +528,7 @@
 
   async function refresh() {
     try {
-      const data = await request(`/api/dashboard/overview${voiceEventsNeeded() ? "" : "?voice_events=0"}`);
+      const data = await request("/api/dashboard/overview");
       state.overview = data;
       renderOverview(data);
       renderActions(data.actions || [], "#activity-list");
@@ -566,11 +545,11 @@
       panel.classList.toggle("active", active);
       panel.hidden = !active;
     });
-    if (name === "monitor") {
-      syncMonitorPanels();
-      if (monitorEnabled("logs") && state.csrf && !Array.isArray(state.overview?.voice_events)) refresh();
-    } else stopMonitor();
-    if (name === "overview" && state.csrf && !Array.isArray(state.overview?.voice_events)) refresh();
+    if (name === "monitor") syncMonitorPanels();
+    else {
+      stopMonitor();
+      stopLogPoll();
+    }
     if (name === "settings") loadSettings();
   }
 
@@ -582,12 +561,6 @@
     return ["input", "output"].filter(monitorEnabled);
   }
 
-  function voiceEventsNeeded() {
-    const overviewOpen = !$("[data-panel=overview]")?.hidden;
-    const monitorOpen = !$("[data-panel=monitor]")?.hidden;
-    return overviewOpen || (monitorOpen && monitorEnabled("logs"));
-  }
-
   function syncMonitorPanels() {
     $$("[data-monitor-panel]").forEach(panel => {
       panel.hidden = !monitorEnabled(panel.dataset.monitorPanel);
@@ -595,8 +568,29 @@
     const monitorOpen = !$("[data-panel=monitor]")?.hidden;
     if (monitorOpen && selectedAudioChannels().length) startMonitor();
     else stopMonitor();
-    if (monitorEnabled("logs") && Array.isArray(state.overview?.voice_events)) {
-      renderVoiceLog(state.overview.voice_events, "#monitor-log");
+    if (monitorOpen && monitorEnabled("logs")) startLogPoll();
+    else stopLogPoll();
+  }
+
+  function startLogPoll() {
+    if (state.logTimer) return;
+    pollLogs();
+    state.logTimer = window.setInterval(pollLogs, 1000);
+  }
+
+  function stopLogPoll() {
+    if (!state.logTimer) return;
+    window.clearInterval(state.logTimer);
+    state.logTimer = null;
+  }
+
+  async function pollLogs() {
+    if (!state.csrf || document.hidden || !monitorEnabled("logs")) return;
+    try {
+      const data = await request("/api/logs?limit=100");
+      renderRunLog(Array.isArray(data.lines) ? data.lines : []);
+    } catch (error) {
+      if (state.csrf) showError(error.message);
     }
   }
 
@@ -882,22 +876,58 @@
     }
   });
 
+  $("#operations-toggle").addEventListener("click", () => {
+    const panel = document.querySelector(".operations-panel");
+    const list = $("#controls-list");
+    const collapsed = panel.classList.toggle("is-collapsed");
+    list.hidden = collapsed;
+    $("#operations-toggle").setAttribute("aria-expanded", String(!collapsed));
+    $("#operations-toggle").textContent = collapsed ? "展开" : "收起";
+  });
+
   $("#task-form").addEventListener("submit", async event => {
     event.preventDefault();
     const field = $("#task-text");
     const submit = $("#task-form button[type=submit]");
+    const spoken = field.value.trim();
     submit.disabled = true;
     try {
-      await request("/api/tasks", { method: "POST", body: JSON.stringify({ text: field.value }) });
+      const data = await request("/api/tasks", { method: "POST", body: JSON.stringify({ text: field.value }) });
+      const task = data.task || {};
       field.value = "";
+      appendConversation("user", spoken);
+      appendConversation("agent", task.error || task.evaluation || "已处理", task.invoked_action);
       await refresh();
       announce("任务已处理");
     } catch (error) {
+      appendConversation("user", spoken);
+      appendConversation("agent", error.message);
       showError(error.message);
     } finally {
       submit.disabled = false;
     }
   });
+
+  function appendConversation(role, message, action) {
+    const log = $("#conversation-log");
+    const turn = document.createElement("article");
+    turn.className = `chat-turn ${role}`;
+    const bubble = document.createElement("p");
+    bubble.className = "chat-bubble";
+    bubble.textContent = message;
+    turn.append(bubble);
+    if (action && action.skill) {
+      const line = document.createElement("p");
+      const executed = action.status === "completed";
+      line.className = executed ? "chat-action" : "chat-action is-denied";
+      line.textContent = executed
+        ? `${action.label || action.skill} · ${action.skill}`
+        : `${action.label || action.skill} · ${action.skill} · 未执行`;
+      turn.append(line);
+    }
+    log.append(turn);
+    log.scrollTop = log.scrollHeight;
+  }
 
   $("#explicit-confirm").addEventListener("change", event => {
     $("#dialog-execute").disabled = !event.target.checked;
@@ -940,7 +970,6 @@
   $$(".nav-item").forEach(button => button.addEventListener("click", () => selectView(button.dataset.view)));
   $$("input[data-monitor]").forEach(input => input.addEventListener("change", () => {
     syncMonitorPanels();
-    if (input.dataset.monitor === "logs" && input.checked && state.csrf && !Array.isArray(state.overview?.voice_events)) refresh();
   }));
   window.addEventListener("resize", () => { if (state.levels) drawLevels(state.levels); });
   $$('[data-open-view]').forEach(button => button.addEventListener("click", () => selectView(button.dataset.openView)));

@@ -93,8 +93,15 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
                 "sport.auto_recover_set",
             },
         )
-        for name in ("sport.switch_avoid_mode", "sport.free_avoid", "sport.walk_upright", "sport.cross_step", "sport.stand_up", "sport.move"):
-            self.assertEqual(declared[name].risk_level, RiskLevel.CONFIRM)
+        self.assertEqual(declared["sport.stand_up"].description, catalog["sport.stand_up"].description)
+        self.assertIn("站立锁定", declared["sport.stand_up"].description)
+        self.assertIn("速度控制", declared["sport.move"].description)
+        self.assertIn("Hello()", declared["sport.hello"].description)
+        self.assertTrue(all(item.description for item in self.profile.capabilities))
+        self.assertEqual(declared["sport.switch_avoid_mode"].risk_level, RiskLevel.CONFIRM)
+        self.assertIn("agent", declared["sport.switch_avoid_mode"].allowed_callers)
+        for name in ("sport.free_avoid", "sport.walk_upright", "sport.cross_step", "sport.stand_up", "sport.move"):
+            self.assertEqual(declared[name].risk_level, RiskLevel.NORMAL)
             self.assertIn("agent", declared[name].allowed_callers)
         source = __import__("pathlib").Path("adapters/unitree_go2/bridge/bridge.cpp").read_text(encoding="utf-8")
         for name in declared:
@@ -179,7 +186,7 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
             "command-1", "task-1", "trace-1", self.profile.robot_id,
             "sport.stand_up", {},
             utc_now() + timedelta(seconds=2),
-            risk_level=RiskLevel.CONFIRM,
+            risk_level=RiskLevel.NORMAL,
         )
         self.assertEqual(driver.execute(command)[0].error_code, "bridge_unhealthy")
         self.assertEqual(driver.cancel(command).error_code, "no_active_command")
@@ -315,7 +322,7 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
             "command-1", "task-1", "trace-1", self.profile.robot_id,
             "sport.stand_up", {},
             utc_now() + timedelta(seconds=2),
-            risk_level=RiskLevel.CONFIRM,
+            risk_level=RiskLevel.NORMAL,
         )
 
         feedback = adapter.execute(command)
@@ -349,12 +356,12 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         calls = []
         driver = _connected_driver(self.profile, calls)
         accepted = driver.execute(_sport_command(
-            self.profile, "sport.stand_up", {}, RiskLevel.CONFIRM,
+            self.profile, "sport.stand_up", {}, RiskLevel.NORMAL,
         ))
         rejected = driver.execute(_sport_command(
             self.profile, "sport.move",
             {"vx": 9, "vy": 0, "vyaw": 0, "duration_ms": 200},
-            RiskLevel.CONFIRM,
+            RiskLevel.NORMAL,
         ))
 
         self.assertEqual([item.status for item in accepted], [
@@ -373,7 +380,7 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         command = _sport_command(
             self.profile, "sport.move",
             {"vx": 0.2, "vy": 0.0, "vyaw": 0.0, "duration_ms": 1500},
-            RiskLevel.CONFIRM,
+            RiskLevel.NORMAL,
         )
         box = {}
 

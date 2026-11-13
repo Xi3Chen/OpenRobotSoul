@@ -230,4 +230,5 @@ def _intersect_capabilities(
         interruptible=profile.interruptible and device.interruptible,
         timeout_ms=min(profile.timeout_ms, device.timeout_ms),
         required=profile.required,
+        description=profile.description,
     )

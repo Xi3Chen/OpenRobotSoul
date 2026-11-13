@@ -15,7 +15,16 @@ from robotsoul.agent import DemoAgent
 from robotsoul.dashboard import run_dashboard
 from robotsoul.profiles import list_profiles, load_selected_profile
 from robotsoul.picoclaw import PicoClawCodingAgent, PicoClawError
+from robotsoul.language_session import (
+    CodingDispatcher,
+    LanguageAgent,
+    LanguageGatewayError,
+    LanguageSafetyReviewer,
+    LanguageSession,
+    report_startup_failure,
+)
 from robotsoul.adapters.registry import create_adapter
+from robotsoul.runlog import log as runtime_log
 from robotsoul.runtime import RobotRuntime
 
 
@@ -42,8 +51,10 @@ def main() -> None:
     subparsers.add_parser("profiles", help="List profiles registered by robot modules")
     subparsers.add_parser("status", help="Check the selected robot connection and read-only state")
     run_parser = subparsers.add_parser("run", help="Run a text task using the selected robot module")
-    run_parser.add_argument("text", nargs="+", help="Task text, for example: 抬头")
-    subparsers.add_parser("demo", help="Run the built-in Chinese head-look demo")
+    run_parser.add_argument("--llm-config", help="Local cloud model settings file")
+    run_parser.add_argument("--demo-agent", action="store_true", help="Skip the language process. Free text is not matched locally")
+    run_parser.add_argument("text", nargs="+", help="Task text. Ordinary sentences go to the language process; /skill runs locally")
+    subparsers.add_parser("demo", help="Run the built-in /head.look demo without a language process")
     dashboard_parser = subparsers.add_parser("dashboard", help="Run the local operator Dashboard")
     dashboard_parser.add_argument("--operator-user-env", default="ROBOTSOUL_DASHBOARD_USER", help="Environment variable for the initial operator username")
     dashboard_parser.add_argument("--operator-password-env", default="ROBOTSOUL_DASHBOARD_PASSWORD", help="Environment variable for the initial operator password; prompted securely when unset")
@@ -55,7 +66,7 @@ def main() -> None:
     dashboard_parser.add_argument("--tls-cert", help="PEM certificate for LAN HTTPS")
     dashboard_parser.add_argument("--tls-key", help="PEM private key for LAN HTTPS")
     dashboard_parser.add_argument("--no-voice", action="store_true", help="Do not start local passive voice listening")
-    dashboard_parser.add_argument("--demo-agent", action="store_true", help="Use the local rule-based agent for hardware profiles")
+    dashboard_parser.add_argument("--demo-agent", action="store_true", help="Skip the language process. Free text is not matched locally")
     resource_parser = subparsers.add_parser("voice-resources", help="Download, install, verify, or package pinned voice resources")
     resource_parser.add_argument("action", choices=("download", "install", "verify", "pack", "import"))
     resource_parser.add_argument("--root")
@@ -181,15 +192,45 @@ def main() -> None:
         if not result["connected"]:
             raise SystemExit(1)
         return
+    language_session = None
+    coding_dispatcher = CodingDispatcher()
+    use_language = args.command in {"dashboard", "run"} and not getattr(args, "demo_agent", False)
+    agent = DemoAgent() if getattr(args, "demo_agent", False) else None
+    reviewer = None
+    if use_language:
+        from robotsoul.settings import default_llm_path
+
+        llm_path = Path(args.llm_config) if getattr(args, "llm_config", None) else default_llm_path()
+        try:
+            language_session = LanguageSession.start_resident(llm_path)
+        except LanguageGatewayError as exc:
+            report_startup_failure(coding_dispatcher, str(exc))
+            runtime_log("Runtime", "Error", f"语言进程启动失败：{exc}")
+            parser.error(str(exc))
+        agent = LanguageAgent(language_session, coding_dispatcher)
+        reviewer = LanguageSafetyReviewer(language_session)
     try:
         profile = load_selected_profile(args.profile, args.robot_config, args.robot_module)
         runtime = RobotRuntime.from_profile(
             profile,
-            agent=DemoAgent() if args.command == "dashboard" and args.demo_agent else None,
+            agent=agent,
             audit_sink=JsonlToolCallAuditSink(),
+            safety_reviewer=reviewer,
         )
     except (RuntimeError, ValueError) as exc:
+        if use_language:
+            report_startup_failure(coding_dispatcher, str(exc))
+        if language_session is not None:
+            language_session.close()
+        runtime_log("Runtime", "Error", f"运行时启动失败：{exc}")
         parser.error(str(exc))
+    _log_runtime_connection(runtime)
+
+    def _close_started_processes() -> None:
+        if language_session is not None:
+            language_session.close()
+        runtime.close()
+
     if args.command == "dashboard":
         from robotsoul.settings import OperatorDirectory, default_llm_path, default_operators_path, default_voice_config_path
 
@@ -203,30 +244,34 @@ def main() -> None:
                 password = os.environ.get(args.operator_password_env)
                 if not username:
                     if not sys.stdin.isatty():
+                        _close_started_processes()
                         parser.error(f"Set {args.operator_user_env} or create {operators_path}")
                     username = input("Dashboard operator username: ")
                 if not password:
                     if not sys.stdin.isatty():
+                        _close_started_processes()
                         parser.error(f"Set {args.operator_password_env} or create {operators_path}")
                     password = getpass.getpass("Dashboard operator password: ")
                 directory.upsert(username, password)
         except (OSError, ValueError) as exc:
+            runtime_log("Dashboard", "Error", f"操作员目录不可用：{exc}")
+            _close_started_processes()
             parser.error(str(exc))
+        runtime_log("Dashboard", "Info", f"操作员目录已就绪 accounts={len(directory.usernames())}")
         voice_service = None
         voice_media = None
-        voice_event_log = None
         try:
             if not args.no_voice:
                 from robotsoul.voice.factory import create_voice_service
-                from robotsoul.voice.log import JsonlVoiceEventLog
                 from robotsoul.voice.media import VoiceMediaBridge
 
-                voice_event_log = JsonlVoiceEventLog()
                 voice_service, _voice_config = create_voice_service(
-                    runtime, config_path=voice_config_path, event_log=voice_event_log
+                    runtime, config_path=voice_config_path
                 )
                 voice_service.start()
                 voice_media = VoiceMediaBridge(voice_service)
+            else:
+                runtime_log("Voice", "Warning", "语音服务未启用")
             run_dashboard(
                 runtime,
                 operators_path=operators_path,
@@ -238,9 +283,11 @@ def main() -> None:
                 tls_key=args.tls_key,
                 voice_service=voice_service,
                 call_media=voice_media,
-                voice_event_log=voice_event_log,
             )
         except (RuntimeError, ValueError, OSError) as exc:
+            if use_language:
+                report_startup_failure(coding_dispatcher, str(exc))
+            runtime_log("Dashboard", "Error", f"启动失败：{exc}")
             parser.error(str(exc))
         finally:
             if voice_media is not None:
@@ -248,15 +295,41 @@ def main() -> None:
             if voice_service is not None:
                 voice_service.stop()
             runtime.close()
+            if language_session is not None:
+                language_session.close()
         return
     try:
-        text = "抬头" if args.command == "demo" else " ".join(args.text)
+        text = "/head.look yaw_deg=0 pitch_deg=10" if args.command == "demo" else " ".join(args.text)
         result = runtime.run_text(text)
         print(json.dumps(_json_value(result), ensure_ascii=False, indent=2))
         if result.task.status.value != "completed":
             raise SystemExit(1)
     finally:
         runtime.close()
+        if language_session is not None:
+            language_session.close()
+
+
+def _log_runtime_connection(runtime: RobotRuntime) -> None:
+    profile = runtime.profile
+    agent_name = type(runtime.agent).__name__
+    runtime_log(
+        "Runtime",
+        "Info",
+        "运行时已创建 "
+        f"profile={profile.profile_id} robot={profile.robot_id} "
+        f"module={profile.robot_module} agent={agent_name} "
+        f"capabilities={len(runtime.capabilities)}",
+    )
+    try:
+        connected = bool(runtime.adapter.health())
+    except Exception as exc:
+        runtime_log("Runtime", "Error", f"连接检查失败 profile={profile.profile_id} error={exc}")
+        return
+    if connected:
+        runtime_log("Runtime", "Info", f"机器人连接完成 profile={profile.profile_id}")
+    else:
+        runtime_log("Runtime", "Warning", f"机器人未连接 profile={profile.profile_id}")
 
 
 if __name__ == "__main__":

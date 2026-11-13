@@ -138,7 +138,6 @@ class DashboardService:
         action_ttl_seconds: int = ACTION_TTL_SECONDS,
         capture_arbiter: CaptureArbiter | None = None,
         call_media: Any | None = None,
-        voice_event_log: Any | None = None,
         clock=time.monotonic,
     ) -> None:
         if not operators.usernames():
@@ -152,7 +151,6 @@ class DashboardService:
         self._clock = clock
         self.capture_arbiter = capture_arbiter
         self.call_media = call_media
-        self.voice_event_log = voice_event_log
         self._active_call: dict[str, str] | None = None
         self._sessions: dict[str, _Session] = {}
         self._challenges: dict[str, _ActionChallenge] = {}
@@ -402,7 +400,7 @@ class DashboardService:
         ]:
             self._challenges.pop(challenge_id, None)
 
-    def overview(self, *, include_voice_events: bool = True) -> dict[str, Any]:
+    def overview(self) -> dict[str, Any]:
         robot = self.runtime.adapter
         try:
             connected = bool(robot.health())
@@ -449,8 +447,6 @@ class DashboardService:
             "capabilities": [self._capability_view(name, spec) for name, spec in capabilities.items()],
             "actions": list(reversed(self._actions[-100:])),
         }
-        if include_voice_events:
-            payload["voice_events"] = self.voice_events()
         return payload
 
     def _battery_view(self, robot: Any) -> dict[str, Any] | None:
@@ -471,15 +467,10 @@ class DashboardService:
             return None
         return {"level_percent": level, "charging": charging}
 
-    def voice_events(self, limit: int = 30) -> list[dict[str, Any]]:
-        log = self.voice_event_log
-        if log is None:
-            return []
-        try:
-            events = log.recent(limit)
-        except (TypeError, ValueError):
-            return []
-        return events if isinstance(events, list) else []
+    def runtime_logs(self, limit: int = 100, level: str | None = None) -> list[str]:
+        from robotsoul.runlog import current
+
+        return current().recent(limit, level)
 
     def audio_monitor(self, channels: set[str] | None = None) -> dict[str, Any]:
         wanted = {"input", "output"} if channels is None else {name for name in channels if name in {"input", "output"}}
@@ -524,7 +515,7 @@ class DashboardService:
         return {
             "name": name,
             "label": CAPABILITY_LABELS.get(name, name),
-            "description": getattr(capability, "description", name),
+            "description": capability.description or CAPABILITY_LABELS.get(name, name),
             "risk_level": risk,
             "allowed_callers": callers,
             "dashboard_allowed": dashboard_allowed,
@@ -737,12 +728,31 @@ class DashboardService:
         }
 
 
+def _invoked_action(result: TaskResult) -> dict[str, str] | None:
+    skill = None
+    for event_type in ("command.created", "agent.intent"):
+        for record in result.history:
+            if record.event_type != event_type:
+                continue
+            candidate = record.details.get("skill")
+            if isinstance(candidate, str) and candidate:
+                skill = candidate
+                break
+        if skill is not None:
+            break
+    if skill is None:
+        return None
+    return {"skill": skill, "label": CAPABILITY_LABELS.get(skill, skill), "status": result.task.status.value}
+
+
 def _task_result_view(result: TaskResult) -> dict[str, Any]:
     return {
         "task_id": result.task.task_id,
         "trace_id": result.task.trace_id,
         "status": result.task.status.value,
         "error": result.task.error,
+        "evaluation": result.evaluation.conclusion if result.evaluation is not None else None,
+        "invoked_action": _invoked_action(result),
         "feedback": [
             {
                 "status": item.status.value,
@@ -779,13 +789,20 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         return
 
-    def _event_limit(self) -> int:
-        raw = parse_qs(urlsplit(self.path).query).get("limit", ["30"])
+    def _log_query(self) -> tuple[int, str | None]:
+        query = parse_qs(urlsplit(self.path).query)
+        raw = query.get("limit", ["100"])
         try:
             limit = int(raw[0])
         except (TypeError, ValueError):
-            return 30
-        return min(100, max(1, limit))
+            limit = 100
+        limit = min(200, max(1, limit))
+        level = query.get("level", [None])[0]
+        if level == "":
+            level = None
+        if level is not None and level not in {"Info", "Warning", "Error"}:
+            raise ValueError("level must be Info, Warning or Error")
+        return limit, level
 
     def _monitor_channels(self) -> set[str] | None:
         query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
@@ -798,10 +815,6 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 if name in {"input", "output"}:
                     selected.add(name)
         return selected
-
-    def _voice_events_requested(self) -> bool:
-        raw = parse_qs(urlsplit(self.path).query).get("voice_events", ["1"])
-        return raw[0] not in {"0", "false", "no"}
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
@@ -831,7 +844,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         if session is None:
             return
         if path == "/api/dashboard/overview":
-            self._json(HTTPStatus.OK, self.server.service.overview(include_voice_events=self._voice_events_requested()))
+            self._json(HTTPStatus.OK, self.server.service.overview())
             return
         if path == "/api/capabilities":
             data = self.server.service.overview()
@@ -840,8 +853,14 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/proposals":
             self._json(HTTPStatus.OK, {"proposals": []})
             return
-        if path == "/api/voice/events":
-            self._json(HTTPStatus.OK, {"events": self.server.service.voice_events(self._event_limit())})
+        if path == "/api/logs":
+            try:
+                limit, level = self._log_query()
+                lines = self.server.service.runtime_logs(limit, level)
+            except ValueError as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._json(HTTPStatus.OK, {"lines": lines})
             return
         if path == "/api/voice/monitor":
             self._json(HTTPStatus.OK, self.server.service.audio_monitor(self._monitor_channels()))
@@ -1100,7 +1119,6 @@ def create_dashboard_server(
     tls_key: str | Path | None = None,
     capture_arbiter: CaptureArbiter | None = None,
     call_media: Any | None = None,
-    voice_event_log: Any | None = None,
 ) -> _DashboardHTTPServer:
     try:
         is_loopback = ip_address(host).is_loopback or host.lower() == "localhost"
@@ -1127,7 +1145,6 @@ def create_dashboard_server(
         voice_config_path=voice_config_path,
         capture_arbiter=capture_arbiter,
         call_media=call_media,
-        voice_event_log=voice_event_log,
     )
     server = _DashboardHTTPServer(
         (host, port), DashboardRequestHandler, service, secure=bool(tls_cert), allowed_host=host
@@ -1154,8 +1171,11 @@ def run_dashboard(
     tls_key: str | Path | None = None,
     voice_service: Any | None = None,
     call_media: Any | None = None,
-    voice_event_log: Any | None = None,
 ) -> None:
+    from robotsoul.runlog import log as runtime_log
+
+    scheme = "https" if tls_cert else "http"
+    runtime_log("Dashboard", "Info", f"开始启动 {scheme}://{host}:{port}")
     server = create_dashboard_server(
         runtime,
         operator_username=operator_username,
@@ -1169,15 +1189,16 @@ def run_dashboard(
         tls_key=tls_key,
         capture_arbiter=voice_service,
         call_media=call_media,
-        voice_event_log=voice_event_log,
     )
-    scheme = "https" if tls_cert else "http"
     print(f"RobotHarness Dashboard: {scheme}://{host}:{port}")
     if scheme == "http":
         print("Loopback development only; mobile microphone access requires HTTPS.")
+    voice_state = "已接入" if voice_service is not None else "未接入"
+    runtime_log("Dashboard", "Info", f"监听已开始 {scheme}://{host}:{port} voice={voice_state}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        runtime_log("Dashboard", "Info", "停止")
         server.server_close()

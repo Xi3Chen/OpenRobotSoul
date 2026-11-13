@@ -2,7 +2,7 @@
 
 ## 目标与边界
 
-Voice Service 为单台机器人提供本地待机唤醒、连续会话识别和 Dashboard 通话入口。它是机器人侧受监督的独立服务；下列职责是服务内逻辑组件，不要求各自拆成进程。音频采集和实时识别不依赖云端 Agent。语音产生的最终文本仍须经 RobotRuntime、caller policy、能力 schema 和本地安全检查，唤醒或通话本身不授予动作权限。
+Voice Service 为单台机器人提供本地待机唤醒、连续会话识别和 Dashboard 通话入口。它是机器人侧受监督的独立服务；下列职责是服务内逻辑组件，不要求各自拆成进程。音频采集、唤醒和实时识别不依赖云端 Agent。通过置信度和轮次检查的最终转写是自然语言任务，与 Dashboard 文本框进入同一条运行时入口，由 `robotsoul.language_gateway` 对照已注册技能规划。中间识别结果和音频帧不提交。唤醒或通话本身不授予动作权限；最终文本仍须经 RobotRuntime、caller policy、能力 schema 和本地安全检查。
 
 部署时在 `config/voice.json` 设置 `robot_name`（例如“索拉”）和 `wake_phrase`。两者可以相同，但显示名不是识别器配置的隐式来源。名称、唤醒短语、静态模型 ID、语言、设备偏好和会话超时保存在独立配置中；当前 `config/robot.json` 仍只负责选择 `robot_module` / `profile_id`。模型和设备均通过静态 registry 选择，不允许配置路径动态加载可执行代码。运行时代码和默认配置也随 Python wheel 打包。
 
@@ -22,7 +22,7 @@ Voice Service 为单台机器人提供本地待机唤醒、连续会话识别和
 | Wake Detector | PASSIVE 下唯一持续运行的推理器，检测配置的中文唤醒短语，输出置信度、时间和音源 generation。唤醒只建立交互会话，不代表身份认证。 |
 | Streaming ASR + VAD | 唤醒后消费 pre-roll 和小块实时 PCM，持续产出 partial/final transcript；VAD 负责语音活动及端点，不能单独判断讲话是否面向机器人。低置信度、多人重叠或端点不确定时请求重复/唤醒，不提交动作任务。 |
 | Turn / Addressing Manager | 管理唤醒、用户轮次、机器人回复、跟进窗口、空闲超时、取消和回到被动监听。通过唤醒词、当前交互的轮次时序及可用的方向/阵列线索判断是否继续对机器人说话；不把单纯 VAD speech 当成面向机器人。 |
-| Dashboard Call Gateway | 仅接受已认证操作员显式发起的通话；负责信令、WebRTC 媒体和断线/挂断收尾。通话输入的 browser microphone 音轨经此网关转成 Voice Service 输入，最终文本走与本地语音相同的运行时入口。 |
+| Dashboard Call Gateway | 仅接受已认证操作员显式发起的通话；负责信令、WebRTC 媒体和断线/挂断收尾。通话输入的 browser microphone 音轨经此网关转成 Voice Service 输入。通话最终转写与本地语音最终转写、Dashboard 文本任务同为自然语言，交给 `robotsoul.language_gateway`。 |
 | Runtime / Response Gateway | 只传递 `wake.detected`、最终 `speech.transcript`、`interaction.cancelled` 和语音状态等有界事件；音频帧、partial transcript 不放进通用 Observation 队列。语音回复按当前模式路由到浏览器通话或已验证的机器人扬声器。 |
 | Health Supervisor | 监控 Voice Service、设备租约、帧新鲜度、识别延迟和资源。语音服务重启不得重启 RobotRuntime 或阻塞机器人安全控制；进程失效时关闭音源，回到安全休眠并有限退避重试。 |
 
@@ -97,7 +97,7 @@ VAD 只回答“此刻有语音”，不回答“这句话是对机器人说的�
   "language": "zh-CN",
   "models": {
     "kws": "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20",
-    "asr": "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30",
+    "asr": "sherpa-onnx-streaming-zipformer-zh-xlarge-int8-2025-06-30",
     "vad": "silero-vad-int8",
     "tts": "vits-piper-zh_CN-xiao_ya-medium-int8"
   },
@@ -109,19 +109,13 @@ VAD 只回答“此刻有语音”，不回答“这句话是对机器人说的�
 }
 ~~~
 
-`input_device` / `output_device` 只允许 `default`、`usb-microphone` 和 `usb-speaker`；实际设备可由对应的 `ROBOTSOUL_VOICE_INPUT_DEVICE` / `ROBOTSOUL_VOICE_OUTPUT_DEVICE` 环境变量覆盖。`follow_up_seconds`、唤醒阈值、静音端点和 call grace 均须在目标环境调参。配置项不能绕过控制策略、扩大技能或允许任意模型代码。
+流式识别使用 Zipformer-xlarge int8，资源 ID 仍是 `asr-zh-streaming-int8`。唤醒继续使用 3M 关键词模型。`input_device` / `output_device` 只允许 `default`、`usb-microphone` 和 `usb-speaker`；实际设备可由对应的 `ROBOTSOUL_VOICE_INPUT_DEVICE` / `ROBOTSOUL_VOICE_OUTPUT_DEVICE` 环境变量覆盖。`follow_up_seconds`、静音端点和 call grace 均须在目标环境调参。唤醒短语的声学门槛是 `0.1`，关键词加权是 `3.0`。这是为两个字的短语放宽后的值；模型默认门槛是 `0.25`。喊完唤醒词后如果 `follow_up_seconds` 内没有识别到指令，会话结束并重新监听唤醒词，不会把这次会话一直留到 `session_max_seconds`。识别器会把唤醒后的音频攒成一句，一句最长 20 秒，尾部静音后才结束；空白端点不会立刻结束这次会话。配置项不能绕过控制策略、扩大技能或允许任意模型代码。
 
 Dashboard 设置页的「音频」可以修改机器人名称、唤醒短语、语言、输入/输出设备和三段会话时间，并写回这份 `config/voice.json`。名称和会话时间会作用于当前正在运行的语音服务；唤醒短语、语言和设备在下次启动语音服务后生效。模型 ID 不能从设置页改成静态 registry 之外的值。
 
-## 语音事件日志
+## 运行日志中的语音记录
 
-Dashboard 启动语音服务时，把唤醒命中和最终识别文本追加到 `logs/voice_events.jsonl`。每一行是一个 JSON 事件，字段为 `event_id`、`kind`、`timestamp`、`source`、`state` 和 `text`。
-
-- `kind` 为 `wake` 时，`text` 是命中的唤醒短语，只在本地 `PASSIVE` 监听中产生。
-- `kind` 为 `transcript` 时，`text` 是 VAD/ASR 给出的最终转写，`source` 为 `local` 或 `call`。中间的 partial 文本和原始音频不写入该文件。
-- 文件权限为仅当前用户可读写，目录 `logs/` 不纳入版本控制。写入失败不中断识别，也不代替工具调用审计。
-
-已登录的 Dashboard 总览页有「语音日志」预览，读取最近的事件，用来确认唤醒是否发生以及识别出的句子。未登录不能读取。同一份最近记录也通过 `GET /api/voice/events` 提供，可选 `limit`（1 到 100，默认 30），同样要求操作员会话。机器人没有扬声器时，这条预览是确认本地唤醒和识别的界面。
+唤醒命中，以及唤醒后、通话中的识别文本，写入当天的运行日志，模块名为 `Voice`。文本还在增长时记为「识别中：…」；一句结束记为「识别：…」，随后记「提交运行时：…」。运行时模块接着记录收到的文本、语言决策、选中的技能、安全复核、开始执行，以及执行完成或未执行的原因。语音侧在运行时返回后记录结论或失败原因。同一句里没有变化的文本不重复记录。不再写 `logs/voice_events.jsonl`，总览页也不再提供语音日志。记录格式、隐私边界，以及它和工具调用审计的分工见[运行日志](17-runtime-log.md)。原始音频、每个音频帧和技能参数原文不写入日志。中间结果只进日志，不提交运行时。
 
 资源 manifest 记录每个下载项的版本、官方 URL、大小、SHA-256、架构和许可证来源。Xiao-Ya TTS 归档内的 `MODEL_CARD` 标明其 BZNSYP/Data-Baker 数据许可仅限非商业用途；商业部署必须先替换为具备适用商业许可的语音模型并重新锁定哈希，不能把 sherpa-onnx 的 Apache-2.0 许可视为覆盖该语音权重。
 

@@ -8,6 +8,7 @@ from threading import Event, Lock, RLock, Thread
 from time import monotonic
 from typing import Any, Callable
 
+from robotsoul.runlog import log as runtime_log
 from robotsoul.voice.core import (
     AudioFrame,
     BoundedPcmBuffer,
@@ -17,6 +18,12 @@ from robotsoul.voice.core import (
     RuntimeTextExecutor,
 )
 from robotsoul.voice.monitor import AudioLevelMonitor
+
+
+def _recognition_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())
 
 
 @dataclass(frozen=True)
@@ -50,7 +57,6 @@ class VoiceService:
         call_reconnect_grace_seconds: float = 15,
         wake_callback: Callable[[str], None] | None = None,
         transcript_callback: Callable[[str], None] | None = None,
-        event_log: Any | None = None,
     ) -> None:
         self.capture = capture
         self.engine = engine
@@ -70,7 +76,6 @@ class VoiceService:
         self.call_reconnect_grace_seconds = call_reconnect_grace_seconds
         self._wake_callback = wake_callback
         self._transcript_callback = transcript_callback
-        self._event_log = event_log
         self.monitor = AudioLevelMonitor()
         self._call_audio_sink: Callable[[Any, int], None] | None = None
         self._stop = Event()
@@ -83,6 +88,7 @@ class VoiceService:
         self._last_frame_at: float | None = None
         self._last_wake_at: float | None = None
         self._last_transcript_at: float | None = None
+        self._logged_recognition = ""
         self._last_probe_at = 0.0
         self._retry_delay_seconds = 1.0
         self._next_retry_at = 0.0
@@ -96,12 +102,14 @@ class VoiceService:
     def start(self) -> CaptureState:
         if self._worker is not None and self._worker.is_alive():
             return self.arbiter.state
+        self._note("Info", "语音服务启动")
         try:
             self._available = True
             self._error = None
             if self.capture.probe():
                 self._load_engine()
                 self._open_local_stream()
+                self._note("Info", self._capture_status("本地麦克风已打开"))
                 self.arbiter.refresh_local()
                 self._reset_retry()
             else:
@@ -113,7 +121,14 @@ class VoiceService:
         self._stop.clear()
         self._worker = Thread(target=self._run, name="voice-recognition", daemon=True)
         self._worker.start()
-        return self.arbiter.state
+        state = self.arbiter.state
+        if self._error:
+            self._note("Error", self._error)
+        elif state == CaptureState.PASSIVE:
+            self._note("Info", "进入被动监听")
+        elif state == CaptureState.SLEEP:
+            self._note("Warning", "没有可用麦克风，进入休眠")
+        return state
 
     def stop(self, *, wait: bool = True) -> None:
         self._stop.set()
@@ -137,6 +152,7 @@ class VoiceService:
                 self.speaker.close()
             except Exception:
                 pass
+        self._note("Info", "语音服务停止")
 
     def refresh_device(self) -> CaptureState:
         if not self._available or self.arbiter.state in {
@@ -166,9 +182,12 @@ class VoiceService:
             with self._state_lock:
                 self._error = None
             self._reset_retry()
+            if previous != CaptureState.PASSIVE:
+                self._note("Info", "进入被动监听")
         elif state == CaptureState.SLEEP and previous == CaptureState.PASSIVE:
             self._clear_audio()
             self._schedule_retry()
+            self._note("Warning", "没有可用麦克风，进入休眠")
         return state
 
     def begin_call(self) -> int:
@@ -184,10 +203,12 @@ class VoiceService:
             if self.speaker is not None and hasattr(self.speaker, "stop"):
                 self.speaker.stop()
             self._call_pending_at = monotonic()
+            self._note("Info", "开始建立通话")
             return generation
-        except Exception:
+        except Exception as exc:
             self.arbiter.end_call()
             self._call_pending_at = None
+            self._note("Error", f"建立通话失败：{exc}")
             raise
 
     def call_disconnected(self) -> None:
@@ -196,15 +217,18 @@ class VoiceService:
         self._clear_audio(clear_sink=False)
         self.gate.reset()
         self._asr_reset_requested.set()
+        self._note("Warning", "通话断开，等待重连")
 
     def call_connected(self) -> int:
         generation = self.arbiter.call_connected()
         self._call_pending_at = None
+        self._note("Info", "通话已接通")
         return generation
 
     def call_reconnected(self) -> int:
         generation = self.arbiter.call_reconnected()
         self._call_disconnected_at = None
+        self._note("Info", "通话已恢复")
         return generation
 
     def end_call(self) -> CaptureState:
@@ -223,6 +247,7 @@ class VoiceService:
                 self._open_local_stream()
             except Exception as exc:
                 self._fail(exc)
+        self._note("Info", f"通话结束，状态 {state.value}")
         return state
 
     def accept_call_audio(self, generation: int, samples: Any, sample_rate: int) -> bool:
@@ -259,6 +284,11 @@ class VoiceService:
         if not hasattr(self.capture, "set_callback"):
             raise RuntimeError("audio capture backend must support set_callback")
         self.capture.set_callback(self._on_local_audio)
+
+    def _capture_status(self, prefix: str) -> str:
+        rate = getattr(self.capture, "sample_rate", None)
+        device = getattr(self.capture, "device", None) or "default"
+        return f"{prefix} rate={rate} device={device}"
 
     def _load_engine(self) -> None:
         if not self._engine_loaded:
@@ -371,6 +401,7 @@ class VoiceService:
             self.end_call()
             return
         if state == CaptureState.PASSIVE and self.gate.expired(now=now):
+            self._note("Info", "等待指令超时，回到唤醒监听")
             self._pre_roll.clear()
             if self._engine_loaded:
                 self.engine.reset_asr()
@@ -388,11 +419,12 @@ class VoiceService:
             if not wake:
                 return
             self.gate.wake()
+            self._logged_recognition = ""
             with self._state_lock:
                 self._last_wake_at = monotonic()
             if self._wake_callback is not None:
                 self._wake_callback(str(wake))
-            self._record_event("wake", str(wake), "local")
+            self._note("Info", f"唤醒：{str(wake).strip()}")
             pre_roll = tuple(self._pre_roll)
             self._pre_roll.clear()
             for buffered in pre_roll:
@@ -400,6 +432,7 @@ class VoiceService:
                 if buffered.sample_rate != self.sample_rate:
                     buffered_samples = self._resample(buffered_samples, buffered.sample_rate, self.sample_rate)
                 result = self.engine.accept_asr(buffered_samples, self.sample_rate)
+                self._observe_recognition(result)
                 self._handle_asr_result(result, generation=frame.generation)
             return
         if state not in {CaptureState.CALL, CaptureState.CALL_RECONNECTING} and not self.gate.active:
@@ -407,7 +440,10 @@ class VoiceService:
         if frame.sample_rate != self.sample_rate:
             samples = self._resample(samples, frame.sample_rate, self.sample_rate)
         endpoint = self.engine.accept_vad(samples)
+        if callable(getattr(self.engine, "speech_detected", None)) and self.engine.speech_detected():
+            self.gate.note_command_audio()
         result = self.engine.accept_asr(samples, self.sample_rate)
+        self._observe_recognition(result)
         if endpoint or (result is not None and result.is_endpoint):
             self.engine.drain_speech_segments()
             if result is not None and not result.is_endpoint and hasattr(self.engine, "reset_asr"):
@@ -453,30 +489,40 @@ class VoiceService:
             self._last_transcript_at = monotonic()
         if self._transcript_callback is not None:
             self._transcript_callback(text)
-        source = "call" if self.arbiter.state in {CaptureState.CALL, CaptureState.CALL_RECONNECTING} else "local"
-        self._record_event("transcript", text, source)
+        cleaned = _recognition_text(text)
+        self._note("Info", f"识别：{cleaned}（{self._audio_source_label()}）")
+        self._logged_recognition = ""
         expected_generation = self.arbiter.generation if generation is None else generation
         if expected_generation != self.arbiter.generation:
+            self._note("Warning", f"会话已更换，未提交：{cleaned}")
             return
+        self._note("Info", f"提交运行时：{cleaned}")
         future = self.runtime_executor.submit_final(text)
         future.add_done_callback(lambda completed: self._handle_runtime_result(completed, expected_generation))
 
     def _handle_runtime_result(self, future: Future[Any], generation: int) -> None:
         try:
             result = future.result()
-            if generation != self.arbiter.generation:
-                return
             task = getattr(result, "task", None)
+            task_id = getattr(task, "task_id", "")
+            status = getattr(getattr(task, "status", None), "value", None) or getattr(task, "status", "") or "unknown"
             evaluation = getattr(result, "evaluation", None)
+            if generation != self.arbiter.generation:
+                self._note("Warning", f"运行时结果已过期，未播报 id={task_id} 状态={status}")
+                return
             if evaluation is not None and evaluation.success:
                 response = evaluation.conclusion
+                self._note("Info", f"运行时完成 id={task_id} 状态={status} 结论={response}")
             elif task is not None and getattr(task, "error", None):
                 response = task.error
+                self._note("Warning", f"运行时失败 id={task_id} 状态={status} 原因={response}")
             else:
                 response = "操作已处理。"
+                self._note("Info", f"运行时返回 id={task_id} 状态={status} 结论={response}")
             with self._engine_lock:
                 audio = self.engine.synthesize(response)
             if generation != self.arbiter.generation:
+                self._note("Warning", f"合成完成但会话已更换，未播放 id={task_id}")
                 return
             samples = getattr(audio, "samples", audio)
             sample_rate = int(getattr(audio, "sample_rate", self.sample_rate))
@@ -489,6 +535,7 @@ class VoiceService:
             elif self.speaker is not None:
                 self.speaker.play(samples, sample_rate)
             self.gate.reply_finished()
+            self._note("Info", "回复结束，等待后续指令")
         except Exception as exc:
             self._fail(exc)
 
@@ -514,22 +561,27 @@ class VoiceService:
         except Exception:
             return
 
-    def _record_event(self, kind: str, text: str, source: str) -> None:
-        if self._event_log is None or not isinstance(text, str) or not text.strip():
+    def _audio_source_label(self) -> str:
+        if self.arbiter.state in {CaptureState.CALL, CaptureState.CALL_RECONNECTING}:
+            return "网页通话"
+        return "本地麦克风"
+
+    def _observe_recognition(self, result: Any) -> None:
+        if getattr(result, "is_endpoint", False):
             return
-        try:
-            self._event_log.record(
-                kind=kind,
-                text=text.strip(),
-                source=source,
-                state=self.arbiter.state.value,
-            )
-        except Exception:
+        cleaned = _recognition_text(getattr(result, "text", ""))
+        if not cleaned or cleaned == self._logged_recognition:
             return
+        self._logged_recognition = cleaned
+        self._note("Info", f"识别中：{cleaned}（{self._audio_source_label()}）")
+
+    def _note(self, level: str, message: str) -> None:
+        runtime_log("Voice", level, message)
 
     def _fail(self, error: Exception) -> None:
         with self._state_lock:
             self._error = f"{type(error).__name__}: {error}"
+        self._note("Error", self._error or "语音服务失败")
         self._clear_audio()
         try:
             self.arbiter.sleep()

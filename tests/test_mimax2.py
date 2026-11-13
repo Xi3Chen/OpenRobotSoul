@@ -62,12 +62,15 @@ class MiMax2Tests(unittest.TestCase):
         self.assertEqual(feedback[-1].status.value, "succeeded")
         self.assertEqual(feedback[-1].evidence, {"enabled": True})
 
-    def test_agent_understands_chinese_flash_commands(self):
-        agent = DemoAgent()
-        on = agent.plan("打开闪光灯", self.adapter.discover_capabilities())
-        off = agent.plan("关闭手电筒", self.adapter.discover_capabilities())
+    def test_slash_command_toggles_flash_without_matching_plain_text(self):
+        from robotsoul.agent import resolve_slash_command
+
+        capabilities = self.adapter.discover_capabilities()
+        on = resolve_slash_command("/flash.toggle enabled=true", capabilities)
+        off = resolve_slash_command("/flash.toggle enabled=false", capabilities)
         self.assertEqual(on.parameters, {"enabled": True})
         self.assertEqual(off.parameters, {"enabled": False})
+        self.assertIsNone(DemoAgent().plan("打开闪光灯", capabilities))
 
     def test_driver_uses_fixed_path_and_sudo_fallback(self):
         driver = MiMax2FlashDriver("phone-mimax2")

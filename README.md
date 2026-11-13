@@ -7,7 +7,7 @@ OpenRobotSoul 是一个以人机交互和受控自我探索为核心、可部署
 ## 核心组成
 
 1. **机器人适配器**：拆分为感知与动作适配器，将设备协议映射到统一事件、能力和反馈契约。
-2. **Agent**：基于云端模型理解用户表达、拆解任务并调用受约束的机器人技能。
+2. **Agent**：由常驻语言进程 `robotsoul.language_gateway` 基于云端模型理解文本和语音里的自然语言，拆解任务并调用受约束的机器人技能。Go 版 PicoClaw 只负责隔离工作区里的编码。
 3. **事务处理流回环**：管理任务状态、交互触发、动作反馈融合、主动行为资格判断和结果评估。
 
 机器人模块目录、配置切换与新增机器人要求见[机器人模块规范](docs/robot-agent-plan/12-robot-module-standard.md)。
@@ -48,13 +48,13 @@ OpenRobotSoul 是一个以人机交互和受控自我探索为核心、可部署
 
 ## 当前状态
 
-Python MVP 已启动，当前包含确定性模拟适配器、两个能力不同的模拟 profile、可替换的 Agent 接口、任务状态回环、参数限制、命令去重和 JSON 审计轨迹。当前 Agent 使用本地规则匹配，模拟器反馈不能证明任何真实硬件行为。
+Python MVP 已启动，当前包含确定性模拟适配器、两个能力不同的模拟 profile、可替换的 Agent 接口、任务状态回环、参数限制、命令去重和 JSON 审计轨迹。普通句子交给常驻语言进程；只有以 `/技能名` 或 `/技能名 参数=值` 开头的文本会在本地直接调用技能。模拟器反馈不能证明任何真实硬件行为。
 
 当前 `config/robot.json` 选择 `unitree_go2`。Go2 SDK bridge 在 Linux 上连接 DDS、读取 `rt/sportmodestate`，并调用已列入 profile 的 SportClient 动作。需配置网卡并构建 C++ bridge 后，`status` 可检查连接和动作清单。要运行模拟器需显式指定 `--robot-module simulator`。机器人模块位于仓库根目录 `adapters/`；每个模块拥有自身 profile、driver bridge 和机器人专属 `third_party/`。runtime 不包含机器人型号分支。
 
-PicoClaw 已作为固定提交的 Git 子模块登记在 `third_party/picoclaw`，作为 Pi coding agent 的先行替代方案供隔离工作区编码能力评估；它不是当前 Python MVP 的运行时 Agent。集成约束和验收条件见 [Agent 选型与 PicoClaw 集成决策](docs/robot-agent-plan/11-agent-tooling-decision.md)。
+`dashboard` 和 `run` 默认启动常驻语言进程 `robotsoul.language_gateway`。这个进程不是 Go 版 PicoClaw。Dashboard 文本、本地语音最终转写和通话最终转写都进入这个进程，由它按 `config/llm.json` 选择已注册技能。以 `/技能名` 开头的文本不经过模型，直接调用已注册技能。`--demo-agent` 和 `demo` 不启动语言进程，也不会对自由文本做关键词匹配。编码进程只在语言进程给出编程任务，或适配器、语音、语言进程启动失败时拉起，并且需要仓库外的 `OPENROBOTSOUL_CODING_WORKSPACE`。集成约束见 [Agent 选型与 PicoClaw 集成决策](docs/robot-agent-plan/11-agent-tooling-decision.md)。
 
-Go2 已接入 SportClient 高层动作：普通姿态、步态和限时移动走确认流程，翻滚、跳跃、舞蹈、倒立、摔倒恢复、手柄控制源和自动恢复开关只允许 Dashboard 操作员确认后调用。`Damp` 与低级电机控制没有接入。速度指令到时或取消时会发送 `StopMove`。语音 Voice Service、中文唤醒/流式识别、TTS 路由和 Dashboard 局域网通话代码已接入主仓库；模型、ARM64 运行包和 Python wheel 仍需按资源清单下载并在目标板安装。Go2 机身麦克风/扬声器路由、真实 WebRTC/PyAV 兼容性和 10 小时长跑尚未验证。这些动作的单位、完成姿态、断连后的机身行为仍没有在目标固件上完成验收；API 接受请求不等于身体动作已经完成。
+Go2 已接入 SportClient 高层动作：普通姿态、步态和限时移动直接执行。只有 `sport.switch_avoid_mode` 需要模型复核。翻滚、跳跃、舞蹈、倒立、摔倒恢复、手柄控制源和自动恢复开关只允许 Dashboard 操作员确认后调用。`Damp` 与低级电机控制没有接入。速度指令到时或取消时会发送 `StopMove`。语音 Voice Service、中文唤醒/流式识别、TTS 路由和 Dashboard 局域网通话代码已接入主仓库；模型、ARM64 运行包和 Python wheel 仍需按资源清单下载并在目标板安装。Go2 机身麦克风/扬声器路由、真实 WebRTC/PyAV 兼容性和 10 小时长跑尚未验证。这些动作的单位、完成姿态、断连后的机身行为仍没有在目标固件上完成验收；API 接受请求不等于身体动作已经完成。
 
 ## 运行 MVP
 
@@ -64,13 +64,15 @@ Go2 已接入 SportClient 高层动作：普通姿态、步态和限时移动走
 python -m robotsoul profiles
 python -m robotsoul demo
 python -m robotsoul --robot-module simulator demo
-python -m robotsoul --robot-module simulator --profile simulator-compact run "抬头"
-python -m robotsoul --robot-module simulator dashboard
+python -m robotsoul --robot-module simulator --profile simulator-compact run --demo-agent "/head.look yaw_deg=0 pitch_deg=10"
+python -m robotsoul --robot-module simulator dashboard --demo-agent
 python -m robotsoul status
 python -m robotsoul coding-agent check
 python -m unittest discover -s tests -v
 python -m robotsoul.build --platform linux --arch x86_64
 ```
+
+不带 `--demo-agent` 的 `run` 和 `dashboard` 会启动常驻语言进程，并读取 `config/llm.json`。上面的 `/head.look` 示例不经过模型，因此不需要模型配置。
 
 `config/robot.json` 必须设置 `robot_module`，`profile_id` 可选；不提供时使用模块默认 profile。CLI 的 `--robot-module` / `--profile` 只覆盖本次运行。配置只能选择静态 registry 中的 ID，不能指定任意 Python import path。命令输出 JSON 任务、反馈和审计记录。每个 runtime 默认将 adapter tool 调用的开始和结束事件追加到 `logs/tool_calls.jsonl`，包括关联 ID、工具名、脱敏参数、返回反馈/错误和耗时；字符串参数值不会持久化。嵌入式运行可通过 `RobotRuntime.from_profile(..., audit_sink=JsonlToolCallAuditSink(path))` 指定其他持久化位置，或注入自定义 sink；测试/本地开发可显式使用 `NullToolCallAuditSink`。详见[工具调用审计记录](docs/robot-agent-plan/13-tool-call-audit.md)。Simulator 模块的 `simulator-basic` 提供 `speech.say`、`head.look` 与受限的 `base.move_distance`；`simulator-compact` 不提供移动能力且头部范围更小。
 
@@ -94,9 +96,11 @@ python -m robotsoul --robot-module simulator dashboard --host 192.168.1.20 --tls
 
 Agent 调用 `confirm` 技能需通过 `RobotRuntime.from_profile(..., safety_reviewer=...)` 配置无工具 SafetyReviewer；未配置或复核失败时会拒绝 Agent 调用。已登录的 Dashboard 操作员可以确认并执行这些技能。`high` 技能只允许 Dashboard 操作员调用，并要求重新输入当前账户密码。设置页可以修改这一条云端模型路径、音频配置和登录账户。当前默认配置仍指向 Go2，但 profile 没有动作能力；示例显式选择 simulator。Dashboard 已接入 WebRTC 局域网通话 API 与网页通话界面；模型资源、目标板设备路由、ARM64 PyAV/WebRTC 兼容性和实机长跑尚待验收。安全边界、API 和风险等级定义见[Dashboard 与接口风险门禁](docs/robot-agent-plan/15-dashboard.md)。
 
-## PicoClaw 编码任务
+## PicoClaw
 
-PicoClaw coding agent 作为独立 Go 子进程运行，只在仓库之外的临时目录或 Git worktree 中工作，不进入机器人动作 Agent 的事务循环。默认只允许工作区文件读写，不启用 shell、MCP、内置联网工具、定时任务、hooks 或自进化；调用前需先配置模型，并在 PicoClaw 的 `config.json` 中显式设置 `hooks.enabled` 和 `evolution.enabled` 为 `false`。模型 API 链路仍需联网。未找到配置或安全开关未显式关闭时，宿主会在启动 PicoClaw 前拒绝任务。
+Go 版 PicoClaw 只运行编码任务，不规划机器人动作。编码任务作为独立 Go 子进程运行，只在仓库之外的临时目录或 Git worktree 中工作，不调用机器人技能。编码任务默认只允许工作区文件读写，不启用 shell、MCP、内置联网工具、定时任务、hooks 或自进化；调用前需先配置模型，并在 PicoClaw 的 `config.json` 中显式设置 `hooks.enabled` 和 `evolution.enabled` 为 `false`。模型 API 链路仍需联网。未找到配置或安全开关未显式关闭时，宿主会在启动 PicoClaw 前拒绝编码任务。
+
+下面是可以单独运行的编码任务用法。自然语言规划由常驻的 `robotsoul.language_gateway` 完成，不使用这条编码命令，也不启动 `picoclaw` 二进制。
 
 首次配置可运行 `picoclaw onboard`，随后编辑默认配置 `%USERPROFILE%\.picoclaw\config.json`，配置模型并确认包含：
 
@@ -137,7 +141,7 @@ runtime = RobotRuntime.from_profile(profile, agent=DemoAgent())
 from robotsoul import RobotRuntime, load_profile
 
 runtime = RobotRuntime.from_profile(load_profile("simulator-basic"))
-result = runtime.run_text("请抬头")
+result = runtime.run_text("/head.look yaw_deg=0 pitch_deg=10")
 print(result.task.status, result.evaluation)
 ```
 
@@ -162,7 +166,7 @@ runtime.adapter.publish_observation(Observation(
     ttl_ms=3000,
     privacy_class="operational",
 ))
-result = runtime.run_text("请抬头", task_id="task-1")
+result = runtime.run_text("/head.look yaw_deg=0 pitch_deg=10", task_id="task-1")
 ```
 
 `cancel_task(task_id)` 可请求停止正在执行的可中断技能；只有适配器确认停止后，任务才会进入 `cancelled`。

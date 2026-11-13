@@ -6,7 +6,7 @@
 
 - 选定首台机器人/模拟器、传感器、云端模型 provider 和部署位置。
 - 将 Unitree Go2 列为首发实机候选；在确认 SDK/驱动、连接和安全控制条件后冻结具体路径。
-- 分别记录机器人运行时 Agent 与 coding agent 的版本、license、模型/provider 接口和工具扩展方式；PicoClaw 作为 coding agent 的先行替代方案。
+- 记录 PicoClaw 的版本、license、模型/provider 接口和工具扩展方式。它只承担隔离工作区中的编码任务。自然语言规划由 `robotsoul.language_gateway` 承担，两类工具面分开登记。
 - 明确技能清单、事件 schema、任务状态机和安全边界。
 - 定义机器人 profile schema、型号身份校验和配置覆盖优先级。
 - 为关键未决事项创建 ADR，不在业务代码里隐式做长期架构决定。
@@ -28,8 +28,8 @@
 
 交付：
 
-- 所选机器人运行时 Agent 接入云端模型 API。
-- 文本任务、工具 schema、技能白名单和能力上下文。
+- `robotsoul.language_gateway` 接入 `config/llm.json` 中的云端模型 API，作为文本与语音最终转写的共同规划器。Go 版 PicoClaw 不读取这条运行时规划配置。
+- 自然语言任务、工具 schema、技能白名单和能力上下文。文本框和语音最终转写使用同一入口。
 - 单一端到端技能执行路径以及用户结果答复。
 
 验收：模型无法调用未注册技能；模型工具重试不会重复执行物理动作；云端超时可安全结束。
@@ -112,4 +112,4 @@
 
 每阶段先完成上一阶段的自动化验收，再把硬件动作风险提高一级。任一阶段若任务状态无法从反馈可靠确定，应先修复反馈或可观测性，不进入自动重试或扩大动作范围。
 
-方案暂不锁定机器人运行时 Agent 的实现、消息总线或微服务拓扑。选型应依据 Agent 集成成本、机器人 SDK/ROS 支持、部署环境、维护能力和时延测量作出，并在阶段 0 记录。PicoClaw coding agent 的阶段性决定和 Python 集成边界见 [Agent 选型与 PicoClaw 集成决策](11-agent-tooling-decision.md)。
+方案已锁定由常驻语言进程 `robotsoul.language_gateway` 规划全部自然语言交互，包括文本任务和语音最终转写。消息总线和微服务拓扑仍不锁定。语言进程与 Go 版 PicoClaw 的边界、自然语言工具面和编码隔离见 [Agent 选型与 PicoClaw 集成决策](11-agent-tooling-decision.md)。

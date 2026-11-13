@@ -6,7 +6,7 @@ OpenRobotSoul 可通过插件扩展机器人技能、感知能力和外部设备
 
 自动插件部署依赖阶段 8 的 Supervisor、last-known-good 发布槽和恢复模式。在这些能力尚未验证前，插件只允许离线生成和测试，不自动安装到机器人。
 
-PicoClaw 作为 Pi coding agent 的先行替代方案，可帮助生成或修改插件代码，但必须运行在独立扩展工作区。生成代码不等于受信任代码，也不等于已获准控制设备。PicoClaw 的 Python 宿主集成和验收边界见 [Agent 选型与 PicoClaw 集成决策](11-agent-tooling-decision.md)。
+PicoClaw 的编码任务可帮助生成或修改插件代码，但必须运行在独立扩展工作区，且该任务不能调用机器人技能。生成代码不等于受信任代码，也不等于已获准控制设备。自然语言会话与编码任务的分工见 [Agent 选型与 PicoClaw 集成决策](11-agent-tooling-decision.md)。
 
 ## 插件接口
 

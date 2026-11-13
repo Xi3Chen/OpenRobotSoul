@@ -85,14 +85,6 @@
             <dl id="robot-info-list" class="robot-info-list"></dl>
           </section>
 
-          <section class="voice-log-section" aria-labelledby="voice-log-title">
-            <div class="section-heading">
-              <h2 id="voice-log-title">语音日志</h2>
-              <span class="subtle">唤醒和识别文本，登录后可见</span>
-            </div>
-            <div id="voice-log" class="activity-list"></div>
-          </section>
-
           <div class="section-heading">
             <h2>最近操作</h2>
             <button class="quiet-button" type="button" data-open-view="activity">查看活动</button>
@@ -104,19 +96,26 @@
           <div class="page-heading">
             <div><p class="eyebrow">受策略约束的操作</p><h1 id="controls-title">控制</h1></div>
           </div>
-          <section class="control-section" aria-labelledby="task-title">
-            <div class="section-heading"><h2 id="task-title">自然语言任务</h2><span class="subtle">由 Agent 选择允许的技能</span></div>
-            <form id="task-form" class="task-form">
-              <label class="visually-hidden" for="task-text">任务内容</label>
-              <textarea id="task-text" name="text" rows="2" maxlength="1000" placeholder="输入一个任务" required></textarea>
-              <button class="primary-button" type="submit">提交任务</button>
-            </form>
-          </section>
+          <div class="control-layout">
+            <section class="control-section conversation-panel" aria-labelledby="task-title">
+              <div class="section-heading"><h2 id="task-title">对话</h2><span class="subtle">普通句子交给模型；只有 /技能名 会本地直接调用</span></div>
+              <div id="conversation-log" class="conversation-log" aria-live="polite"></div>
+              <form id="task-form" class="task-form">
+                <label class="visually-hidden" for="task-text">任务内容</label>
+                <textarea id="task-text" name="text" rows="2" maxlength="1000" placeholder="输入一句话，或 /stand_up" required></textarea>
+                <button class="primary-button" type="submit">发送</button>
+              </form>
+            </section>
 
-          <section class="control-section" aria-labelledby="skills-title">
-            <div class="section-heading"><h2 id="skills-title">可用操作</h2><span class="subtle">确认级由当前操作员确认；高危动作需要再次核对并输入当前账户密码</span></div>
-            <div id="controls-list" class="control-list"></div>
-          </section>
+            <section class="control-section operations-panel is-collapsed" aria-labelledby="skills-title">
+              <div class="section-heading">
+                <h2 id="skills-title">可用操作</h2>
+                <button id="operations-toggle" class="quiet-button" type="button" aria-expanded="false" aria-controls="controls-list">展开</button>
+              </div>
+              <p class="subtle operations-note">确认级由当前操作员确认；高危动作需要再次核对并输入当前账户密码</p>
+              <div id="controls-list" class="control-list" hidden></div>
+            </section>
+          </div>
 
           <section class="voice-section" aria-labelledby="voice-title">
             <div>
@@ -151,7 +150,7 @@
             </nav>
             <div class="monitor-stage">
               <section data-monitor-panel="logs" aria-labelledby="monitor-log-title">
-                <div class="section-heading"><h2 id="monitor-log-title">日志</h2><span class="subtle">唤醒和识别文本</span></div>
+                <div class="section-heading"><h2 id="monitor-log-title">日志</h2><span class="subtle">运行日志</span></div>
                 <div id="monitor-log" class="activity-list"></div>
               </section>
               <section data-monitor-panel="input" aria-labelledby="monitor-input-title" hidden>

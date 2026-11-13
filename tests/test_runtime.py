@@ -71,7 +71,7 @@ class RuntimeContractTests(unittest.TestCase):
         runtime.adapter.close.assert_called_once_with()
 
     def test_basic_profile_runs_registered_skill_to_completion(self):
-        result = RobotRuntime.from_profile(load_profile("simulator-basic")).run_text("请抬头")
+        result = RobotRuntime.from_profile(load_profile("simulator-basic")).run_text("/head.look yaw_deg=0 pitch_deg=10")
 
         self.assertEqual(result.task.status, "completed")
         self.assertTrue(result.task.task_id)
@@ -84,6 +84,43 @@ class RuntimeContractTests(unittest.TestCase):
             [item.status for item in result.feedback],
             ["accepted", "running", "succeeded"],
         )
+
+    def test_run_text_records_the_decision_chain(self):
+        from robotsoul.runlog import configure, current
+
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = current().directory
+            configure(tmp)
+            try:
+                completed = RobotRuntime.from_profile(load_profile("simulator-basic")).run_text(
+                    "/head.look yaw_deg=0 pitch_deg=10"
+                )
+                denied = RobotRuntime.from_profile(
+                    load_profile("simulator-basic"),
+                    agent=NoIntentAgent(),
+                ).run_text("站起来")
+                reviewed = RobotRuntime.from_profile(
+                    load_profile("simulator-basic"),
+                    safety_reviewer=AllowSafetyReviewer(ReviewVerdict.DENY),
+                ).run_text("/base.move_distance distance_m=0.2 max_speed_mps=0.1")
+                lines = current().recent(80)
+            finally:
+                configure(previous)
+
+        self.assertEqual(completed.task.status, "completed")
+        self.assertTrue(any(f"id={completed.task.task_id} 收到指令：/head.look" in line for line in lines))
+        self.assertTrue(any(f"id={completed.task.task_id} 使用直接指令" in line for line in lines))
+        self.assertTrue(any(f"id={completed.task.task_id} 已选择技能 head.look" in line for line in lines))
+        self.assertTrue(any(f"id={completed.task.task_id} 开始执行 技能=head.look" in line for line in lines))
+        self.assertTrue(any(f"id={completed.task.task_id} 执行完成 技能=head.look" in line for line in lines))
+        self.assertEqual(denied.task.status, "failed")
+        self.assertTrue(any(f"id={denied.task.task_id} 收到指令：站起来" in line for line in lines))
+        self.assertTrue(any(f"id={denied.task.task_id} 等待语言决策" in line for line in lines))
+        self.assertTrue(any(f"id={denied.task.task_id} 指令未执行 原因=No supported skill matched the request" in line for line in lines))
+        self.assertEqual(reviewed.task.status, "failed")
+        self.assertTrue(any(f"id={reviewed.task.task_id} 开始安全复核 技能=base.move_distance" in line for line in lines))
+        self.assertTrue(any(f"id={reviewed.task.task_id} 指令未执行 原因=Reviewed exact proposal" in line for line in lines))
+        self.assertFalse(any(f"id={reviewed.task.task_id} 开始执行" in line for line in lines))
 
     def test_each_run_has_distinct_task_and_trace_ids(self):
         runtime = RobotRuntime.from_profile(load_profile("simulator-basic"))
@@ -113,7 +150,7 @@ class RuntimeContractTests(unittest.TestCase):
         reviewer = AllowSafetyReviewer()
         runtime = RobotRuntime.from_profile(profile, safety_reviewer=reviewer)
 
-        result = runtime.run_text("前进 0.2 米")
+        result = runtime.run_text("/base.move_distance distance_m=0.2 max_speed_mps=0.1")
 
         self.assertEqual(result.task.status, "completed")
         self.assertEqual(len(reviewer.proposals), 1)
@@ -121,11 +158,53 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(runtime.adapter.executed_commands[0].parameters["distance_m"], 0.2)
         self.assertTrue(any(item.event_type == "safety.review.completed" for item in result.history))
 
+    def test_confirm_denial_reports_the_review_rationale(self):
+        profile = load_profile("simulator-basic")
+        runtime = RobotRuntime.from_profile(profile, safety_reviewer=AllowSafetyReviewer(ReviewVerdict.DENY))
+
+        result = runtime.run_text("/base.move_distance distance_m=0.2 max_speed_mps=0.1")
+
+        self.assertEqual(result.task.status, "failed")
+        self.assertEqual(result.task.error, "Reviewed exact proposal")
+        self.assertEqual(runtime.adapter.executed_commands, [])
+
+    def test_confirm_review_wait_does_not_use_the_action_timeout(self):
+        profile = load_profile("simulator-basic")
+        capabilities = tuple(
+            replace(capability, timeout_ms=50) if capability.name == "base.move_distance" else capability
+            for capability in profile.capabilities
+        )
+        profile = replace(profile, capabilities=capabilities)
+
+        class SlowAllow:
+            def review(self, proposal):
+                time.sleep(0.08)
+                return SafetyReviewResult(ReviewVerdict.ALLOW, proposal.arguments_digest, "ok")
+
+        runtime = RobotRuntime.from_profile(profile, safety_reviewer=SlowAllow())
+
+        result = runtime.run_text("/base.move_distance distance_m=0.2 max_speed_mps=0.1")
+
+        self.assertEqual(result.task.status, "completed")
+        self.assertEqual(len(runtime.adapter.executed_commands), 1)
+
+    def test_mismatched_review_names_the_selected_skill(self):
+        runtime = RobotRuntime.from_profile(
+            load_profile("simulator-basic"),
+            safety_reviewer=AllowSafetyReviewer(alter_digest=True),
+        )
+
+        result = runtime.run_text("/base.move_distance distance_m=0.2 max_speed_mps=0.1")
+
+        self.assertEqual(result.task.status, "failed")
+        self.assertIn("base.move_distance", result.task.error)
+        self.assertEqual(runtime.adapter.executed_commands, [])
+
     def test_confirm_capability_fails_closed_without_valid_review(self):
         profile = load_profile("simulator-basic")
         for reviewer in (None, AllowSafetyReviewer(ReviewVerdict.DENY), AllowSafetyReviewer(alter_digest=True)):
             runtime = RobotRuntime.from_profile(profile, safety_reviewer=reviewer)
-            result = runtime.run_text("前进 0.2 米")
+            result = runtime.run_text("/base.move_distance distance_m=0.2 max_speed_mps=0.1")
             self.assertEqual(result.task.status, "failed")
             self.assertEqual(runtime.adapter.executed_commands, [])
 
@@ -134,7 +213,7 @@ class RuntimeContractTests(unittest.TestCase):
             load_profile("simulator-basic"), safety_reviewer=MutatingSafetyReviewer()
         )
 
-        result = runtime.run_text("前进 0.2 米")
+        result = runtime.run_text("/base.move_distance distance_m=0.2 max_speed_mps=0.1")
 
         self.assertEqual(result.task.status, "failed")
         self.assertEqual(runtime.adapter.executed_commands, [])
@@ -453,17 +532,28 @@ class RuntimeContractTests(unittest.TestCase):
     def test_explicit_move_distance_over_limit_is_not_silently_clamped(self):
         runtime = RobotRuntime.from_profile(load_profile("simulator-basic"))
 
-        result = runtime.run_text("前进 1 米")
+        result = runtime.run_text("/base.move_distance distance_m=1 max_speed_mps=0.1")
 
         self.assertEqual(result.task.status, "failed")
         self.assertEqual(runtime.adapter.executed_commands, [])
 
-    def test_move_speed_is_not_mistaken_for_distance(self):
+    def test_slash_suffix_selects_the_registered_skill(self):
+        from robotsoul.agent import resolve_slash_command
+
+        capabilities = {"sport.stand_up": CapabilitySpec("sport.stand_up", {})}
+        intent = resolve_slash_command("/stand-up", capabilities)
+
+        self.assertEqual(intent.skill, "sport.stand_up")
+        self.assertEqual(intent.parameters, {})
+        self.assertIsNone(resolve_slash_command("站起来", capabilities))
+
+    def test_plain_text_is_not_locally_keyword_matched(self):
         runtime = RobotRuntime.from_profile(load_profile("simulator-basic"))
 
         result = runtime.run_text("前进 0.1 米每秒")
 
         self.assertEqual(result.task.status, "failed")
+        self.assertIn("No supported skill", result.task.error)
         self.assertEqual(runtime.adapter.executed_commands, [])
 
     def test_adapter_deduplicates_command_id(self):
@@ -638,7 +728,7 @@ class RuntimeContractTests(unittest.TestCase):
             sink = JsonlToolCallAuditSink(log_path)
             runtime = RobotRuntime.from_profile(load_profile("simulator-basic"), audit_sink=sink)
 
-            result = runtime.run_text("请抬头")
+            result = runtime.run_text("/head.look yaw_deg=0 pitch_deg=10")
 
             events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(result.task.status, "completed")
@@ -653,7 +743,7 @@ class RuntimeContractTests(unittest.TestCase):
 
         runtime = RobotRuntime.from_profile(load_profile("simulator-basic"), audit_sink=FailingSink())
 
-        result = runtime.run_text("请抬头")
+        result = runtime.run_text("/head.look yaw_deg=0 pitch_deg=10")
 
         self.assertEqual(result.task.status, "failed")
         self.assertEqual(runtime.adapter.executed_commands, [])
@@ -741,7 +831,7 @@ class RuntimeContractTests(unittest.TestCase):
             )
 
         runtime.adapter.execute = accepted_only
-        result = runtime.run_text("请抬头")
+        result = runtime.run_text("/head.look yaw_deg=0 pitch_deg=10")
 
         self.assertEqual(result.task.status, "failed")
         self.assertFalse(result.evaluation and result.evaluation.success)
@@ -763,7 +853,7 @@ class RuntimeContractTests(unittest.TestCase):
             )
 
         runtime.adapter.execute = naive_feedback
-        result = runtime.run_text("请抬头")
+        result = runtime.run_text("/head.look yaw_deg=0 pitch_deg=10")
 
         self.assertEqual(result.task.status, "failed")
         self.assertIn("invalid timestamp", result.task.error)
@@ -785,7 +875,7 @@ class RuntimeContractTests(unittest.TestCase):
         adapter.execute = delayed_execute
         runtime = RobotRuntime.from_profile(profile, agent=DemoAgent(), adapter=adapter)
 
-        result = runtime.run_text("请抬头")
+        result = runtime.run_text("/head.look yaw_deg=0 pitch_deg=10")
 
         self.assertEqual(result.task.status, "failed")
         self.assertIn("deadline", result.task.error)

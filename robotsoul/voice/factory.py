@@ -3,9 +3,9 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
-from typing import Any
 
 from robotsoul.resources import default_root
+from robotsoul.runlog import log as runtime_log
 from robotsoul.runtime import RobotRuntime
 from robotsoul.voice.audio import PulseAudioCapture, PulseAudioOutput, SoundDeviceCapture, SoundDeviceOutput
 from robotsoul.voice.config import VoiceConfig, load_voice_config
@@ -35,7 +35,6 @@ def create_voice_service(
     *,
     config_path: str | Path | None = None,
     resource_root: str | Path | None = None,
-    event_log: Any | None = None,
 ) -> tuple[VoiceService, VoiceConfig]:
     config = load_voice_config(config_path or _default_voice_config())
     root = Path(resource_root or os.environ.get("ROBOTSOUL_VOICE_RESOURCE_ROOT") or default_root())
@@ -45,9 +44,11 @@ def create_voice_service(
     if os.name == "posix" and shutil.which("parec") and shutil.which("pacat"):
         capture = PulseAudioCapture(callback)
         speaker = PulseAudioOutput()
+        runtime_log("Voice", "Info", f"音频采集后端已选择 PulseAudio source={capture.device or 'default'}")
     else:
         capture = SoundDeviceCapture(callback, device=configured_input)
         speaker = SoundDeviceOutput(configured_output)
+        runtime_log("Voice", "Info", f"音频采集后端已选择 sounddevice input={configured_input or 'default'}")
     engine = SherpaVoiceEngine(root, config.wake_phrase)
     service = VoiceService(
         capture=capture,
@@ -58,6 +59,5 @@ def create_voice_service(
         follow_up_seconds=config.follow_up_seconds,
         session_max_seconds=config.session_max_seconds,
         call_reconnect_grace_seconds=config.call_reconnect_grace_seconds,
-        event_log=event_log,
     )
     return service, config

@@ -5,7 +5,7 @@
   "language": "zh-CN",
   "models": {
     "kws": "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20",
-    "asr": "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30",
+    "asr": "sherpa-onnx-streaming-zipformer-zh-xlarge-int8-2025-06-30",
     "vad": "silero-vad-int8",
     "tts": "vits-piper-zh_CN-xiao_ya-medium-int8"
   },

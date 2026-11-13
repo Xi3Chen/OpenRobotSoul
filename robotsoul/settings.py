@@ -230,6 +230,10 @@ class LlmConfigStore:
         with _llm_lock:
             return self._settings.public()
 
+    def snapshot(self) -> LlmSettings:
+        with _llm_lock:
+            return self._settings
+
     def update(self, payload: dict) -> dict:
         if not isinstance(payload, dict):
             raise ValueError("llm settings must be an object")
