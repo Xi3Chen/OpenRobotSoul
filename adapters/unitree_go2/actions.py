@@ -6,6 +6,10 @@ hardware-in-the-loop acceptance. ``duration_ms`` is local: Move is sent once,
 then StopMove runs when the duration ends or the command is cancelled.
 
 ``Damp`` is intentionally absent. That call removes motor torque.
+
+Confirm-tier covers ordinary posture, gait changes, and timed motion.
+High-tier is limited to flips, jumps, handstands, dances, recovery stand,
+joystick source changes, and the auto-recover switch.
 """
 
 from __future__ import annotations
@@ -103,16 +107,16 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
     _action("dance2", "none", RiskLevel.HIGH),
     _action("left_flip", "none", RiskLevel.HIGH),
     _action("back_flip", "none", RiskLevel.HIGH),
-    _action("switch_avoid_mode", "none", RiskLevel.HIGH),
+    _action("switch_avoid_mode", "none", RiskLevel.CONFIRM),
     _action("pose", "flag", RiskLevel.CONFIRM, _FLAG),
     _action("classic_walk", "flag", RiskLevel.CONFIRM, _FLAG),
     _action("switch_joystick", "flag", RiskLevel.HIGH, _FLAG),
     _action("handstand", "flag", RiskLevel.HIGH, _FLAG),
     _action("free_bound", "flag", RiskLevel.HIGH, _FLAG),
     _action("free_jump", "flag", RiskLevel.HIGH, _FLAG),
-    _action("free_avoid", "flag", RiskLevel.HIGH, _FLAG),
-    _action("walk_upright", "flag", RiskLevel.HIGH, _FLAG),
-    _action("cross_step", "flag", RiskLevel.HIGH, _FLAG),
+    _action("free_avoid", "flag", RiskLevel.CONFIRM, _FLAG),
+    _action("walk_upright", "flag", RiskLevel.CONFIRM, _FLAG),
+    _action("cross_step", "flag", RiskLevel.CONFIRM, _FLAG),
     _action("auto_recover_set", "flag", RiskLevel.HIGH, _FLAG),
     _action("euler", "euler", RiskLevel.CONFIRM, _EULER),
     _action("move", "move", RiskLevel.CONFIRM, _MOVE, timeout_ms=8000),

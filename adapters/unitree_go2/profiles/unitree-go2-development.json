@@ -304,11 +304,12 @@
     },
     {
       "name": "sport.switch_avoid_mode",
-      "risk_level": "high",
+      "risk_level": "confirm",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 5000,
@@ -414,11 +415,12 @@
     },
     {
       "name": "sport.free_avoid",
-      "risk_level": "high",
+      "risk_level": "confirm",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {
         "enabled": {
           "type": "boolean"
@@ -430,11 +432,12 @@
     },
     {
       "name": "sport.walk_upright",
-      "risk_level": "high",
+      "risk_level": "confirm",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {
         "enabled": {
           "type": "boolean"
@@ -446,11 +449,12 @@
     },
     {
       "name": "sport.cross_step",
-      "risk_level": "high",
+      "risk_level": "confirm",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {
         "enabled": {
           "type": "boolean"
