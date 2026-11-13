@@ -1,0 +1,25 @@
+[Unit]
+Description=MiMax2 voice watchdog (read-only: reports stale progress, never kills)
+Documentation=file:///home/user/mimax2-voice/release/README.md
+After=mimax2-voice.service
+Wants=mimax2-voice.service
+RequiresMountsFor=/home/user/mimax2-data
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=user
+Group=user
+Environment=XDG_RUNTIME_DIR=/run/user/10000
+Environment=HOME=/home/user
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/home/user/mimax2-voice/release
+ExecStart=/home/user/mimax2-voice/release/.venv/bin/python /home/user/mimax2-voice/release/scripts/task_watchdog.py --pid-file /run/mimax2-voice/pid --progress /run/mimax2-voice/heartbeat --heartbeat /run/mimax2-voice/watchdog.txt --interval 30 --stale-after 180
+Restart=always
+RestartSec=15
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

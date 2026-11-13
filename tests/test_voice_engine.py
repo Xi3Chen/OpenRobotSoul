@@ -9,10 +9,16 @@ from pathlib import Path
 from unittest.mock import patch
 
 from robotsoul.voice.audio import SoundDeviceCapture, SoundDeviceOutput, VoiceAudioError
-from robotsoul.voice.engine import SherpaVoiceEngine, VoiceEngineError
+from robotsoul.voice.engine import SherpaVoiceEngine, VoiceEngineError, keyword_line
 
 
 class VoiceAdapterTests(unittest.TestCase):
+    def test_keyword_line_formats_score_threshold_and_label(self):
+        self.assertEqual(keyword_line(["s", "uǒ", "l", "ā"], "索拉", score=2.0, threshold=0.6),
+                         "s uǒ l ā :2 #0.6 @索拉")
+        self.assertEqual(keyword_line(["x", "iǎo"], "小 爱", score=1.5, threshold=0.3),
+                         "x iǎo :1.5 #0.3 @小_爱")
+
     def test_sherpa_models_use_cpu_and_streaming_contracts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "models"

@@ -39,16 +39,38 @@ class MiMax2FlashDriver:
     def identity(self) -> tuple[str, str]:
         return "Xiaomi", "MiMax2"
 
-    def set_flash(self, enabled: bool) -> None:
+    def read_brightness(self) -> int | None:
+        """Read the current LED brightness, or None when the node is unreadable."""
+        try:
+            return int(self.flash_path.read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            return None
+
+    def set_flash(self, enabled: bool) -> int | None:
+        """Write the LED and return the observed brightness (None if unreadable).
+
+        The read-back is the completion evidence the runtime requires; a
+        readable node that does not change is a hard failure.
+        """
         if not self.health():
             raise RuntimeError("MiMax2 flash driver is disconnected")
         value = self.max_brightness if enabled else 0
         payload = f"{value}\n".encode("ascii")
         try:
             self.flash_path.write_bytes(payload)
-            return
         except PermissionError:
-            pass
+            self._write_via_sudo(enabled, payload)
+        return self._verify_brightness(value)
+
+    def _verify_brightness(self, expected: int) -> int | None:
+        observed = self.read_brightness()
+        if observed is not None and observed != expected:
+            raise RuntimeError(
+                f"MiMax2 flash state did not change: requested {expected}, read back {observed}"
+            )
+        return observed
+
+    def _write_via_sudo(self, enabled: bool, payload: bytes) -> None:
         sudo = shutil.which("sudo")
         tee = shutil.which("tee")
         helper = Path("/usr/local/sbin/voice-assistant-flashlight")
@@ -81,6 +103,10 @@ class MiMax2FlashDriver:
         if self.connected:
             try:
                 self.set_flash(False)
+            except Exception:
+                # Shutdown must stay best-effort: a missing or unreadable LED
+                # node must not turn service teardown into a crash.
+                pass
             finally:
                 self.connected = False
 
