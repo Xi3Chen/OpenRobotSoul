@@ -10,7 +10,7 @@
 - 本项目 VoiceService 已作为 systemd 服务常驻：`mimax2-voice.service` + 只读 watchdog，当前 PASSIVE 监听、麦克风 RUNNING、模型已加载、RSS ~445 MB、空闲 CPU ~35%（单核）。
 - 语音 Agent 使用上游的常驻语言网关（OpenAI 兼容）接入 DeepSeek 官方 API 的 `deepseek-flash`（DeepSeek-V4.1-Flash-1017）；API key 只保存在手机 `config/llm.json`（0600 user），不进仓库。
 - **真机端到端已验收通过**：电脑扬声器播放“索拉 → 打开手电筒”，手机完成唤醒 → ASR → DeepSeek 意图 → 闪光灯点亮（LED 读回 4）→ 中文 TTS 播报；并增加了回声抑制，手机不会把自己的播报再当命令。
-- 本机完整测试：`206 passed, 5 skipped`（5 个 skip 是 POSIX 文件权限位断言在 Windows 上不适用）。
+- 本机完整测试：`207 passed, 5 skipped`（5 个 skip 是 POSIX 文件权限位断言在 Windows 上不适用）。
 
 ## 上游更新合并（2026-11-13 夜间）
 
@@ -60,6 +60,7 @@
 9. **唤醒常驻 CPU 过高**：KWS 双线程时 ONNX Runtime 线程空转把空闲 CPU 推到 ~250%；改成 KWS 单线程（`ROBOTSOUL_VOICE_KWS_THREADS`，默认 1）后空闲 CPU 降到 ~35%（单核），ASR 仍默认 2 线程以压低命令识别延迟。
 10. **Windows 上 watchdog 会杀掉被探测进程**：`os.kill(pid, 0)` 在 Windows 会 TerminateProcess；`_pid_alive` 改为 Windows 用 `OpenProcess` 探测，POSIX 保持 `os.kill`。
 11. **对话 Agent 接入方式调整**：先本地实现了 `robotsoul/deepseek_agent.py` 直连 DeepSeek；拉取上游后改用上游自带的常驻语言网关（`language_gateway` + `language_session` + `config/llm.json`），直连实现已删除，避免两套 LLM 集成并存。
+12. **仅说唤醒词被当成命令**：拉取上游后 `DemoAgent`/语言网关会把 “索拉” 本身当作指令提交并回一句“无法执行”。服务现在忽略与配置唤醒词完全相同的转写，保持会话窗口等后续指令；实测“索拉 →（停顿 1.2 s）→ 打开手电筒”可正常执行。
 
 ## 验收证据（2026-11-13 傍晚）
 
@@ -73,7 +74,12 @@
   - 中文 TTS 播报“好的，已完成。”；开启回声抑制后没有再出现把播报当命令的二次识别。
 - **KWS 能力边界**：真实人声（模型自带测试 wav）关键词 `介绍` 在阈值 0.6 命中；edge-tts 神经音色需要 0.3；Windows SAPI Huihui 合成音即使 0.3 也不命中——唤醒验收必须以真人或自然神经音色为准。
 - **性能**（MiMax2，单核 A53 级别）：模型加载 47–54 s；KWS RTF≈0.35（1 线程）；ASR RTF≈0.85（2 线程）；TTS RTF≈1.8（2 线程，1.9 s 音频约 3.3 s 合成）；常驻 RSS 445 MB（峰值约 480 MB）。
-- **本机测试**：`206 passed, 5 skipped`。注意 DSH Windows 沙箱下需把 `TMP/TEMP` 指向非 junction 的 D 盘目录，否则临时目录 ACL 会造成环境性失败；5 个 skip 是上游针对 POSIX 文件模式（0600/0700）的断言，Windows 无法表达这些权限位。
+- **本机测试**：`207 passed, 5 skipped`。注意 DSH Windows 沙箱下需把 `TMP/TEMP` 指向非 junction 的 D 盘目录，否则临时目录 ACL 会造成环境性失败；5 个 skip 是上游针对 POSIX 文件模式（0600/0700）的断言，Windows 无法表达这些权限位。
+- **拉取上游后的真机复测**：
+  - CLI 走语言网关：`run --llm-config config/llm.json "打开手电筒"` → `task.evaluation.success=true`、证据 `MiMax2 flashlight on`（helper 实际 on 后随 CLI 退出 off）；`"今天天气怎么样"` → `task.failed`，理由由 DeepSeek 生成：“可用技能只有手电筒开关控制，无法查询天气。”
+  - 语音端到端：14:52:53 唤醒 `索拉`；14:52:54 转写 `索拉`（被忽略，不提交 runtime）；14:52:57 转写 `打开手电筒`；14:52:59 `completed/success=true`，LED 读回 4；服务保持 PASSIVE，watchdog `state=running`。
+  - 合并后空闲 CPU ≈45%（单核，KWS 单线程），RSS ≈449 MB。
+  - 注意：上游 `config/voice.json` 已把 ASR 指向 xlarge int8（约 598 MB）；手机仍保留原来的小模型目录 `models/asr-zh-streaming-int8`（引擎按目录与文件名加载，功能正常），但若在手机上跑 `voice-resources verify` 会因清单版本不一致报错。
 
 ## 剩余工作与明确风险
 

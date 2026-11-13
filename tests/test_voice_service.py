@@ -42,6 +42,7 @@ class FakeEngine:
         self.asr_called = threading.Event()
         self.tts_called = threading.Event()
         self.synthesized = []
+        self.wake_phrase = "索拉"
 
     def load(self):
         self.loads += 1
@@ -256,6 +257,31 @@ class VoiceServiceTests(unittest.TestCase):
             self.assertTrue(any("识别：请站起来（本地麦克风）" in line for line in lines))
             self.assertFalse(any("没有识别到指令" in line for line in lines))
             self.assertEqual(submitted, ["请站起来"])
+        finally:
+            service.stop()
+
+    def test_wake_word_only_transcript_is_not_run_as_command(self):
+        capture = FakeCapture(available=True)
+        engine = FakeEngine()
+        engine.wake_text = "索拉"
+        engine.wake_once = True
+        engine.asr_results = [AsrResult("索拉", True)]
+        calls = []
+        service = VoiceService(
+            capture=capture,
+            engine=engine,
+            run_text=lambda text: calls.append(text) or text,
+            idle_probe_seconds=100,
+        )
+        try:
+            self.assertEqual(service.start(), CaptureState.PASSIVE)
+            capture.callback((0.2, 0.1), 16000)
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                if any("忽略仅唤醒词" in line for line in current().recent(30)):
+                    break
+                time.sleep(0.01)
+            self.assertEqual(calls, [])
         finally:
             service.stop()
 

@@ -501,6 +501,12 @@ class VoiceService:
         if self._transcript_callback is not None:
             self._transcript_callback(text)
         cleaned = _recognition_text(text)
+        wake_phrase = str(getattr(self.engine, "wake_phrase", "")).strip().replace(" ", "")
+        if wake_phrase and cleaned.replace(" ", "") == wake_phrase:
+            # Saying only the wake word (then pausing before the command) is not
+            # a command; keep the gate open and wait for the follow-up audio.
+            self._note("Info", f"忽略仅唤醒词的识别：{cleaned}")
+            return
         self._note("Info", f"识别：{cleaned}（{self._audio_source_label()}）")
         self._logged_recognition = ""
         expected_generation = self.arbiter.generation if generation is None else generation
