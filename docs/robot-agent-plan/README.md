@@ -20,6 +20,8 @@
 - [机器人模块组织规范](12-robot-module-standard.md)
 - [工具调用审计记录](13-tool-call-audit.md)
 - [跨平台 C++ 构建工具](14-build-tool.md)
+- [Dashboard 与接口风险门禁](15-dashboard.md)
+- [语音交互子系统](16-voice-interaction.md)
 
 ## 核心决策
 

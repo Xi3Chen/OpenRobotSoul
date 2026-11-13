@@ -38,6 +38,11 @@ class DemoAgent:
         if say_match and "speech.say" in capabilities:
             spoken_text = say_match.group(1).strip() or "你好"
             return AgentIntent("speech.say", {"text": spoken_text}, "Matched a speech request")
+        if "flash.toggle" in capabilities and any(
+            token in lowered for token in ("闪光灯", "手电筒", "flashlight", "flash", "torch")
+        ):
+            disabled = any(token in lowered for token in ("关闭", "关掉", "关上", "off", "disable"))
+            return AgentIntent("flash.toggle", {"enabled": not disabled}, "Matched a MiMax2 flashlight request")
         if any(token in lowered for token in ("抬头", "看", "head", "look")):
             if "head.look" not in capabilities:
                 return None

@@ -4,3 +4,6 @@
 [submodule "adapters/unitree_sdk2"]
 	path = adapters/unitree_sdk2
 	url = https://github.com/unitreerobotics/unitree_sdk2.git
+[submodule "third_party/sherpa-onnx"]
+	path = third_party/sherpa-onnx
+	url = https://github.com/k2-fsa/sherpa-onnx.git

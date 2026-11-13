@@ -1,0 +1,22 @@
+{
+  "profile_schema_version": 2,
+  "profile_id": "mimax2-basic",
+  "robot_module": "mimax2",
+  "profile_version": "1.0.0",
+  "manufacturer": "Xiaomi",
+  "model": "MiMax2",
+  "adapter_id": "mimax2-linux",
+  "robot_id": "phone-mimax2",
+  "required_capabilities": ["flash.toggle"],
+  "capabilities": [
+    {
+      "name": "flash.toggle",
+      "risk_level": "normal",
+      "allowed_callers": ["agent", "dashboard"],
+      "requires_operator_confirmation": false,
+      "parameters": {"enabled": {"type": "boolean"}},
+      "timeout_ms": 1500,
+      "required": true
+    }
+  ]
+}

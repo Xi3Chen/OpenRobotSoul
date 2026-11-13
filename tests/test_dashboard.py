@@ -18,6 +18,26 @@ from robotsoul.models import (
 )
 from robotsoul.profiles import load_profile
 from robotsoul.runtime import RobotRuntime
+from robotsoul.voice.core import CaptureArbiter, CaptureState
+from robotsoul.voice.webrtc import WebRtcUnavailable
+
+
+class FakeLocalCapture:
+    def __init__(self, *, available=True, fail_close=False):
+        self.available = available
+        self.fail_close = fail_close
+        self.opened = False
+
+    def probe(self):
+        return self.available
+
+    def open(self):
+        self.opened = True
+
+    def close(self):
+        if self.fail_close:
+            raise OSError("busy")
+        self.opened = False
 
 
 class AllowReviewer:
@@ -31,6 +51,20 @@ class FixedAgent:
 
     def plan(self, *_args, **_kwargs):
         return self.intent
+
+
+class FakeCallMedia:
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.closed = []
+
+    def answer(self, call_id, _session, offer):
+        if self.fail:
+            raise WebRtcUnavailable("aiortc and PyAV are required")
+        return {"sdp": "answer-sdp", "type": "answer"}
+
+    def close(self, call_id):
+        self.closed.append(call_id)
 
 
 class DashboardHTTPTests(unittest.TestCase):
@@ -68,6 +102,162 @@ class DashboardHTTPTests(unittest.TestCase):
 
     def mutation_headers(self, cookie, csrf):
         return {"Cookie": cookie, "X-CSRF-Token": csrf}
+
+    def test_call_control_requires_authentication_and_csrf(self):
+        status, _headers, data = self.request("POST", "/api/voice/calls/start", {})
+        self.assertEqual(status, 401)
+        self.connection.close()
+        self.connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+        cookie, csrf = self.login()
+        status, _headers, data = self.request("POST", "/api/voice/calls/start", {}, {"Cookie": cookie})
+        self.assertEqual(status, 403)
+        self.assertIn("CSRF", data["error"])
+
+    def test_call_start_owns_mic_and_unavailable_media_answer_releases_it(self):
+        local = FakeLocalCapture()
+        arbiter = CaptureArbiter(local)
+        self.assertEqual(arbiter.refresh_local(), CaptureState.PASSIVE)
+        self.server.service.capture_arbiter = arbiter
+        cookie, csrf = self.login()
+        headers = self.mutation_headers(cookie, csrf)
+
+        status, _headers, result = self.request("POST", "/api/voice/calls/start", {}, headers)
+        self.assertEqual(status, 201)
+        self.assertEqual(result["state"], "CALL_PENDING")
+        self.assertTrue(result["local_mic_released"])
+        self.assertFalse(local.opened)
+        status, _headers, duplicate = self.request("POST", "/api/voice/calls/start", {}, headers)
+        self.assertEqual(status, 409)
+
+        status, _headers, answer = self.request(
+            "POST", f"/api/voice/calls/{result['call_id']}/answer", {"sdp": "offer", "type": "offer"}, headers
+        )
+        self.assertEqual(status, 503)
+        self.assertFalse(answer["media_available"])
+        self.assertEqual(arbiter.state, CaptureState.PASSIVE)
+        self.assertTrue(local.opened)
+
+    def test_call_start_rejects_mic_release_failure(self):
+        local = FakeLocalCapture(fail_close=True)
+        arbiter = CaptureArbiter(local)
+        arbiter.refresh_local()
+        self.server.service.capture_arbiter = arbiter
+        cookie, csrf = self.login()
+        status, _headers, result = self.request(
+            "POST", "/api/voice/calls/start", {}, self.mutation_headers(cookie, csrf)
+        )
+        self.assertEqual(status, 409)
+        self.assertIn("release failed", result["error"])
+        self.assertIsNone(self.server.service._active_call)
+
+    def test_webrtc_answer_returns_sdp_and_keeps_capture_lease_until_hangup(self):
+        local = FakeLocalCapture()
+        arbiter = CaptureArbiter(local)
+        arbiter.refresh_local()
+        media = FakeCallMedia()
+        self.server.service.capture_arbiter = arbiter
+        self.server.service.call_media = media
+        cookie, csrf = self.login()
+        headers = self.mutation_headers(cookie, csrf)
+        _status, _headers, call = self.request("POST", "/api/voice/calls/start", {}, headers)
+
+        status, _headers, result = self.request(
+            "POST", f"/api/voice/calls/{call['call_id']}/answer", {"sdp": "browser-offer", "type": "offer"}, headers
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(result["answer"], {"sdp": "answer-sdp", "type": "answer"})
+        self.assertFalse(local.opened)
+        self.assertEqual(self.server.service._active_call["call_id"], call["call_id"])
+        self.request("POST", f"/api/voice/calls/{call['call_id']}/hangup", {}, headers)
+        self.assertEqual(media.closed, [call["call_id"]])
+        self.assertTrue(local.opened)
+
+    def test_webrtc_negotiation_failure_returns_503_and_releases_audio_lease(self):
+        local = FakeLocalCapture()
+        arbiter = CaptureArbiter(local)
+        arbiter.refresh_local()
+        media = FakeCallMedia(fail=True)
+        self.server.service.capture_arbiter = arbiter
+        self.server.service.call_media = media
+        cookie, csrf = self.login()
+        headers = self.mutation_headers(cookie, csrf)
+        _status, _headers, call = self.request("POST", "/api/voice/calls/start", {}, headers)
+
+        status, _headers, result = self.request(
+            "POST", f"/api/voice/calls/{call['call_id']}/answer", {"sdp": "browser-offer", "type": "offer"}, headers
+        )
+
+        self.assertEqual(status, 503)
+        self.assertFalse(result["media_available"])
+        self.assertEqual(media.closed, [call["call_id"]])
+        self.assertIsNone(self.server.service._active_call)
+        self.assertTrue(local.opened)
+
+    def test_invalid_offer_releases_audio_lease(self):
+        local = FakeLocalCapture()
+        arbiter = CaptureArbiter(local)
+        arbiter.refresh_local()
+        media = FakeCallMedia()
+        self.server.service.capture_arbiter = arbiter
+        self.server.service.call_media = media
+        cookie, csrf = self.login()
+        headers = self.mutation_headers(cookie, csrf)
+        _status, _headers, call = self.request("POST", "/api/voice/calls/start", {}, headers)
+
+        status, _headers, result = self.request(
+            "POST", f"/api/voice/calls/{call['call_id']}/answer", {"sdp": "bad", "type": "answer"}, headers
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("type 'offer'", result["error"])
+        self.assertEqual(media.closed, [call["call_id"]])
+        self.assertIsNone(self.server.service._active_call)
+        self.assertTrue(local.opened)
+
+    def test_expired_call_lease_cannot_finish_webrtc_negotiation(self):
+        local = FakeLocalCapture()
+        arbiter = CaptureArbiter(local)
+        arbiter.refresh_local()
+        media = FakeCallMedia()
+        self.server.service.capture_arbiter = arbiter
+        self.server.service.call_media = media
+        cookie, csrf = self.login()
+        headers = self.mutation_headers(cookie, csrf)
+        _status, _headers, call = self.request("POST", "/api/voice/calls/start", {}, headers)
+        self.server.service.capture_arbiter.end_call()
+        status, _headers, result = self.request(
+            "POST", f"/api/voice/calls/{call['call_id']}/answer", {"sdp": "offer", "type": "offer"}, headers
+        )
+        self.assertEqual(status, 409)
+        self.assertIn("lease expired", result["error"])
+        self.assertIsNone(self.server.service._active_call)
+
+    def test_hangup_logout_and_server_close_release_call_lease(self):
+        local = FakeLocalCapture()
+        arbiter = CaptureArbiter(local)
+        arbiter.refresh_local()
+        self.server.service.capture_arbiter = arbiter
+        cookie, csrf = self.login()
+        headers = self.mutation_headers(cookie, csrf)
+        status, _headers, call = self.request("POST", "/api/voice/calls/start", {}, headers)
+        self.assertEqual(status, 201)
+        status, _headers, result = self.request(
+            "POST", f"/api/voice/calls/{call['call_id']}/hangup", {}, headers
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(result["state"], "PASSIVE")
+        self.request("POST", "/api/voice/calls/start", {}, headers)
+        self.request("POST", "/api/logout", {}, headers)
+        self.assertEqual(arbiter.state, CaptureState.PASSIVE)
+
+        cookie2, csrf2 = self.login()
+        status, _headers, _call = self.request(
+            "POST", "/api/voice/calls/start", {}, self.mutation_headers(cookie2, csrf2)
+        )
+        self.assertEqual(status, 201)
+        self.server.service.close()
+        self.assertEqual(arbiter.state, CaptureState.PASSIVE)
 
     def test_static_dashboard_serves_mobile_console(self):
         status, headers, body = self.request("GET", "/")

@@ -19,6 +19,8 @@ from urllib.parse import unquote, urlsplit
 
 from robotsoul.models import InvocationContext, InvocationSource, TaskResult
 from robotsoul.runtime import RobotRuntime
+from robotsoul.voice.core import CaptureArbiter
+from robotsoul.voice.webrtc import WebRtcUnavailable
 
 
 SESSION_TTL_SECONDS = 30 * 60
@@ -59,6 +61,8 @@ class DashboardService:
         operator_pin: str,
         session_ttl_seconds: int = SESSION_TTL_SECONDS,
         action_ttl_seconds: int = ACTION_TTL_SECONDS,
+        capture_arbiter: CaptureArbiter | None = None,
+        call_media: Any | None = None,
         clock=time.monotonic,
     ) -> None:
         if not isinstance(operator_pin, str) or len(operator_pin) < 8:
@@ -69,6 +73,9 @@ class DashboardService:
         self.session_ttl_seconds = session_ttl_seconds
         self.action_ttl_seconds = action_ttl_seconds
         self._clock = clock
+        self.capture_arbiter = capture_arbiter
+        self.call_media = call_media
+        self._active_call: dict[str, str] | None = None
         self._sessions: dict[str, _Session] = {}
         self._challenges: dict[str, _ActionChallenge] = {}
         self._attempts: dict[str, tuple[int, float]] = {}
@@ -101,6 +108,7 @@ class DashboardService:
         if not session_id:
             return None
         now = self._clock()
+        expired = False
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
@@ -108,14 +116,113 @@ class DashboardService:
             if session.expires_at <= now:
                 self._sessions.pop(session_id, None)
                 self._expire_session_challenges(session_id)
-                return None
-            session.expires_at = now + self.session_ttl_seconds
-            return session
+                expired = True
+            else:
+                session.expires_at = now + self.session_ttl_seconds
+        if expired:
+            self.end_call_for_session(session_id)
+            return None
+        return session
 
     def logout(self, session_id: str) -> None:
+        self.end_call_for_session(session_id)
         with self._lock:
             self._sessions.pop(session_id, None)
             self._expire_session_challenges(session_id)
+
+    def start_call(self, session: _Session) -> dict[str, Any]:
+        if self.capture_arbiter is None:
+            raise RuntimeError("Voice capture is not configured")
+        stale_call_id = None
+        with self._lock:
+            if self._active_call is not None:
+                state = getattr(self.capture_arbiter, "state", None)
+                state_value = getattr(state, "value", state)
+                if state_value in {"CALL", "CALL_PENDING", "CALL_RECONNECTING"}:
+                    raise RuntimeError("a call is already active")
+                stale_call_id = self._active_call["call_id"]
+                self._active_call = None
+            if stale_call_id is not None and self.call_media is not None:
+                self.call_media.close(stale_call_id)
+            self.capture_arbiter.begin_call()
+            call_id = secrets.token_urlsafe(24)
+            self._active_call = {"call_id": call_id, "session_id": session.session_id}
+        return {
+            "call_id": call_id,
+            "state": self.capture_arbiter.state.value,
+            "local_mic_released": True,
+            "offer_required": True,
+            "generation": getattr(self.capture_arbiter, "generation", None),
+        }
+
+    def answer_call(self, session: _Session, call_id: str, offer: dict[str, str]) -> dict[str, str]:
+        with self._lock:
+            active = self._active_call
+            if active is None or active["call_id"] != call_id or active["session_id"] != session.session_id:
+                raise PermissionError("Call is invalid or does not belong to this session")
+        state = getattr(self.capture_arbiter, "state", None)
+        state = getattr(state, "value", state)
+        if state != "CALL_PENDING":
+            try:
+                if self.call_media is not None:
+                    self.call_media.close(call_id)
+            finally:
+                with self._lock:
+                    if self._active_call is not None and self._active_call["call_id"] == call_id:
+                        self._active_call = None
+            raise RuntimeError("Call audio lease expired before WebRTC negotiation completed")
+        if self.call_media is None:
+            if self.capture_arbiter is not None:
+                self.capture_arbiter.end_call()
+            with self._lock:
+                self._active_call = None
+            raise NotImplementedError("WebRTC media backend is not configured")
+        try:
+            if not isinstance(offer.get("sdp"), str) or not offer["sdp"].strip() or offer.get("type") != "offer":
+                raise ValueError("a non-empty offer SDP and type 'offer' are required")
+            return self.call_media.answer(call_id, session, offer)
+        except Exception:
+            try:
+                self.call_media.close(call_id)
+            except Exception:
+                pass
+            with self._lock:
+                self._active_call = None
+            if self.capture_arbiter is not None:
+                self.capture_arbiter.end_call()
+            raise
+
+    def hangup_call(self, session: _Session, call_id: str | None = None) -> dict[str, Any]:
+        with self._lock:
+            active = self._active_call
+            if active is None:
+                return {"call_id": call_id, "state": self.capture_arbiter.state.value if self.capture_arbiter else "SLEEP"}
+            if active["session_id"] != session.session_id or (call_id and active["call_id"] != call_id):
+                raise PermissionError("Call is invalid or does not belong to this session")
+            self._active_call = None
+            actual_call_id = active["call_id"]
+        try:
+            if self.call_media is not None:
+                self.call_media.close(actual_call_id)
+        finally:
+            state = self.capture_arbiter.end_call().value if self.capture_arbiter is not None else "SLEEP"
+        return {"call_id": actual_call_id, "state": state}
+
+    def end_call_for_session(self, session_id: str | None = None) -> None:
+        with self._lock:
+            active = self._active_call
+            if active is None or (session_id is not None and active["session_id"] != session_id):
+                return
+            self._active_call = None
+        try:
+            if self.call_media is not None:
+                self.call_media.close(active["call_id"])
+        finally:
+            if self.capture_arbiter is not None:
+                self.capture_arbiter.end_call()
+
+    def close(self) -> None:
+        self.end_call_for_session()
 
     def _verify_pin(self, pin: str) -> bool:
         return isinstance(pin, str) and hmac.compare_digest(
@@ -158,6 +265,9 @@ class DashboardService:
             capabilities = self.runtime.dashboard_tools()
         except (AttributeError, TypeError):
             capabilities = self.runtime.available_tools()
+        voice_state = getattr(self.capture_arbiter, "state", None)
+        voice_state = getattr(voice_state, "value", voice_state)
+        voice_health = self.capture_arbiter.health() if hasattr(self.capture_arbiter, "health") else None
         return {
             "robot": {
                 "robot_id": self.runtime.profile.robot_id,
@@ -176,6 +286,12 @@ class DashboardService:
                 "profile_version": self.runtime.profile.profile_version,
             },
             "active_task": None,
+            "voice": {
+                "state": voice_state or "SLEEP",
+                "available": getattr(voice_health, "available", self.capture_arbiter is not None),
+                "robot_name": getattr(self.capture_arbiter, "robot_name", None),
+                "error": getattr(voice_health, "error", None),
+            },
             "latest_feedback": self._actions[-1]["message"] if self._actions else None,
             "policy_version": getattr(self.runtime.profile, "profile_version", "unknown"),
             "capabilities": [self._capability_view(name, spec) for name, spec in capabilities.items()],
@@ -427,6 +543,10 @@ class _DashboardHTTPServer(ThreadingHTTPServer):
             f"{allowed_host.lower()}:{self.server_port}",
         }
 
+    def server_close(self) -> None:
+        self.service.close()
+        super().server_close()
+
 
 class DashboardRequestHandler(BaseHTTPRequestHandler):
     server: _DashboardHTTPServer
@@ -483,6 +603,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         if session is None:
             return
         if path == "/api/logout":
+            self._discard_body()
             self.server.service.logout(session.session_id)
             self._json(HTTPStatus.OK, {"authenticated": False}, {"Set-Cookie": self._cookie("", max_age=0)})
             return
@@ -490,6 +611,20 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         if body is None:
             return
         try:
+            if path == "/api/voice/calls/start":
+                self._json(HTTPStatus.CREATED, self.server.service.start_call(session))
+                return
+            if path.startswith("/api/voice/calls/") and path.endswith("/answer"):
+                call_id = unquote(path[len("/api/voice/calls/") : -len("/answer")].strip("/"))
+                answer = self.server.service.answer_call(session, call_id, {"sdp": body.get("sdp"), "type": body.get("type")})
+                current_state = getattr(self.server.service.capture_arbiter, "state", "CALL")
+                current_state = getattr(current_state, "value", current_state)
+                self._json(HTTPStatus.OK, {"call_id": call_id, "state": current_state, "answer": answer})
+                return
+            if path.startswith("/api/voice/calls/") and path.endswith("/hangup"):
+                call_id = unquote(path[len("/api/voice/calls/") : -len("/hangup")].strip("/"))
+                self._json(HTTPStatus.OK, self.server.service.hangup_call(session, call_id))
+                return
             if path == "/api/tasks":
                 task_text = body.get("text")
                 if not isinstance(task_text, str) or not task_text.strip() or len(task_text) > 1000:
@@ -533,6 +668,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
         except PermissionError as exc:
             self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+        except NotImplementedError as exc:
+            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc), "media_available": False})
+        except WebRtcUnavailable as exc:
+            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc), "media_available": False})
+        except RuntimeError as exc:
+            self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
         except (ValueError, TypeError) as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception:
@@ -576,24 +717,39 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     def _require_session(self, *, mutating: bool = False) -> _Session | None:
         session = self._session()
         if session is None:
+            self.close_connection = True
             self._json(HTTPStatus.UNAUTHORIZED, {"error": "Authentication required"})
             return None
         host = self.headers.get("Host", "").lower()
         if host not in self.server.allowed_hosts:
+            self.close_connection = True
             self._json(HTTPStatus.FORBIDDEN, {"error": "Host is not allowed"})
             return None
         if mutating:
             token = self.headers.get("X-CSRF-Token", "")
             if not hmac.compare_digest(token, session.csrf_token):
+                self.close_connection = True
                 self._json(HTTPStatus.FORBIDDEN, {"error": "CSRF validation failed"})
                 return None
             origin = self.headers.get("Origin")
             if origin:
                 parsed = urlsplit(origin)
                 if parsed.netloc.lower() != host:
+                    self.close_connection = True
                     self._json(HTTPStatus.FORBIDDEN, {"error": "Origin is not allowed"})
                     return None
         return session
+
+    def _discard_body(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.close_connection = True
+            return
+        if length > 0:
+            self.rfile.read(min(length, MAX_REQUEST_BYTES))
+        if length > MAX_REQUEST_BYTES:
+            self.close_connection = True
 
     def _read_json(self) -> dict[str, Any] | None:
         if self.headers.get_content_type() != "application/json":
@@ -666,6 +822,8 @@ def create_dashboard_server(
     port: int = 8765,
     tls_cert: str | Path | None = None,
     tls_key: str | Path | None = None,
+    capture_arbiter: CaptureArbiter | None = None,
+    call_media: Any | None = None,
 ) -> _DashboardHTTPServer:
     try:
         is_loopback = ip_address(host).is_loopback or host.lower() == "localhost"
@@ -677,7 +835,9 @@ def create_dashboard_server(
         raise ValueError("Binding the Dashboard to a LAN interface requires TLS certificate and key files")
     if bool(tls_cert) != bool(tls_key):
         raise ValueError("Both TLS certificate and key must be provided")
-    service = DashboardService(runtime, operator_pin=operator_pin)
+    service = DashboardService(
+        runtime, operator_pin=operator_pin, capture_arbiter=capture_arbiter, call_media=call_media
+    )
     server = _DashboardHTTPServer(
         (host, port), DashboardRequestHandler, service, secure=bool(tls_cert), allowed_host=host
     )
@@ -697,6 +857,8 @@ def run_dashboard(
     port: int = 8765,
     tls_cert: str | Path | None = None,
     tls_key: str | Path | None = None,
+    voice_service: Any | None = None,
+    call_media: Any | None = None,
 ) -> None:
     server = create_dashboard_server(
         runtime,
@@ -705,6 +867,8 @@ def run_dashboard(
         port=port,
         tls_cert=tls_cert,
         tls_key=tls_key,
+        capture_arbiter=voice_service,
+        call_media=call_media,
     )
     scheme = "https" if tls_cert else "http"
     print(f"RobotHarness Dashboard: {scheme}://{host}:{port}")

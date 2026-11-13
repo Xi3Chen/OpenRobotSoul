@@ -102,8 +102,9 @@
               <p class="eyebrow">手机语音</p>
               <h2 id="voice-title">语音会话</h2>
             </div>
-            <div class="voice-state"><span class="status-pill muted">未配置</span><span>本地语音服务和机器人音频链路尚未接入</span></div>
-            <button class="secondary-button" type="button" disabled title="语音服务未配置">开始通话</button>
+            <div class="voice-state" aria-live="polite"><span id="voice-status-pill" class="status-pill muted">待机</span><span id="voice-status-text">通话期间机器人本地麦克风将关闭</span></div>
+            <div class="voice-actions"><button id="voice-start" class="secondary-button" type="button">开始通话</button><button id="voice-hangup" class="danger-button" type="button" disabled aria-label="挂断语音通话" title="挂断">挂断</button></div>
+            <audio id="voice-remote-audio" class="visually-hidden" autoplay playsinline></audio>
           </section>
         </section>
 

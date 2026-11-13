@@ -22,7 +22,7 @@ AI 复核与人员确认是不同记录和门禁。语音、文字任务或 UI �
 - 控制：Agent 自然语言任务及经过策略授权的 typed operation 表单。表单显示参数单位、范围和风险；不可用能力展示禁用原因。
 - 能力目录：operation、风险、允许调用入口、参数 schema、超时、可中断性、策略来源和可用状态。
 - 活动：任务与命令状态、AI 复核结论、操作员确认状态和适配器结果。
-- 语音：当前标记为未配置；在本地语音识别、机器人音频链路和 HTTPS/WSS 实现前不请求麦克风权限。
+- 语音目标设计：本地 PASSIVE 唤醒和 Dashboard WebRTC 通话共享 Voice Service；通话开始前须确认机器人本地麦克风已经关闭并释放，只有此后才接收浏览器音轨。登录或打开页面不自动请求麦克风权限。
 
 ## Dashboard API
 
@@ -39,8 +39,10 @@ AI 复核与人员确认是不同记录和门禁。语音、文字任务或 UI �
 
 初版服务使用标准库 HTTP server，不增加运行依赖。绑定 loopback 可用 HTTP 做本地开发；绑定明确的局域网 IP 必须提供 TLS certificate/key。拒绝 `0.0.0.0`、`::` 通配监听。Session cookie 为 HttpOnly/SameSite，写请求需要 CSRF token 并校验 Host/Origin；登录和 PIN step-up 都有限速。PIN 从环境变量读取或由终端隐藏提示输入，不写入日志。PIN 使用 PBKDF2 派生摘要保存于内存。
 
-Dashboard LAN TLS 是控制操作的部署要求。浏览器麦克风 API 还要求 secure context；HTTPS/WSS/WebRTC 与语音通道仍未实现。HTTP 只能用于 loopback 原型，不应控制真实机器人。
+Dashboard LAN TLS 是控制操作的部署要求。浏览器麦克风 API 还要求 secure context；Dashboard 已接入认证后的 WebRTC 调用/应答/挂断 API，浏览器只在用户明确发起通话后申请麦克风。HTTP 只能用于 loopback 原型，不应控制真实机器人。当前代码和自动化测试不代表真实 Go2 的音频设备、ARM64 PyAV/WebRTC 与弱网行为已经验收。语音通话的音源互斥、通话断线期间本地麦克风保持关闭，以及挂断后的 PASSIVE/SLEEP 恢复行为见[语音交互子系统](16-voice-interaction.md)。
 
 ## 实施状态
 
 当前 UI/API 主要用于 simulator。simulator 的移动技能标记 `confirm`；当前默认 CLI 未配置 `SafetyReviewer`，所以该技能在 Dashboard 中显示不可用且 runtime fail closed。Go2 profile 不暴露技能；Go2 SDK bridge 仅提供只读状态，不启用实机动作。所有公开 API 方法的策略清单仍需逐项审阅。
+
+Dashboard 通话的第一方代码、单通话 WebRTC 媒体端点和浏览器控制已进入主仓库。通话租约由 Voice Service 音源仲裁器提供，本地音频设备必须先关闭并释放；模型/运行包下载和目标板安装见[部署指南](../deployment-guide.zh-CN.md)。浏览器端 `aiortc`/PyAV ARM64 wheel、麦克风/扬声器路由、实机低延迟及 10 小时稳定性仍未验证。

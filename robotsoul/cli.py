@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from robotsoul.audit import JsonlToolCallAuditSink
+from robotsoul.agent import DemoAgent
 from robotsoul.dashboard import run_dashboard
 from robotsoul.profiles import list_profiles, load_selected_profile
 from robotsoul.picoclaw import PicoClawCodingAgent, PicoClawError
@@ -48,6 +49,15 @@ def main() -> None:
     dashboard_parser.add_argument("--port", type=int, default=8765, help="Dashboard port")
     dashboard_parser.add_argument("--tls-cert", help="PEM certificate for LAN HTTPS")
     dashboard_parser.add_argument("--tls-key", help="PEM private key for LAN HTTPS")
+    dashboard_parser.add_argument("--no-voice", action="store_true", help="Do not start local passive voice listening")
+    dashboard_parser.add_argument("--demo-agent", action="store_true", help="Use the local rule-based agent for hardware profiles")
+    resource_parser = subparsers.add_parser("voice-resources", help="Download, install, verify, or package pinned voice resources")
+    resource_parser.add_argument("action", choices=("download", "install", "verify", "pack", "import"))
+    resource_parser.add_argument("--root")
+    resource_parser.add_argument("--manifest")
+    resource_parser.add_argument("--id", dest="ids", action="append")
+    resource_parser.add_argument("--output")
+    resource_parser.add_argument("--bundle")
     coding_parser = subparsers.add_parser("coding-agent", help="Run a coding task with PicoClaw")
     coding_subparsers = coding_parser.add_subparsers(dest="coding_command", required=True)
     coding_check = coding_subparsers.add_parser("check", help="Check PicoClaw binary and configuration")
@@ -66,6 +76,17 @@ def main() -> None:
     coding_run.add_argument("--json", action="store_true", help="Print a structured task result")
     coding_run.add_argument("prompt", nargs="+", help="Coding task instructions")
     args = parser.parse_args()
+
+    if args.command == "voice-resources":
+        from robotsoul.resources import main as resources_main
+        resource_args = [args.action]
+        for option, value in (("--root", args.root), ("--manifest", args.manifest), ("--output", args.output), ("--bundle", args.bundle)):
+            if value:
+                resource_args.extend((option, value))
+        for resource_id in args.ids or []:
+            resource_args.extend(("--id", resource_id))
+        resources_main(resource_args)
+        return
 
     if args.command == "profiles":
         print("\n".join(list_profiles()))
@@ -157,12 +178,25 @@ def main() -> None:
         return
     try:
         profile = load_selected_profile(args.profile, args.robot_config, args.robot_module)
-        runtime = RobotRuntime.from_profile(profile, audit_sink=JsonlToolCallAuditSink())
+        runtime = RobotRuntime.from_profile(
+            profile,
+            agent=DemoAgent() if args.command == "dashboard" and args.demo_agent else None,
+            audit_sink=JsonlToolCallAuditSink(),
+        )
     except (RuntimeError, ValueError) as exc:
         parser.error(str(exc))
     if args.command == "dashboard":
         operator_pin = os.environ.get(args.operator_pin_env) or getpass.getpass("Dashboard operator PIN: ")
+        voice_service = None
+        voice_media = None
         try:
+            if not args.no_voice:
+                from robotsoul.voice.factory import create_voice_service
+                from robotsoul.voice.media import VoiceMediaBridge
+
+                voice_service, _voice_config = create_voice_service(runtime)
+                voice_service.start()
+                voice_media = VoiceMediaBridge(voice_service)
             run_dashboard(
                 runtime,
                 operator_pin=operator_pin,
@@ -170,10 +204,16 @@ def main() -> None:
                 port=args.port,
                 tls_cert=args.tls_cert,
                 tls_key=args.tls_key,
+                voice_service=voice_service,
+                call_media=voice_media,
             )
         except (RuntimeError, ValueError, OSError) as exc:
             parser.error(str(exc))
         finally:
+            if voice_media is not None:
+                voice_media.shutdown()
+            if voice_service is not None:
+                voice_service.stop()
             runtime.close()
         return
     try:

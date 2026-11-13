@@ -1,5 +1,5 @@
 (() => {
-  const state = { csrf: null, overview: null, pendingAction: null };
+  const state = { csrf: null, overview: null, pendingAction: null, voice: null, voiceBusy: false };
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -10,6 +10,7 @@
     const response = await fetch(path, { ...options, headers, credentials: "same-origin", cache: "no-store" });
     const data = await response.json().catch(() => ({}));
     if (response.status === 401) {
+      endVoiceCall({ quiet: true });
       showLogin();
       throw new Error(data.error || "登录已过期");
     }
@@ -31,6 +32,100 @@
     $("#login-view").classList.add("hidden");
     $("#dashboard-view").classList.remove("hidden");
     $("#sign-out").classList.remove("hidden");
+  }
+
+  function setVoiceStatus(kind, label, detail) {
+    const pill = $("#voice-status-pill");
+    pill.className = `status-pill ${kind}`;
+    pill.textContent = label;
+    $("#voice-status-text").textContent = detail;
+  }
+
+  function setVoiceBusy(busy) {
+    state.voiceBusy = busy;
+    $("#voice-start").disabled = busy || Boolean(state.voice);
+    $("#voice-hangup").disabled = busy || !state.voice;
+  }
+
+  async function endVoiceCall({ notifyServer = true, quiet = false } = {}) {
+    const voice = state.voice;
+    if (!voice) return;
+    state.voice = null;
+    voice.pc?.close();
+    voice.stream?.getTracks().forEach(track => track.stop());
+    const audio = $("#voice-remote-audio");
+    audio.pause();
+    audio.srcObject = null;
+    setVoiceBusy(false);
+    setVoiceStatus("muted", "已挂断", "机器人将重新检测本地麦克风");
+    if (notifyServer) {
+      try { await request(`/api/voice/calls/${encodeURIComponent(voice.callId)}/hangup`, { method: "POST", body: "{}" }); }
+      catch (error) { if (!quiet && state.csrf) showError(error.message); }
+    }
+  }
+
+  async function startVoiceCall() {
+    if (state.voice || state.voiceBusy) return;
+    if (!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection) {
+      setVoiceStatus("bad", "不可用", "此浏览器不支持 WebRTC 通话");
+      return;
+    }
+    setVoiceBusy(true);
+    setVoiceStatus("pending", "正在准备", "正在释放机器人本地麦克风");
+    let callId = null;
+    let stream = null;
+    let pc = null;
+    try {
+      const started = await request("/api/voice/calls/start", { method: "POST", body: "{}" });
+      callId = started.call_id;
+      if (!callId || started.local_mic_released !== true || started.offer_required !== true) {
+        throw new Error("机器人未确认释放本地麦克风，通话未启动");
+      }
+      setVoiceStatus("pending", "请求麦克风", "请在浏览器提示中允许麦克风访问");
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
+      pc = new RTCPeerConnection({ iceServers: [] });
+      pc.ontrack = event => {
+        const audio = $("#voice-remote-audio");
+        audio.srcObject = event.streams[0] || new MediaStream([event.track]);
+        audio.play().catch(() => setVoiceStatus("pending", "通话已连接", "点击页面后允许播放机器人语音"));
+      };
+      pc.onconnectionstatechange = () => {
+        if (state.voice?.pc !== pc) return;
+        if (pc.connectionState === "connected") setVoiceStatus("good", "通话中", "浏览器通话已连接");
+        else if (pc.connectionState === "disconnected") setVoiceStatus("pending", "正在重连", "等待局域网连接恢复");
+        else if (pc.connectionState === "failed") { setVoiceStatus("bad", "连接失败", "正在清理通话资源"); endVoiceCall(); }
+      };
+      stream.getAudioTracks().forEach(track => pc.addTrack(track, stream));
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      if (pc.iceGatheringState !== "complete") {
+        await new Promise((resolve, reject) => {
+          const timeout = window.setTimeout(() => reject(new Error("WebRTC 网络候选收集超时")), 8000);
+          pc.addEventListener("icegatheringstatechange", () => {
+            if (pc.iceGatheringState === "complete") { window.clearTimeout(timeout); resolve(); }
+          }, { once: false });
+        });
+      }
+      const result = await request(`/api/voice/calls/${encodeURIComponent(callId)}/answer`, {
+        method: "POST", body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+      });
+      const answer = result.answer;
+      if (!answer?.sdp || answer.type !== "answer") throw new Error("服务器返回的 WebRTC 应答无效");
+      state.voice = { callId, stream, pc };
+      setVoiceStatus("pending", "连接中", "正在建立局域网音频连接");
+      await pc.setRemoteDescription(answer);
+    } catch (error) {
+      if (state.voice?.callId === callId) state.voice = null;
+      pc?.close();
+      stream?.getTracks().forEach(track => track.stop());
+      if (callId) {
+        try { await request(`/api/voice/calls/${encodeURIComponent(callId)}/hangup`, { method: "POST", body: "{}" }); } catch (_cleanupError) {}
+      }
+      setVoiceStatus("bad", "未连接", error.message);
+      if (state.csrf) showError(error.message);
+    } finally {
+      setVoiceBusy(false);
+    }
   }
 
   function setConnection(kind, label) {
@@ -60,6 +155,10 @@
 
   function renderOverview(data) {
     const robot = data.robot || {};
+    const voice = data.voice || {};
+    if (state.voice && !["CALL", "CALL_RECONNECTING"].includes(voice.state)) {
+      window.queueMicrotask(() => endVoiceCall({ quiet: true }));
+    }
     const healthy = robot.connected === true && robot.healthy === true;
     const known = robot.connected !== null && robot.healthy !== null;
     $("#robot-identity").textContent = `${text(robot.manufacturer)} ${text(robot.model)} · ${text(robot.robot_id)}`;
@@ -69,6 +168,16 @@
     $("#active-task").textContent = text(data.active_task, "无");
     $("#latest-feedback").textContent = text(data.latest_feedback, "暂无");
     $("#policy-version").textContent = text(data.policy_version);
+    if (!state.voiceBusy && !state.voice) {
+      const details = {
+        PASSIVE: ["good", "唤醒待机", `${text(voice.robot_name, "机器人")}正在监听唤醒词`],
+        SLEEP: ["muted", "休眠", "没有可用的机器人麦克风；可使用网页通话"],
+        CALL_PENDING: ["pending", "切换音源", "正在释放机器人本地麦克风"],
+        CALL: ["good", "通话中", "网页麦克风是当前唯一音源"],
+        CALL_RECONNECTING: ["pending", "正在重连", "重连窗口内保留通话音源租约"],
+      }[voice.state] || ["muted", "不可用", voice.error || "语音服务未启动"];
+      setVoiceStatus(...details);
+    }
     renderRobotInformation(data.robot_configuration || {});
     renderActions(data.actions || [], "#overview-actions", 5);
     renderCapabilities(data.capabilities || []);
@@ -376,10 +485,26 @@
     $("#explicit-confirm").checked = false;
   });
   $("#sign-out").addEventListener("click", async () => {
+    await endVoiceCall({ quiet: true });
     try { await request("/api/logout", { method: "POST", body: "{}" }); } catch (_error) {}
     showLogin();
   });
+  $("#voice-start").addEventListener("click", startVoiceCall);
+  $("#voice-hangup").addEventListener("click", () => endVoiceCall());
+  window.addEventListener("pagehide", () => {
+    const voice = state.voice;
+    if (!voice) return;
+    voice.pc?.close();
+    voice.stream?.getTracks().forEach(track => track.stop());
+    if (state.csrf) fetch(`/api/voice/calls/${encodeURIComponent(voice.callId)}/hangup`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": state.csrf },
+      body: "{}", credentials: "same-origin", keepalive: true,
+    }).catch(() => {});
+  });
   $("#refresh").addEventListener("click", refresh);
+  window.setInterval(() => {
+    if (state.csrf && !document.hidden) refresh();
+  }, 5000);
   $$(".nav-item").forEach(button => button.addEventListener("click", () => selectView(button.dataset.view)));
   $$('[data-open-view]').forEach(button => button.addEventListener("click", () => selectView(button.dataset.openView)));
 

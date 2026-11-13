@@ -27,11 +27,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODULE_DIRECTORIES = {
     "simulator": PROJECT_ROOT / "adapters" / "simulator",
     "unitree_go2": PROJECT_ROOT / "adapters" / "unitree_go2",
+    "mimax2": PROJECT_ROOT / "adapters" / "mimax2",
 }
 DEFAULT_PROFILE_MODULES = {
     "simulator-basic": "simulator",
     "simulator-compact": "simulator",
     "unitree-go2-development": "unitree_go2",
+    "mimax2-basic": "mimax2",
 }
 
 

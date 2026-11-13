@@ -44,6 +44,7 @@ OpenRobotSoul 是一个以人机交互和受控自我探索为核心、可部署
 - [机器人模块组织规范](docs/robot-agent-plan/12-robot-module-standard.md)
 - [跨平台 C++ 构建工具](docs/robot-agent-plan/14-build-tool.md)
 - [Dashboard 与接口风险门禁](docs/robot-agent-plan/15-dashboard.md)
+- [Windows/Linux 开发与 Go2 部署步骤](docs/deployment-guide.zh-CN.md)
 
 ## 当前状态
 
@@ -53,7 +54,7 @@ Python MVP 已启动，当前包含确定性模拟适配器、两个能力不同
 
 PicoClaw 已作为固定提交的 Git 子模块登记在 `third_party/picoclaw`，作为 Pi coding agent 的先行替代方案供隔离工作区编码能力评估；它不是当前 Python MVP 的运行时 Agent。集成约束和验收条件见 [Agent 选型与 PicoClaw 集成决策](docs/robot-agent-plan/11-agent-tooling-decision.md)。
 
-真实机器人与驱动、语音采集/转写、云端模型 provider、记忆、主动行为和恢复监督器仍待后续阶段实现。Unitree Go2 仍是候选实机目标；具体 SDK、连接方式、能力和安全限值必须先按方案文档预研和验证。
+Go2 当前只实现 Linux SDK 连接与只读状态读取，运动驱动和已验证动作能力仍待后续阶段实现。语音 Voice Service、中文唤醒/流式识别、TTS 路由和 Dashboard 局域网通话代码已接入主仓库；模型、ARM64 运行包和 Python wheel 仍需按资源清单下载并在目标板安装。Go2 机身麦克风/扬声器路由、真实 WebRTC/PyAV 兼容性和 10 小时长跑尚未验证。真实动作必须针对目标固件验证 SDK 版本、连接方式、控制权、限值、完成反馈、停止和断连行为后才能开放。
 
 ## 运行 MVP
 
@@ -88,7 +89,7 @@ python -m robotsoul --robot-module simulator dashboard
 python -m robotsoul --robot-module simulator dashboard --host 192.168.1.20 --tls-cert cert.pem --tls-key key.pem
 ```
 
-`confirm` 技能需通过 `RobotRuntime.from_profile(..., safety_reviewer=...)` 配置无工具 SafetyReviewer；未配置或复核失败时会拒绝调用。`high` 技能只允许 Dashboard 操作员调用，并要求重新输入 PIN。当前默认配置仍指向 Go2，但 profile 没有动作能力；示例显式选择 simulator。手机语音通道尚未接入。安全边界、API 和风险级别定义见[Dashboard 与接口风险门禁](docs/robot-agent-plan/15-dashboard.md)。
+`confirm` 技能需通过 `RobotRuntime.from_profile(..., safety_reviewer=...)` 配置无工具 SafetyReviewer；未配置或复核失败时会拒绝调用。`high` 技能只允许 Dashboard 操作员调用，并要求重新输入 PIN。当前默认配置仍指向 Go2，但 profile 没有动作能力；示例显式选择 simulator。Dashboard 已接入 WebRTC 局域网通话 API 与网页通话界面；模型资源、目标板设备路由、ARM64 PyAV/WebRTC 兼容性和实机长跑尚待验收。安全边界、API 和风险等级定义见[Dashboard 与接口风险门禁](docs/robot-agent-plan/15-dashboard.md)。
 
 ## PicoClaw 编码任务
 
@@ -165,7 +166,7 @@ result = runtime.run_text("请抬头", task_id="task-1")
 
 ## C++ 构建工具
 
-使用 `python -m robotsoul.build` 同时构建 Unitree SDK2 当前 checkout 中的 Go2 C++ 示例和 PicoClaw Go CLI。CMake 缓存、Go 编译/模块缓存、中间文件、SDK 运行库副本、两个组件的编译后二进制和 `manifest.json` 都放在项目根目录的 `build/<platform>-<arch>/` 下；不会把构建产物写入 SDK 源码或 PicoClaw 子模块目录。
+使用 `python -m robotsoul.build` 构建 Unitree SDK2 当前 checkout 中的 Go2 C++ 示例、只读状态 bridge 和 PicoClaw Go CLI。CMake 缓存、Go 编译/模块缓存、中间文件、SDK 运行库副本、编译后二进制和 `manifest.json` 都放在项目根目录的 `build/<platform>-<arch>/` 下；不会把构建产物写入 SDK 源码或 PicoClaw 子模块目录。
 
 有明确目标时使用参数模式：
 

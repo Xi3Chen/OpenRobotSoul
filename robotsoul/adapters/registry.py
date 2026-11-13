@@ -14,6 +14,7 @@ AdapterFactory = Callable[[RobotProfile], RobotAdapter]
 ADAPTER_FACTORIES: dict[str, AdapterFactory] = {
     "simulator": create_simulator_adapter,
     "unitree_go2": create_unitree_go2_adapter,
+    "mimax2": lambda profile: __import__("adapters.mimax2.factory", fromlist=["create_adapter"]).create_adapter(profile),
 }
 
 
