@@ -16,6 +16,9 @@ from robotsoul.voice.core import (
     ConversationGate,
     RuntimeTextExecutor,
 )
+from robotsoul.voice.monitor import AudioLevelMonitor
+
+
 @dataclass(frozen=True)
 class VoiceHealth:
     state: CaptureState
@@ -68,6 +71,7 @@ class VoiceService:
         self._wake_callback = wake_callback
         self._transcript_callback = transcript_callback
         self._event_log = event_log
+        self.monitor = AudioLevelMonitor()
         self._call_audio_sink: Callable[[Any, int], None] | None = None
         self._stop = Event()
         self._state_lock = Lock()
@@ -285,6 +289,7 @@ class VoiceService:
         return AudioFrame(generation, tuple(float(value) for value in flattened), sample_rate, monotonic())
 
     def _enqueue(self, frame: AudioFrame) -> bool:
+        self._push_level("input", frame.samples, frame.sample_rate)
         try:
             self._frames.put_nowait(frame)
             with self._state_lock:
@@ -475,6 +480,7 @@ class VoiceService:
                 return
             samples = getattr(audio, "samples", audio)
             sample_rate = int(getattr(audio, "sample_rate", self.sample_rate))
+            self._push_level("output", samples, sample_rate)
             with self._state_lock:
                 call_sink = self._call_audio_sink
             if self.arbiter.state in {CaptureState.CALL, CaptureState.CALL_RECONNECTING}:
@@ -498,6 +504,15 @@ class VoiceService:
         if clear_sink:
             with self._state_lock:
                 self._call_audio_sink = None
+
+    def _push_level(self, side: str, samples: Any, sample_rate: int) -> None:
+        try:
+            if side == "input":
+                self.monitor.push_input(samples, sample_rate)
+            else:
+                self.monitor.push_output(samples, sample_rate)
+        except Exception:
+            return
 
     def _record_event(self, kind: str, text: str, source: str) -> None:
         if self._event_log is None or not isinstance(text, str) or not text.strip():

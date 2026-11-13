@@ -512,6 +512,30 @@ class DashboardHTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(overview["voice_events"][0]["kind"], "transcript")
 
+    def test_audio_monitor_requires_login_and_returns_levels(self):
+        from types import SimpleNamespace
+
+        previous = self.server.service.capture_arbiter
+        self.server.service.capture_arbiter = SimpleNamespace(monitor=SimpleNamespace(snapshot=lambda: {
+            "input": [{"min": -0.2, "max": 0.4}],
+            "output": [],
+            "input_active": True,
+            "output_active": False,
+        }))
+        try:
+            status, _headers, data = self.request("GET", "/api/voice/monitor")
+            self.assertEqual(status, 401)
+            self.connection.close()
+            self.connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+            cookie, _csrf = self.login()
+            status, _headers, data = self.request("GET", "/api/voice/monitor", headers={"Cookie": cookie})
+            self.assertEqual(status, 200)
+            self.assertEqual(data["input"], [{"min": -0.2, "max": 0.4}])
+            self.assertTrue(data["input_active"])
+            self.assertFalse(data["output_active"])
+        finally:
+            self.server.service.capture_arbiter = previous
+
     def test_wildcard_bind_is_rejected_even_with_tls(self):
         with self.assertRaisesRegex(ValueError, "wildcard address"):
             create_dashboard_server(

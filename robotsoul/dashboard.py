@@ -311,6 +311,24 @@ class DashboardService:
             return []
         return events if isinstance(events, list) else []
 
+    def audio_monitor(self) -> dict[str, Any]:
+        monitor = getattr(self.capture_arbiter, "monitor", None)
+        snapshot = getattr(monitor, "snapshot", None)
+        if snapshot is None:
+            return {"input": [], "output": [], "input_active": False, "output_active": False}
+        try:
+            data = snapshot()
+        except Exception:
+            return {"input": [], "output": [], "input_active": False, "output_active": False}
+        if not isinstance(data, dict):
+            return {"input": [], "output": [], "input_active": False, "output_active": False}
+        return {
+            "input": data.get("input") if isinstance(data.get("input"), list) else [],
+            "output": data.get("output") if isinstance(data.get("output"), list) else [],
+            "input_active": bool(data.get("input_active")),
+            "output_active": bool(data.get("output_active")),
+        }
+
     def _capability_view(self, name: str, capability: Any) -> dict[str, Any]:
         risk = getattr(capability, "risk_level", "normal")
         callers = sorted(getattr(capability, "allowed_callers", ("agent", "dashboard")))
@@ -615,6 +633,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/voice/events":
             self._json(HTTPStatus.OK, {"events": self.server.service.voice_events(self._event_limit())})
+            return
+        if path == "/api/voice/monitor":
+            self._json(HTTPStatus.OK, self.server.service.audio_monitor())
             return
         self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 

@@ -1,5 +1,5 @@
 (() => {
-  const state = { csrf: null, overview: null, pendingAction: null, voice: null, voiceBusy: false };
+  const state = { csrf: null, overview: null, pendingAction: null, voice: null, voiceBusy: false, monitor: "logs", levels: null };
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -180,6 +180,7 @@
     }
     renderRobotInformation(data.robot_configuration || {});
     renderVoiceLog(data.voice_events || [], "#voice-log");
+    renderVoiceLog(data.voice_events || [], "#monitor-log");
     renderActions(data.actions || [], "#overview-actions", 5);
     renderCapabilities(data.capabilities || []);
     renderControls(data.capabilities || []);
@@ -467,6 +468,82 @@
       panel.classList.toggle("active", active);
       panel.hidden = !active;
     });
+    if (name === "monitor") startMonitor();
+    else stopMonitor();
+  }
+
+  function selectMonitor(name) {
+    state.monitor = name;
+    $$(".monitor-item").forEach(button => button.classList.toggle("active", button.dataset.monitor === name));
+    $$("[data-monitor-panel]").forEach(panel => {
+      panel.hidden = panel.dataset.monitorPanel !== name;
+    });
+    if (state.levels) drawLevels(state.levels);
+  }
+
+  function startMonitor() {
+    if (state.monitorTimer) return;
+    pollMonitor();
+    state.monitorTimer = window.setInterval(pollMonitor, 200);
+  }
+
+  function stopMonitor() {
+    if (!state.monitorTimer) return;
+    window.clearInterval(state.monitorTimer);
+    state.monitorTimer = null;
+  }
+
+  async function pollMonitor() {
+    if (!state.csrf || document.hidden) return;
+    try {
+      state.levels = await request("/api/voice/monitor");
+      const inputStatus = $("#monitor-input-status");
+      const outputStatus = $("#monitor-output-status");
+      if (inputStatus) inputStatus.textContent = state.levels.input_active ? "正在采集" : "当前没有输入";
+      if (outputStatus) outputStatus.textContent = state.levels.output_active ? "正在输出" : "当前没有输出";
+      drawLevels(state.levels);
+    } catch (error) {
+      if (state.csrf) showError(error.message);
+    }
+  }
+
+  function drawLevels(levels) {
+    drawWaveform($("#waveform-input"), levels.input || [], levels.input_active);
+    drawWaveform($("#waveform-output"), levels.output || [], levels.output_active);
+  }
+
+  function drawWaveform(canvas, points, active) {
+    if (!canvas || canvas.offsetParent === null) return;
+    const width = canvas.clientWidth || 640;
+    const height = canvas.clientHeight || 220;
+    const ratio = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.floor(width * ratio));
+    canvas.height = Math.max(1, Math.floor(height * ratio));
+    const context = canvas.getContext("2d");
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, width, height);
+    context.fillStyle = "#101716";
+    context.fillRect(0, 0, width, height);
+    context.strokeStyle = "#2c3d3b";
+    context.beginPath();
+    context.moveTo(0, height / 2);
+    context.lineTo(width, height / 2);
+    context.stroke();
+    if (!points.length) return;
+    let peak = 0.02;
+    for (const point of points) {
+      peak = Math.max(peak, Math.abs(Number(point.min) || 0), Math.abs(Number(point.max) || 0));
+    }
+    const slot = width / points.length;
+    context.fillStyle = active ? "#7ddec8" : "#4e6662";
+    points.forEach((point, index) => {
+      const min = (Number(point.min) || 0) / peak;
+      const max = (Number(point.max) || 0) / peak;
+      const top = (1 - Math.max(-1, Math.min(1, max))) * height / 2;
+      const bottom = (1 - Math.max(-1, Math.min(1, min))) * height / 2;
+      const barHeight = Math.max(1, bottom - top);
+      context.fillRect(index * slot, top, Math.max(1, slot - 1), barHeight);
+    });
   }
 
   $("#login-form").addEventListener("submit", async event => {
@@ -540,6 +617,8 @@
     if (state.csrf && !document.hidden) refresh();
   }, 5000);
   $$(".nav-item").forEach(button => button.addEventListener("click", () => selectView(button.dataset.view)));
+  $$(".monitor-item").forEach(button => button.addEventListener("click", () => selectMonitor(button.dataset.monitor)));
+  window.addEventListener("resize", () => { if (state.levels) drawLevels(state.levels); });
   $$('[data-open-view]').forEach(button => button.addEventListener("click", () => selectView(button.dataset.openView)));
 
   request("/api/session").then(data => {

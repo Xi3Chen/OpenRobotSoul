@@ -26,6 +26,7 @@
         <button class="nav-item" type="button" data-view="controls">控制</button>
         <button class="nav-item" type="button" data-view="capabilities">能力</button>
         <button class="nav-item" type="button" data-view="activity">活动</button>
+        <button class="nav-item" type="button" data-view="monitor">监控</button>
       </nav>
 
       <section id="login-view" class="login-view">
@@ -124,6 +125,33 @@
         <section class="view-panel" data-panel="activity" aria-labelledby="activity-title" hidden>
           <div class="page-heading"><div><p class="eyebrow">命令与审计结果</p><h1 id="activity-title">活动</h1></div><button id="refresh" class="quiet-button" type="button">刷新</button></div>
           <div id="activity-list" class="activity-list"></div>
+        </section>
+
+        <section class="view-panel" data-panel="monitor" aria-labelledby="monitor-title" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">语音与音频</p><h1 id="monitor-title">监控</h1></div>
+          </div>
+          <div class="monitor-layout">
+            <nav class="monitor-list" aria-label="监控项目">
+              <button class="monitor-item active" type="button" data-monitor="logs">日志</button>
+              <button class="monitor-item" type="button" data-monitor="input">声音输入</button>
+              <button class="monitor-item" type="button" data-monitor="output">声音输出</button>
+            </nav>
+            <div class="monitor-stage">
+              <section data-monitor-panel="logs" aria-labelledby="monitor-log-title">
+                <div class="section-heading"><h2 id="monitor-log-title">日志</h2><span class="subtle">唤醒和识别文本</span></div>
+                <div id="monitor-log" class="activity-list"></div>
+              </section>
+              <section data-monitor-panel="input" aria-labelledby="monitor-input-title" hidden>
+                <div class="section-heading"><h2 id="monitor-input-title">声音输入</h2><span id="monitor-input-status" class="subtle">等待麦克风</span></div>
+                <canvas id="waveform-input" class="waveform-canvas" width="640" height="220" aria-label="麦克风输入波形"></canvas>
+              </section>
+              <section data-monitor-panel="output" aria-labelledby="monitor-output-title" hidden>
+                <div class="section-heading"><h2 id="monitor-output-title">声音输出</h2><span id="monitor-output-status" class="subtle">等待播放</span></div>
+                <canvas id="waveform-output" class="waveform-canvas" width="640" height="220" aria-label="声音输出波形"></canvas>
+              </section>
+            </div>
+          </div>
         </section>
         <p id="global-error" class="global-error" role="alert"></p>
       </div>
