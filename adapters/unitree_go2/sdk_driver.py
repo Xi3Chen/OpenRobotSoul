@@ -13,6 +13,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from adapters.unitree_go2.actions import native_arguments, sport_action, sport_capabilities, validate_parameters
+from robotsoul.adapters.base import BatteryStatus
 from robotsoul.models import CapabilitySpec, Command, Feedback, FeedbackStatus, Observation, utc_now
 from robotsoul.profiles import RobotProfile
 
@@ -21,6 +22,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_TTL_MS = 1500
 STATE_BUFFER_SIZE = 8192
 ERROR_BUFFER_SIZE = 1024
+# Unitree Go2 BmsState status: 6 PRECHG and 7 CHG are charging.
+# 0 SAFE, 1 WAKE_UP, 8 DCHG, 9 SELF_DCHG, 11 ALARM, 12 RESET_ALARM, and 13 AUTO_RECOVERY are not.
+_CHARGING_STATUSES = frozenset({6, 7})
+_KNOWN_BATTERY_STATUSES = frozenset({0, 1, 6, 7, 8, 9, 11, 12, 13})
 
 
 class UnitreeGo2SdkDriver:
@@ -89,6 +94,14 @@ class UnitreeGo2SdkDriver:
             return bool(self._library.go2_bridge_health(self._handle, error, len(error)))
         except (OSError, ValueError):
             return False
+
+    def battery(self) -> BatteryStatus | None:
+        if self._library is None or self._handle is None:
+            return None
+        try:
+            return _battery_from_state(self._read_battery())
+        except Exception:
+            return None
 
     def identity(self) -> tuple[str, str]:
         return "Unitree", "Go2"
@@ -229,6 +242,24 @@ class UnitreeGo2SdkDriver:
         _validate_state(state)
         return state
 
+    def _read_battery(self) -> dict[str, Any]:
+        reader = getattr(self._library, "go2_bridge_read_battery", None)
+        if not callable(reader):
+            raise RuntimeError("Go2 bridge does not report battery state")
+        error = ctypes.create_string_buffer(ERROR_BUFFER_SIZE)
+        output = ctypes.create_string_buffer(STATE_BUFFER_SIZE)
+        try:
+            result = reader(self._handle, output, len(output), error, len(error))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("Unable to read Go2 battery state from the native bridge") from exc
+        if not result:
+            raise RuntimeError(_error_text(error, "Unable to read Go2 battery state"))
+        try:
+            state = json.loads(output.value.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Go2 bridge returned invalid battery JSON") from exc
+        return state
+
     @staticmethod
     def _bind_functions(library: Any) -> None:
         char_pointer = ctypes.POINTER(ctypes.c_char)
@@ -244,6 +275,16 @@ class UnitreeGo2SdkDriver:
             ctypes.c_size_t,
         ]
         library.go2_bridge_read_state.restype = ctypes.c_int
+        read_battery = getattr(library, "go2_bridge_read_battery", None)
+        if callable(read_battery):
+            read_battery.argtypes = [
+                ctypes.c_void_p,
+                char_pointer,
+                ctypes.c_size_t,
+                char_pointer,
+                ctypes.c_size_t,
+            ]
+            read_battery.restype = ctypes.c_int
         library.go2_bridge_call.argtypes = [
             ctypes.c_void_p,
             ctypes.c_char_p,
@@ -522,6 +563,34 @@ def _validate_state(state: Any) -> None:
         or not isfinite(state["yaw_speed"])
     ):
         raise RuntimeError("Go2 bridge yaw speed is invalid")
+
+
+def _battery_from_state(state: Any, *, now: datetime | None = None) -> BatteryStatus:
+    expected = {"soc", "status", "current_ma", "observed_at"}
+    if not isinstance(state, dict) or set(state) != expected:
+        raise RuntimeError("Go2 bridge returned an unexpected battery schema")
+    soc = state["soc"]
+    status = state["status"]
+    current = state["current_ma"]
+    if isinstance(soc, bool) or not isinstance(soc, int) or not 0 <= soc <= 100:
+        raise RuntimeError("Go2 battery level is invalid")
+    if isinstance(status, bool) or not isinstance(status, int) or not 0 <= status <= 255:
+        raise RuntimeError("Go2 battery status is invalid")
+    if isinstance(current, bool) or not isinstance(current, int):
+        raise RuntimeError("Go2 battery current is invalid")
+    observed_at = _parse_timestamp(state["observed_at"])
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise RuntimeError("Go2 battery timestamp must include a timezone")
+    age_ms = ((now or utc_now()) - observed_at).total_seconds() * 1000
+    if age_ms < 0 or age_ms > STATE_TTL_MS:
+        raise RuntimeError("Go2 battery sample is stale")
+    if status in _CHARGING_STATUSES:
+        charging: bool | None = True
+    elif status in _KNOWN_BATTERY_STATUSES:
+        charging = False
+    else:
+        charging = None
+    return BatteryStatus(level_percent=soc, charging=charging)
 
 
 def create_sdk_driver(profile: RobotProfile) -> UnitreeGo2SdkDriver:

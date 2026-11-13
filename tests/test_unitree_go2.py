@@ -7,9 +7,11 @@ from robotsoul.profiles import load_selected_profile
 from adapters.unitree_go2 import UnitreeGo2Adapter
 from adapters.unitree_go2.sdk_driver import (
     UnitreeGo2SdkDriver,
+    _battery_from_state,
     _validate_state,
     create_sdk_driver,
 )
+from robotsoul.adapters.base import BatteryStatus
 from adapters.unitree_go2.actions import sport_capabilities
 from robotsoul.models import CapabilitySpec, ParameterSpec, RiskLevel, utc_now
 
@@ -72,6 +74,28 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         self.assertEqual(declared, catalog)
         self.assertEqual(self.profile.required_capabilities, ("sport.stop_move",))
         self.assertNotIn("sport.damp", declared)
+        high = {item.name for item in self.profile.capabilities if item.risk_level == RiskLevel.HIGH}
+        self.assertEqual(
+            high,
+            {
+                "sport.recovery_stand",
+                "sport.front_flip",
+                "sport.front_jump",
+                "sport.front_pounce",
+                "sport.dance1",
+                "sport.dance2",
+                "sport.left_flip",
+                "sport.back_flip",
+                "sport.handstand",
+                "sport.free_bound",
+                "sport.free_jump",
+                "sport.switch_joystick",
+                "sport.auto_recover_set",
+            },
+        )
+        for name in ("sport.switch_avoid_mode", "sport.free_avoid", "sport.walk_upright", "sport.cross_step", "sport.stand_up", "sport.move"):
+            self.assertEqual(declared[name].risk_level, RiskLevel.CONFIRM)
+            self.assertIn("agent", declared[name].allowed_callers)
         source = __import__("pathlib").Path("adapters/unitree_go2/bridge/bridge.cpp").read_text(encoding="utf-8")
         for name in declared:
             self.assertIn(f'"{name.removeprefix("sport.")}"', source)
@@ -80,6 +104,7 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         adapter.connect()
 
         self.assertTrue(adapter.health())
+        self.assertIsNone(adapter.battery())
         self.assertEqual(adapter.discover_capabilities(), {})
 
     def test_deployment_config_selects_robot_module_default_profile(self):
@@ -411,6 +436,80 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
 
         self.assertTrue(driver.closed)
         self.assertFalse(adapter.connected)
+
+    def test_battery_is_shown_only_when_the_connected_driver_reports_it(self):
+        driver = FakeGo2Driver(self.profile.robot_id)
+        adapter = UnitreeGo2Adapter(self.profile, driver)
+        self.assertIsNone(adapter.battery())
+        adapter.connect()
+
+        driver.battery = lambda: BatteryStatus(64, False)
+        self.assertEqual(adapter.battery(), BatteryStatus(64, False))
+
+        driver.battery = lambda: {"level_percent": 64, "charging": False}
+        self.assertIsNone(adapter.battery())
+
+        def unavailable():
+            raise RuntimeError("bms unavailable")
+
+        driver.battery = unavailable
+        self.assertIsNone(adapter.battery())
+        adapter.close()
+        driver.battery = lambda: BatteryStatus(64, True)
+        self.assertIsNone(adapter.battery())
+
+    def test_battery_state_uses_documented_charge_status_and_rejects_stale_samples(self):
+        now = utc_now()
+        sample = {
+            "soc": 81,
+            "status": 7,
+            "current_ma": 1400,
+            "observed_at": now.isoformat(),
+        }
+
+        self.assertEqual(_battery_from_state(sample, now=now), BatteryStatus(81, True))
+        self.assertEqual(
+            _battery_from_state({**sample, "status": 6, "current_ma": 80}, now=now),
+            BatteryStatus(81, True),
+        )
+        self.assertEqual(
+            _battery_from_state({**sample, "status": 8, "current_ma": -900}, now=now),
+            BatteryStatus(81, False),
+        )
+        self.assertIsNone(_battery_from_state({**sample, "status": 4}, now=now).charging)
+        with self.assertRaisesRegex(RuntimeError, "level is invalid"):
+            _battery_from_state({**sample, "soc": 101}, now=now)
+        with self.assertRaisesRegex(RuntimeError, "stale"):
+            _battery_from_state(sample, now=now + timedelta(seconds=3))
+
+    def test_sdk_driver_reads_battery_without_requiring_sport_state(self):
+        import ctypes
+        import json
+        from unittest.mock import Mock
+
+        now = utc_now()
+        sample = {
+            "soc": 42,
+            "status": 8,
+            "current_ma": -300,
+            "observed_at": now.isoformat(),
+        }
+        driver = UnitreeGo2SdkDriver(self.profile, "eth0", bridge_library="bridge.so")
+        driver._handle = 1
+        driver._library = Mock()
+
+        def read_battery(_handle, output, _capacity, _error, _error_capacity):
+            payload = json.dumps(sample).encode("utf-8") + b"\0"
+            ctypes.memmove(output, payload, len(payload))
+            return 1
+
+        driver._library.go2_bridge_read_battery.side_effect = read_battery
+        self.assertEqual(driver.battery(), BatteryStatus(42, False))
+
+        driver._library.go2_bridge_read_battery.side_effect = lambda *_args: 0
+        self.assertIsNone(driver.battery())
+        driver._library = object()
+        self.assertIsNone(driver.battery())
 
 
 class _FixedAgent:

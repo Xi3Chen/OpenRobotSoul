@@ -1,13 +1,16 @@
 #include "bridge.h"
 
+#include <unitree/idl/go2/LowState_.hpp>
 #include <unitree/idl/go2/SportModeState_.hpp>
 #include <unitree/robot/channel/channel_factory.hpp>
 #include <unitree/robot/channel/channel_subscriber.hpp>
 #include <unitree/robot/go2/sport/sport_client.hpp>
 
 #include <chrono>
+#include <cinttypes>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -19,6 +22,8 @@
 namespace {
 using State = unitree_go::msg::dds_::SportModeState_;
 using Subscriber = unitree::robot::ChannelSubscriber<State>;
+using LowStateMsg = unitree_go::msg::dds_::LowState_;
+using LowSubscriber = unitree::robot::ChannelSubscriber<LowStateMsg>;
 constexpr auto kFreshness = std::chrono::seconds(2);
 
 struct Bridge;
@@ -36,11 +41,16 @@ struct Bridge {
   std::mutex mutex;
   std::unique_ptr<unitree::robot::go2::SportClient> client;
   std::unique_ptr<Subscriber> subscriber;
+  std::unique_ptr<LowSubscriber> low_subscriber;
   State state;
+  LowStateMsg low_state;
   std::chrono::steady_clock::time_point received_at{};
+  std::chrono::steady_clock::time_point low_received_at{};
   std::chrono::system_clock::time_point state_observed_at{};
+  std::chrono::system_clock::time_point low_observed_at{};
   std::condition_variable state_ready;
   bool has_state = false;
+  bool has_low_state = false;
   bool closed = false;
   std::string client_version;
   std::string server_version;
@@ -56,9 +66,24 @@ struct Bridge {
     state_ready.notify_all();
   }
 
+  void on_low_state(const void* message) {
+    if (!message) return;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (closed) return;
+    low_state = *static_cast<const LowStateMsg*>(message);
+    low_received_at = std::chrono::steady_clock::now();
+    low_observed_at = std::chrono::system_clock::now();
+    has_low_state = true;
+  }
+
   bool fresh_locked() const {
     return has_state && !closed &&
            std::chrono::steady_clock::now() - received_at <= kFreshness;
+  }
+
+  bool low_fresh_locked() const {
+    return has_low_state && !closed &&
+           std::chrono::steady_clock::now() - low_received_at <= kFreshness;
   }
 
   void close() noexcept {
@@ -68,12 +93,18 @@ struct Bridge {
       if (closed) return;
       closed = true;
       has_state = false;
+      has_low_state = false;
     }
     try {
       if (subscriber) subscriber->CloseChannel();
     } catch (...) {
     }
     subscriber.reset();
+    try {
+      if (low_subscriber) low_subscriber->CloseChannel();
+    } catch (...) {
+    }
+    low_subscriber.reset();
     client.reset();
     try {
       unitree::robot::ChannelFactory::Instance()->Release();
@@ -309,6 +340,9 @@ void* go2_bridge_create(const char* network_interface, char* error,
         bridge->client_version != bridge->server_version) {
       throw std::runtime_error("client/server API versions do not match");
     }
+    bridge->low_subscriber.reset(new LowSubscriber("rt/lowstate"));
+    bridge->low_subscriber->InitChannel(
+        [raw](const void* message) { raw->on_low_state(message); }, 1);
     g_active_bridge = bridge.get();
     return bridge.release();
   } catch (const std::exception& e) {
@@ -384,6 +418,43 @@ int go2_bridge_read_state(void* handle, char* output, size_t output_capacity,
       state.yaw_speed(), p[0], p[1], p[2], state.error_code());
   if (needed < 0 || static_cast<size_t>(needed) >= output_capacity) {
     set_error(error, error_capacity, "state output buffer is too small");
+    return 0;
+  }
+  return 1;
+}
+
+int go2_bridge_read_battery(void* handle, char* output, size_t output_capacity,
+                            char* error, size_t error_capacity) {
+  if (error && error_capacity) error[0] = '\0';
+  auto* bridge = static_cast<Bridge*>(handle);
+  if (!valid(bridge) || !output || !output_capacity) {
+    set_error(error, error_capacity, "bridge handle and output buffer are required");
+    return 0;
+  }
+  uint8_t soc = 0;
+  uint8_t status = 0;
+  int32_t current_ma = 0;
+  std::chrono::system_clock::time_point observed_at{};
+  {
+    std::lock_guard<std::mutex> lock(bridge->mutex);
+    if (!bridge->low_fresh_locked()) {
+      set_error(error, error_capacity, "battery state is missing or stale");
+      return 0;
+    }
+    const auto& bms = bridge->low_state.bms_state();
+    soc = bms.soc();
+    status = bms.status();
+    current_ma = bms.current();
+    observed_at = bridge->low_observed_at;
+  }
+  const std::string observed = format_utc(observed_at);
+  const int needed = std::snprintf(
+      output, output_capacity,
+      "{\"soc\":%u,\"status\":%u,\"current_ma\":%" PRId32 ",\"observed_at\":\"%s\"}",
+      static_cast<unsigned>(soc), static_cast<unsigned>(status), current_ma,
+      observed.c_str());
+  if (needed < 0 || static_cast<size_t>(needed) >= output_capacity) {
+    set_error(error, error_capacity, "battery output buffer is too small");
     return 0;
   }
   return 1;

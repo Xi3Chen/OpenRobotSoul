@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 from adapters.mimax2.driver import MiMax2FlashDriver
+from robotsoul.adapters.base import BatteryStatus
 from robotsoul.models import CapabilitySpec, Command, Feedback, FeedbackStatus, ParameterSpec, RiskLevel, utc_now
 from robotsoul.profiles import RobotProfile
 
@@ -28,6 +29,9 @@ class MiMax2Adapter:
 
     def health(self) -> bool:
         return self.connected and self.driver.health()
+
+    def battery(self) -> BatteryStatus | None:
+        return None
 
     def identity(self) -> tuple[str, str]:
         return self.driver.identity()

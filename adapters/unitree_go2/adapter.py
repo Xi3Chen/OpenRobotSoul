@@ -4,6 +4,7 @@ from math import isfinite
 from uuid import uuid4
 
 from adapters.unitree_go2.driver import UnitreeGo2Driver
+from robotsoul.adapters.base import BatteryStatus
 from robotsoul.models import (
     CapabilitySpec,
     Command,
@@ -48,6 +49,18 @@ class UnitreeGo2Adapter:
 
     def health(self) -> bool:
         return self.connected and self.driver.health()
+
+    def battery(self) -> BatteryStatus | None:
+        if not self.connected:
+            return None
+        reader = getattr(self.driver, "battery", None)
+        if not callable(reader):
+            return None
+        try:
+            status = reader()
+        except Exception:
+            return None
+        return status if isinstance(status, BatteryStatus) else None
 
     def identity(self) -> tuple[str, str]:
         return self.driver.identity()

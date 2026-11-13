@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from robotsoul.adapters.base import BatteryStatus
 from robotsoul.models import CapabilitySpec, Command, Feedback, Observation
 
 
@@ -21,6 +22,10 @@ class UnitreeGo2Driver(Protocol):
     def connect(self) -> None: ...
 
     def health(self) -> bool: ...
+
+    def battery(self) -> BatteryStatus | None:
+        """Return a fresh battery sample, or None when low-state telemetry is unavailable."""
+        ...
 
     def identity(self) -> tuple[str, str]: ...
 

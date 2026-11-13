@@ -7,6 +7,7 @@ from threading import Event, Lock
 from time import monotonic
 from uuid import uuid4
 
+from robotsoul.adapters.base import BatteryStatus
 from robotsoul.models import (
     CapabilitySpec, Command, Feedback, FeedbackStatus, Observation, RiskLevel,
     command_proposal_digest, utc_now,
@@ -46,6 +47,9 @@ class FakeRobotAdapter:
 
     def health(self) -> bool:
         return self.connected
+
+    def battery(self) -> BatteryStatus | None:
+        return None
 
     def identity(self) -> tuple[str, str]:
         return self.profile.manufacturer, self.profile.model

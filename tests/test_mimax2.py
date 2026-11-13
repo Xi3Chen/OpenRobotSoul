@@ -48,6 +48,7 @@ class MiMax2Tests(unittest.TestCase):
 
     def test_profile_and_capability_are_registered(self):
         self.assertEqual(self.profile.model, "MiMax2")
+        self.assertIsNone(self.adapter.battery())
         self.assertEqual(tuple(self.adapter.discover_capabilities()), ("flash.toggle",))
 
     def test_flash_command_changes_device_and_returns_success(self):
