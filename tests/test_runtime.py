@@ -224,6 +224,34 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertTrue(event["actor_hash"])
             self.assertNotIn("session-secret", repr(event))
 
+    def test_dashboard_operator_runs_confirm_skill_without_ai_reviewer(self):
+        runtime = RobotRuntime.from_profile(load_profile("simulator-basic"))
+        result = runtime.invoke_skill(
+            "base.move_distance",
+            {"distance_m": 0.1, "max_speed_mps": 0.1},
+            invocation_context=InvocationContext(
+                InvocationSource.DASHBOARD, "operator-1", "session-1", "operator"
+            ),
+        )
+
+        self.assertEqual(result.task.status, "completed")
+        review = next(item for item in result.history if item.event_type == "safety.review.completed")
+        self.assertEqual(review.details["reviewer"], "dashboard_operator")
+        self.assertEqual(review.details["verdict"], "allow")
+        self.assertEqual(len(runtime.adapter.executed_commands), 1)
+
+    def test_agent_confirm_skill_still_requires_reviewer(self):
+        runtime = RobotRuntime.from_profile(load_profile("simulator-basic"))
+        result = runtime.invoke_skill(
+            "base.move_distance",
+            {"distance_m": 0.1, "max_speed_mps": 0.1},
+            invocation_context=InvocationContext(InvocationSource.AGENT),
+        )
+
+        self.assertEqual(result.task.status, "failed")
+        self.assertIn("Safety reviewer unavailable", result.task.error)
+        self.assertEqual(runtime.adapter.executed_commands, [])
+
     def test_boolean_parameter_rejects_integer(self):
         profile = load_profile("simulator-basic")
         capability = CapabilitySpec("test.bool", {"enabled": ParameterSpec("boolean")})
