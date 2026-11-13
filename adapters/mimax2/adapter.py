@@ -65,9 +65,17 @@ class MiMax2Adapter:
         if error:
             return (self._feedback(command, FeedbackStatus.FAILED, error, "command_rejected"),)
         try:
-            self.driver.set_flash(command.parameters["enabled"])
+            observed = self.driver.set_flash(command.parameters["enabled"])
         except Exception as exc:
             return (self._feedback(command, FeedbackStatus.FAILED, f"MiMax2 flash action failed: {exc}", "device_error"),)
+        # The runtime only completes a task when the terminal feedback carries
+        # condition_met=True; the LED read-back is that observable evidence.
+        evidence: dict[str, object] = {
+            "enabled": command.parameters["enabled"],
+            "condition_met": observed is not None,
+        }
+        if observed is not None:
+            evidence["brightness"] = observed
         return (
             self._feedback(command, FeedbackStatus.ACCEPTED, "MiMax2 flash action accepted"),
             self._feedback(command, FeedbackStatus.RUNNING, "MiMax2 flash action running"),
@@ -75,7 +83,7 @@ class MiMax2Adapter:
                 command,
                 FeedbackStatus.SUCCEEDED,
                 "MiMax2 flashlight on" if command.parameters["enabled"] else "MiMax2 flashlight off",
-                evidence={"enabled": command.parameters["enabled"]},
+                evidence=evidence,
             ),
         )
 

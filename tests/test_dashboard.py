@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import unittest
 from dataclasses import replace
@@ -654,6 +655,7 @@ class DashboardHTTPTests(unittest.TestCase):
             )
 
 
+    @unittest.skipIf(os.name == "nt", "POSIX file-mode bits are not enforced on Windows")
     def test_settings_replace_pin_and_keep_secrets_out_of_responses(self):
         import tempfile
         from pathlib import Path

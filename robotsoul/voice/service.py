@@ -4,6 +4,7 @@ from collections import deque
 from concurrent.futures import Future
 from dataclasses import dataclass
 from queue import Empty, Full, Queue
+import re
 from threading import Event, Lock, RLock, Thread
 from time import monotonic
 from typing import Any, Callable
@@ -280,6 +281,16 @@ class VoiceService:
     def generation(self) -> int:
         return self.arbiter.generation
 
+    @property
+    def queue_depth(self) -> int:
+        """Frames waiting for the recognition worker (read-only status)."""
+        return self._frames.qsize()
+
+    @property
+    def engine_loaded(self) -> bool:
+        """Whether the native voice models have been loaded (read-only status)."""
+        return self._engine_loaded
+
     def _open_local_stream(self) -> None:
         if not hasattr(self.capture, "set_callback"):
             raise RuntimeError("audio capture backend must support set_callback")
@@ -512,13 +523,17 @@ class VoiceService:
                 return
             if evaluation is not None and evaluation.success:
                 response = evaluation.conclusion
+                success = True
                 self._note("Info", f"运行时完成 id={task_id} 状态={status} 结论={response}")
             elif task is not None and getattr(task, "error", None):
                 response = task.error
+                success = False
                 self._note("Warning", f"运行时失败 id={task_id} 状态={status} 原因={response}")
             else:
                 response = "操作已处理。"
+                success = False
                 self._note("Info", f"运行时返回 id={task_id} 状态={status} 结论={response}")
+            response = self._spoken_reply(response, success=success)
             with self._engine_lock:
                 audio = self.engine.synthesize(response)
             if generation != self.arbiter.generation:
@@ -534,10 +549,33 @@ class VoiceService:
                     call_sink(samples, sample_rate)
             elif self.speaker is not None:
                 self.speaker.play(samples, sample_rate)
+                # Without acoustic echo cancellation the microphone hears the
+                # reply that was just played and would transcribe it as a new
+                # command during the follow-up window. Drop the audio captured
+                # while the speaker was busy and reset the recognizer/VAD state.
+                self._clear_audio()
+                with self._engine_lock:
+                    self.engine.reset_asr()
+                    if hasattr(self.engine, "reset_vad"):
+                        self.engine.reset_vad()
             self.gate.reply_finished()
             self._note("Info", "回复结束，等待后续指令")
         except Exception as exc:
             self._fail(exc)
+
+    _CJK = re.compile(r"[\u4e00-\u9fff]")
+
+    def _spoken_reply(self, text: Any, *, success: bool) -> str:
+        """Keep spoken output in Chinese: the bundled TTS voice is Chinese-only.
+
+        Runtime and adapter messages are English (for logs and the dashboard),
+        so an English conclusion synthesized through the Xiao-Ya model drops
+        every word as out-of-vocabulary. Speak a short Chinese acknowledgement
+        instead of mixed-language noise.
+        """
+        if isinstance(text, str) and self._CJK.search(text):
+            return text
+        return "好的，已完成。" if success else "抱歉，这个操作没有成功。"
 
     def _clear_audio(self, *, clear_sink: bool = True) -> None:
         while True:

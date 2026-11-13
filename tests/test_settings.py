@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from robotsoul.settings import (
 
 
 class OperatorDirectoryTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX file-mode bits are not enforced on Windows")
     def test_username_is_plaintext_and_password_is_salted_pbkdf2(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "operators.json"
@@ -58,6 +60,7 @@ class OperatorDirectoryTests(unittest.TestCase):
 
 
 class LlmAndAudioSettingsTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX file-mode bits are not enforced on Windows")
     def test_public_llm_view_omits_api_key(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "llm.json"

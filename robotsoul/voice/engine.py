@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import inspect
 import tempfile
@@ -20,6 +21,28 @@ _KEYWORD_ACTIVE_PATHS = 8
 # Sherpa treats rule 3 as "endpoint once the utterance reaches this many seconds".
 # Zero makes the first audio chunk an endpoint, so the command after the wake word is discarded.
 _ASR_MAX_UTTERANCE_SECONDS = 20.0
+
+
+def keyword_line(tokens: Sequence[str], phrase: str, *, score: float, threshold: float) -> str:
+    """Build one sherpa-onnx keyword line: tokens, boost score, threshold, label."""
+    return " ".join(tokens) + f" :{float(score)} #{float(threshold)} @{phrase.replace(' ', '_')}"
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise VoiceEngineError(f"{name} must be a number, got {raw!r}") from exc
+
+
+def _env_int(name: str, default: int) -> int:
+    value = int(_env_float(name, float(default)))
+    if value < 1:
+        raise VoiceEngineError(f"{name} must be a positive integer")
+    return value
 
 
 @dataclass(frozen=True)
@@ -143,7 +166,10 @@ class SherpaVoiceEngine:
             if not encoded or not encoded[0]:
                 raise VoiceEngineError(f"Wake phrase cannot be encoded by the configured KWS model: {self.wake_phrase}")
             phones = " ".join(encoded[0])
-            keyword = f"{phones} :{_KEYWORD_BOOST} #{_KEYWORD_THRESHOLD} @{self.wake_phrase.replace(' ', '_')}"
+            boost = _env_float("ROBOTSOUL_VOICE_KWS_SCORE", _KEYWORD_BOOST)
+            threshold = _env_float("ROBOTSOUL_VOICE_KWS_THRESHOLD", _KEYWORD_THRESHOLD)
+            kws_threads = _env_int("ROBOTSOUL_VOICE_KWS_THREADS", 1)
+            keyword = keyword_line(encoded[0], self.wake_phrase, score=boost, threshold=threshold)
             self._keywords_file = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".keywords", delete=False)
             self._keywords_file.write(keyword + "\n")
             self._keywords_file.flush()
@@ -151,21 +177,22 @@ class SherpaVoiceEngine:
                 tokens=str(kws["tokens.txt"]), encoder=str(kws["encoder-epoch-13-avg-2-chunk-8-left-64.int8.onnx"]),
                 decoder=str(kws["decoder-epoch-13-avg-2-chunk-8-left-64.onnx"]),
                 joiner=str(kws["joiner-epoch-13-avg-2-chunk-8-left-64.int8.onnx"]),
-                num_threads=1, provider="cpu", keywords_file=self._keywords_file.name,
-                max_active_paths=_KEYWORD_ACTIVE_PATHS, keywords_score=_KEYWORD_BOOST,
-                keywords_threshold=_KEYWORD_THRESHOLD, num_trailing_blanks=_KEYWORD_TRAILING_BLANKS,
+                num_threads=kws_threads, provider="cpu", keywords_file=self._keywords_file.name,
+                max_active_paths=_KEYWORD_ACTIVE_PATHS, keywords_score=boost,
+                keywords_threshold=threshold, num_trailing_blanks=_KEYWORD_TRAILING_BLANKS,
             )
             self._kws_stream = self._kws.create_stream()
             _voice_log(
                 "Info",
                 f"唤醒模型已加载 短语={self.wake_phrase} 音素={phones} "
-                f"门槛={_KEYWORD_THRESHOLD} 加权={_KEYWORD_BOOST}",
+                f"门槛={threshold} 加权={boost} 线程={kws_threads}",
             )
             _voice_log("Info", "开始加载识别模型")
+            asr_threads = _env_int("ROBOTSOUL_VOICE_ASR_THREADS", 1)
             self._recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
                 tokens=str(asr["tokens.txt"]), encoder=str(asr["encoder.int8.onnx"]),
                 decoder=str(asr["decoder.onnx"]), joiner=str(asr["joiner.int8.onnx"]),
-                num_threads=1, sample_rate=self.sample_rate, feature_dim=80, enable_endpoint_detection=True,
+                num_threads=asr_threads, sample_rate=self.sample_rate, feature_dim=80, enable_endpoint_detection=True,
                 rule1_min_trailing_silence=0.5, rule2_min_trailing_silence=0.3,
                 rule3_min_utterance_length=_ASR_MAX_UTTERANCE_SECONDS,
                 decoding_method="greedy_search", provider="cpu",)
@@ -188,12 +215,13 @@ class SherpaVoiceEngine:
             _voice_log("Info", "端点模型已加载")
             _voice_log("Info", "开始加载合成模型")
 
+            tts_threads = _env_int("ROBOTSOUL_VOICE_TTS_THREADS", 1)
             tts_config = sherpa_onnx.OfflineTtsConfig(
                 model=sherpa_onnx.OfflineTtsModelConfig(
                     vits=sherpa_onnx.OfflineTtsVitsModelConfig(
                         model=str(tts_models[0]), lexicon=str(tts_files["lexicon.txt"]),
                         tokens=str(tts_files["tokens.txt"])),
-                    provider="cpu", debug=False, num_threads=1),
+                    provider="cpu", debug=False, num_threads=tts_threads),
                 rule_fsts=",".join(str(tts_files[name]) for name in ("phone.fst", "date.fst", "number.fst")))
             if not tts_config.validate():
                 raise VoiceEngineError("Invalid Xiao-Ya TTS configuration")

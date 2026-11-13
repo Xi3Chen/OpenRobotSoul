@@ -35,6 +35,9 @@ def create_voice_service(
     *,
     config_path: str | Path | None = None,
     resource_root: str | Path | None = None,
+    wake_callback=None,
+    transcript_callback=None,
+    run_text=None,
 ) -> tuple[VoiceService, VoiceConfig]:
     config = load_voice_config(config_path or _default_voice_config())
     root = Path(resource_root or os.environ.get("ROBOTSOUL_VOICE_RESOURCE_ROOT") or default_root())
@@ -53,11 +56,13 @@ def create_voice_service(
     service = VoiceService(
         capture=capture,
         engine=engine,
-        run_text=runtime.run_text,
+        run_text=run_text or runtime.run_text,
         robot_name=config.robot_name,
         speaker=speaker,
         follow_up_seconds=config.follow_up_seconds,
         session_max_seconds=config.session_max_seconds,
         call_reconnect_grace_seconds=config.call_reconnect_grace_seconds,
+        wake_callback=wake_callback,
+        transcript_callback=transcript_callback,
     )
     return service, config

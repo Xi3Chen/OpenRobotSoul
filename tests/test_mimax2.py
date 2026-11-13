@@ -29,6 +29,7 @@ class FakeFlashDriver:
 
     def set_flash(self, enabled):
         self.enabled = enabled
+        return 4 if enabled else 0
 
     def close(self):
         self.enabled = False
@@ -60,7 +61,29 @@ class MiMax2Tests(unittest.TestCase):
         feedback = self.adapter.execute(command)
         self.assertTrue(self.driver.enabled)
         self.assertEqual(feedback[-1].status.value, "succeeded")
-        self.assertEqual(feedback[-1].evidence, {"enabled": True})
+        self.assertEqual(
+            feedback[-1].evidence,
+            {"enabled": True, "condition_met": True, "brightness": 4},
+        )
+
+    def test_succeeded_feedback_carries_completion_evidence(self):
+        command = Command(
+            "cmd-2", "task-2", "trace-2", self.profile.robot_id, "flash.toggle", {"enabled": False},
+            utc_now() + timedelta(seconds=2), risk_level=RiskLevel.NORMAL,
+            invocation_source=InvocationSource.AGENT,
+        )
+        feedback = self.adapter.execute(command)
+        self.assertIs(feedback[-1].evidence.get("condition_met"), True)
+
+    def test_driver_reports_unverified_when_readback_mismatches(self):
+        driver = MiMax2FlashDriver("phone-mimax2")
+        path_type = type(driver.flash_path)
+        with patch.object(path_type, "is_file", return_value=True), \
+             patch.object(path_type, "read_text", side_effect=["4\n", "0\n"]), \
+             patch.object(path_type, "write_bytes", return_value=None):
+            driver.connect()
+            with self.assertRaises(RuntimeError):
+                driver.set_flash(True)
 
     def test_slash_command_toggles_flash_without_matching_plain_text(self):
         from robotsoul.agent import resolve_slash_command

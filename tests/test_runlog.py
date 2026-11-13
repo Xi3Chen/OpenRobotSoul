@@ -11,6 +11,7 @@ from robotsoul.runlog import RunLog, configure, current, log
 
 
 class RunLogTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX file-mode bits are not enforced on Windows")
     def test_daily_log_uses_time_module_and_level_prefix(self):
         with tempfile.TemporaryDirectory() as directory:
             written = RunLog(directory).write("Voice", "Info", "唤醒：索拉")

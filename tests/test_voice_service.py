@@ -41,6 +41,7 @@ class FakeEngine:
         self.closed = 0
         self.asr_called = threading.Event()
         self.tts_called = threading.Event()
+        self.synthesized = []
 
     def load(self):
         self.loads += 1
@@ -70,6 +71,7 @@ class FakeEngine:
         return []
 
     def synthesize(self, _text):
+        self.synthesized.append(_text)
         self.tts_called.set()
         return SynthesizedAudio((0.1, -0.1), 16000)
 
@@ -281,7 +283,10 @@ class VoiceServiceTests(unittest.TestCase):
             lines = []
             while time.monotonic() < deadline:
                 lines = current().recent(30)
-                if any("运行时失败 id=task-1" in line for line in lines):
+                if (
+                    any("运行时失败 id=task-1" in line for line in lines)
+                    and any("回复结束，等待后续指令" in line for line in lines)
+                ):
                     break
                 time.sleep(0.01)
             self.assertTrue(any("提交运行时：向前" in line for line in lines))
@@ -300,6 +305,30 @@ class VoiceServiceTests(unittest.TestCase):
             self.assertEqual(capture.probes, probes_after_start)
         finally:
             service.stop()
+
+    def test_spoken_reply_stays_chinese_for_english_runtime_messages(self):
+        class Task:
+            error = "No supported skill matched the request"
+
+        class Result:
+            task = Task()
+            evaluation = None
+
+        capture = FakeCapture(available=False)
+        engine = FakeEngine()
+        service = VoiceService(capture=capture, engine=engine, run_text=lambda text: Result(),
+                               idle_probe_seconds=100)
+        try:
+            service.start()
+            service.begin_call()
+            generation = service.call_connected()
+            service.set_call_audio_sink(lambda samples, rate: None)
+            service.accept_call_audio(generation, (0.1, 0.2), 16000)
+            self.assertTrue(engine.tts_called.wait(2))
+            self.assertEqual(engine.synthesized[-1], "抱歉，这个操作没有成功。")
+        finally:
+            service.stop()
+
 
 
 if __name__ == "__main__":

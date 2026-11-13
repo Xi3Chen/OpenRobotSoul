@@ -1,0 +1,46 @@
+[Unit]
+Description=MiMax2 OpenRobotSoul voice service (passive listen + wake + ASR + TTS)
+Documentation=file:///home/user/mimax2-voice/release/README.md
+After=network.target sound.target
+Wants=sound.target
+# Models and the project live on the persistent data partition; never start
+# against a half-mounted root filesystem.
+RequiresMountsFor=/home/user/mimax2-data
+# The service owns the built-in microphone; do not run another always-on
+# capture service (for example the legacy voice-assistant.service) beside it.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=user
+Group=user
+SupplementaryGroups=audio video
+Environment=XDG_RUNTIME_DIR=/run/user/10000
+Environment=HOME=/home/user
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/home/user/mimax2-voice/runtime/sherpa-musl:/home/user/mimax2-voice/release
+Environment=ROBOTSOUL_VOICE_RESOURCE_ROOT=/home/user/mimax2-data/voice-resources
+Environment=ROBOTSOUL_ROBOT_CONFIG=/home/user/mimax2-voice/release/config/robot-mimax2.json
+Environment=ROBOTSOUL_VOICE_RUNTIME_DIR=/run/mimax2-voice
+# Resident language gateway (OpenAI-compatible) settings; without this file the
+# service falls back to the rule-based DemoAgent.
+Environment=ROBOTSOUL_LLM_CONFIG=/home/user/mimax2-voice/release/config/llm.json
+# Optional voice tuning overrides (wake threshold, thread counts, ...).
+EnvironmentFile=-/etc/mimax2-voice.env
+WorkingDirectory=/home/user/mimax2-voice/release
+ExecStart=/home/user/mimax2-voice/release/.venv/bin/python /home/user/mimax2-voice/release/scripts/run_voice_service.py
+RuntimeDirectory=mimax2-voice
+RuntimeDirectoryMode=0750
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+# Model load peaks around 480 MB RSS on the MiMax2; leave room for zram growth.
+MemoryMax=900M
+CPUQuota=250%
+Nice=5
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
