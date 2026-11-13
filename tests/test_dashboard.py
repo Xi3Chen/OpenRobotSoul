@@ -490,6 +490,28 @@ class DashboardHTTPTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires TLS"):
             create_dashboard_server(self.runtime, operator_pin="test-pin-4982", host="192.168.1.40")
 
+    def test_voice_event_preview_requires_login_and_lists_recent_text(self):
+        from robotsoul.voice.log import InMemoryVoiceEventLog
+
+        log = InMemoryVoiceEventLog()
+        log.record(kind="wake", text="索拉", source="local", state="PASSIVE")
+        log.record(kind="transcript", text="向前走", source="local", state="PASSIVE")
+        self.server.service.voice_event_log = log
+        status, _headers, data = self.request("GET", "/api/voice/events")
+        self.assertEqual(status, 401)
+        self.assertEqual(data["error"], "Authentication required")
+        self.connection.close()
+        self.connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+        cookie, _csrf = self.login()
+
+        status, _headers, data = self.request("GET", "/api/voice/events", headers={"Cookie": cookie})
+
+        self.assertEqual(status, 200)
+        self.assertEqual([item["text"] for item in data["events"]], ["向前走", "索拉"])
+        status, _headers, overview = self.request("GET", "/api/dashboard/overview", headers={"Cookie": cookie})
+        self.assertEqual(status, 200)
+        self.assertEqual(overview["voice_events"][0]["kind"], "transcript")
+
     def test_wildcard_bind_is_rejected_even_with_tls(self):
         with self.assertRaisesRegex(ValueError, "wildcard address"):
             create_dashboard_server(

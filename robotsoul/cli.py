@@ -189,12 +189,15 @@ def main() -> None:
         operator_pin = os.environ.get(args.operator_pin_env) or getpass.getpass("Dashboard operator PIN: ")
         voice_service = None
         voice_media = None
+        voice_event_log = None
         try:
             if not args.no_voice:
                 from robotsoul.voice.factory import create_voice_service
+                from robotsoul.voice.log import JsonlVoiceEventLog
                 from robotsoul.voice.media import VoiceMediaBridge
 
-                voice_service, _voice_config = create_voice_service(runtime)
+                voice_event_log = JsonlVoiceEventLog()
+                voice_service, _voice_config = create_voice_service(runtime, event_log=voice_event_log)
                 voice_service.start()
                 voice_media = VoiceMediaBridge(voice_service)
             run_dashboard(
@@ -206,6 +209,7 @@ def main() -> None:
                 tls_key=args.tls_key,
                 voice_service=voice_service,
                 call_media=voice_media,
+                voice_event_log=voice_event_log,
             )
         except (RuntimeError, ValueError, OSError) as exc:
             parser.error(str(exc))

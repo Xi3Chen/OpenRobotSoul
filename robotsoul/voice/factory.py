@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 from robotsoul.resources import default_root
 from robotsoul.runtime import RobotRuntime
@@ -34,6 +35,7 @@ def create_voice_service(
     *,
     config_path: str | Path | None = None,
     resource_root: str | Path | None = None,
+    event_log: Any | None = None,
 ) -> tuple[VoiceService, VoiceConfig]:
     config = load_voice_config(config_path or _default_voice_config())
     root = Path(resource_root or os.environ.get("ROBOTSOUL_VOICE_RESOURCE_ROOT") or default_root())
@@ -56,5 +58,6 @@ def create_voice_service(
         follow_up_seconds=config.follow_up_seconds,
         session_max_seconds=config.session_max_seconds,
         call_reconnect_grace_seconds=config.call_reconnect_grace_seconds,
+        event_log=event_log,
     )
     return service, config

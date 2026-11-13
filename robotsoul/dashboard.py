@@ -15,7 +15,7 @@ from ipaddress import ip_address
 from pathlib import Path
 from threading import Lock
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from robotsoul.models import InvocationContext, InvocationSource, TaskResult
 from robotsoul.runtime import RobotRuntime
@@ -63,6 +63,7 @@ class DashboardService:
         action_ttl_seconds: int = ACTION_TTL_SECONDS,
         capture_arbiter: CaptureArbiter | None = None,
         call_media: Any | None = None,
+        voice_event_log: Any | None = None,
         clock=time.monotonic,
     ) -> None:
         if not isinstance(operator_pin, str) or len(operator_pin) < 8:
@@ -75,6 +76,7 @@ class DashboardService:
         self._clock = clock
         self.capture_arbiter = capture_arbiter
         self.call_media = call_media
+        self.voice_event_log = voice_event_log
         self._active_call: dict[str, str] | None = None
         self._sessions: dict[str, _Session] = {}
         self._challenges: dict[str, _ActionChallenge] = {}
@@ -293,10 +295,21 @@ class DashboardService:
                 "error": getattr(voice_health, "error", None),
             },
             "latest_feedback": self._actions[-1]["message"] if self._actions else None,
+            "voice_events": self.voice_events(),
             "policy_version": getattr(self.runtime.profile, "profile_version", "unknown"),
             "capabilities": [self._capability_view(name, spec) for name, spec in capabilities.items()],
             "actions": list(reversed(self._actions[-100:])),
         }
+
+    def voice_events(self, limit: int = 30) -> list[dict[str, Any]]:
+        log = self.voice_event_log
+        if log is None:
+            return []
+        try:
+            events = log.recent(limit)
+        except (TypeError, ValueError):
+            return []
+        return events if isinstance(events, list) else []
 
     def _capability_view(self, name: str, capability: Any) -> dict[str, Any]:
         risk = getattr(capability, "risk_level", "normal")
@@ -555,6 +568,14 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         return
 
+    def _event_limit(self) -> int:
+        raw = parse_qs(urlsplit(self.path).query).get("limit", ["30"])
+        try:
+            limit = int(raw[0])
+        except (TypeError, ValueError):
+            return 30
+        return min(100, max(1, limit))
+
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
         if path == "/" or path == "/index.html":
@@ -591,6 +612,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/proposals":
             self._json(HTTPStatus.OK, {"proposals": []})
+            return
+        if path == "/api/voice/events":
+            self._json(HTTPStatus.OK, {"events": self.server.service.voice_events(self._event_limit())})
             return
         self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
@@ -824,6 +848,7 @@ def create_dashboard_server(
     tls_key: str | Path | None = None,
     capture_arbiter: CaptureArbiter | None = None,
     call_media: Any | None = None,
+    voice_event_log: Any | None = None,
 ) -> _DashboardHTTPServer:
     try:
         is_loopback = ip_address(host).is_loopback or host.lower() == "localhost"
@@ -836,7 +861,11 @@ def create_dashboard_server(
     if bool(tls_cert) != bool(tls_key):
         raise ValueError("Both TLS certificate and key must be provided")
     service = DashboardService(
-        runtime, operator_pin=operator_pin, capture_arbiter=capture_arbiter, call_media=call_media
+        runtime,
+        operator_pin=operator_pin,
+        capture_arbiter=capture_arbiter,
+        call_media=call_media,
+        voice_event_log=voice_event_log,
     )
     server = _DashboardHTTPServer(
         (host, port), DashboardRequestHandler, service, secure=bool(tls_cert), allowed_host=host
@@ -859,6 +888,7 @@ def run_dashboard(
     tls_key: str | Path | None = None,
     voice_service: Any | None = None,
     call_media: Any | None = None,
+    voice_event_log: Any | None = None,
 ) -> None:
     server = create_dashboard_server(
         runtime,
@@ -869,6 +899,7 @@ def run_dashboard(
         tls_key=tls_key,
         capture_arbiter=voice_service,
         call_media=call_media,
+        voice_event_log=voice_event_log,
     )
     scheme = "https" if tls_cert else "http"
     print(f"RobotHarness Dashboard: {scheme}://{host}:{port}")

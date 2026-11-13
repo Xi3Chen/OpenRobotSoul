@@ -111,6 +111,16 @@ VAD 只回答“此刻有语音”，不回答“这句话是对机器人说的�
 
 `input_device` / `output_device` 只允许 `default`、`usb-microphone` 和 `usb-speaker`；实际设备可由对应的 `ROBOTSOUL_VOICE_INPUT_DEVICE` / `ROBOTSOUL_VOICE_OUTPUT_DEVICE` 环境变量覆盖。`follow_up_seconds`、唤醒阈值、静音端点和 call grace 均须在目标环境调参。配置项不能绕过控制策略、扩大技能或允许任意模型代码。
 
+## 语音事件日志
+
+Dashboard 启动语音服务时，把唤醒命中和最终识别文本追加到 `logs/voice_events.jsonl`。每一行是一个 JSON 事件，字段为 `event_id`、`kind`、`timestamp`、`source`、`state` 和 `text`。
+
+- `kind` 为 `wake` 时，`text` 是命中的唤醒短语，只在本地 `PASSIVE` 监听中产生。
+- `kind` 为 `transcript` 时，`text` 是 VAD/ASR 给出的最终转写，`source` 为 `local` 或 `call`。中间的 partial 文本和原始音频不写入该文件。
+- 文件权限为仅当前用户可读写，目录 `logs/` 不纳入版本控制。写入失败不中断识别，也不代替工具调用审计。
+
+已登录的 Dashboard 总览页有「语音日志」预览，读取最近的事件，用来确认唤醒是否发生以及识别出的句子。未登录不能读取。同一份最近记录也通过 `GET /api/voice/events` 提供，可选 `limit`（1 到 100，默认 30），同样要求操作员会话。机器人没有扬声器时，这条预览是确认本地唤醒和识别的界面。
+
 资源 manifest 记录每个下载项的版本、官方 URL、大小、SHA-256、架构和许可证来源。Xiao-Ya TTS 归档内的 `MODEL_CARD` 标明其 BZNSYP/Data-Baker 数据许可仅限非商业用途；商业部署必须先替换为具备适用商业许可的语音模型并重新锁定哈希，不能把 sherpa-onnx 的 Apache-2.0 许可视为覆盖该语音权重。
 
 ## 分阶段验收

@@ -179,6 +179,7 @@
       setVoiceStatus(...details);
     }
     renderRobotInformation(data.robot_configuration || {});
+    renderVoiceLog(data.voice_events || [], "#voice-log");
     renderActions(data.actions || [], "#overview-actions", 5);
     renderCapabilities(data.capabilities || []);
     renderControls(data.capabilities || []);
@@ -205,6 +206,39 @@
       item.append(term, detail);
       root.append(item);
     }
+  }
+
+  function renderVoiceLog(events, selector) {
+    const root = $(selector);
+    if (!root) return;
+    root.replaceChildren();
+    if (!events.length) {
+      root.append(empty("还没有唤醒或识别记录"));
+      return;
+    }
+    for (const event of events) {
+      const row = document.createElement("article");
+      row.className = "activity-row";
+      const title = document.createElement("strong");
+      title.textContent = event.kind === "wake" ? "已唤醒" : "识别文本";
+      const when = document.createElement("time");
+      when.dateTime = event.timestamp || "";
+      when.textContent = formatVoiceTime(event.timestamp);
+      const source = document.createElement("span");
+      source.textContent = event.source === "call" ? "网页通话" : "本地麦克风";
+      const spoken = document.createElement("span");
+      spoken.className = "activity-result";
+      spoken.textContent = text(event.text, "（空）");
+      row.append(title, when, source, spoken);
+      root.append(row);
+    }
+  }
+
+  function formatVoiceTime(value) {
+    if (!value) return "时间未知";
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return text(value);
+    return parsed.toLocaleString("zh-CN", { hour12: false });
   }
 
   function renderCapabilities(capabilities) {

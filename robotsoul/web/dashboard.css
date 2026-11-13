@@ -92,6 +92,7 @@ textarea { min-height: 74px; resize: vertical; }
 .parameter-field { display: grid; gap: 5px; min-width: 0; }
 .parameter-field span { color: var(--muted); font-size: 11px; }
 .parameter-field input, .parameter-field select { min-height: 38px; padding: 7px 9px; }
+.voice-log-section { margin-top: 8px; }
 .voice-section { display: grid; grid-template-columns: 1fr minmax(240px, 1.5fr) auto; align-items: center; gap: 18px; margin-top: 32px; padding: 18px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .voice-state { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; color: var(--muted); font-size: 12px; }
 .voice-actions { display: flex; align-items: center; gap: 8px; }

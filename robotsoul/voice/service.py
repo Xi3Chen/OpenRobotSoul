@@ -16,8 +16,6 @@ from robotsoul.voice.core import (
     ConversationGate,
     RuntimeTextExecutor,
 )
-
-
 @dataclass(frozen=True)
 class VoiceHealth:
     state: CaptureState
@@ -49,6 +47,7 @@ class VoiceService:
         call_reconnect_grace_seconds: float = 15,
         wake_callback: Callable[[str], None] | None = None,
         transcript_callback: Callable[[str], None] | None = None,
+        event_log: Any | None = None,
     ) -> None:
         self.capture = capture
         self.engine = engine
@@ -68,6 +67,7 @@ class VoiceService:
         self.call_reconnect_grace_seconds = call_reconnect_grace_seconds
         self._wake_callback = wake_callback
         self._transcript_callback = transcript_callback
+        self._event_log = event_log
         self._call_audio_sink: Callable[[Any, int], None] | None = None
         self._stop = Event()
         self._state_lock = Lock()
@@ -387,6 +387,7 @@ class VoiceService:
                 self._last_wake_at = monotonic()
             if self._wake_callback is not None:
                 self._wake_callback(str(wake))
+            self._record_event("wake", str(wake), "local")
             pre_roll = tuple(self._pre_roll)
             self._pre_roll.clear()
             for buffered in pre_roll:
@@ -447,6 +448,8 @@ class VoiceService:
             self._last_transcript_at = monotonic()
         if self._transcript_callback is not None:
             self._transcript_callback(text)
+        source = "call" if self.arbiter.state in {CaptureState.CALL, CaptureState.CALL_RECONNECTING} else "local"
+        self._record_event("transcript", text, source)
         expected_generation = self.arbiter.generation if generation is None else generation
         if expected_generation != self.arbiter.generation:
             return
@@ -495,6 +498,19 @@ class VoiceService:
         if clear_sink:
             with self._state_lock:
                 self._call_audio_sink = None
+
+    def _record_event(self, kind: str, text: str, source: str) -> None:
+        if self._event_log is None or not isinstance(text, str) or not text.strip():
+            return
+        try:
+            self._event_log.record(
+                kind=kind,
+                text=text.strip(),
+                source=source,
+                state=self.arbiter.state.value,
+            )
+        except Exception:
+            return
 
     def _fail(self, error: Exception) -> None:
         with self._state_lock:

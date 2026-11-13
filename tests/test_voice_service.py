@@ -6,6 +6,7 @@ import unittest
 
 from robotsoul.voice.core import CaptureState
 from robotsoul.voice.engine import AsrResult, SynthesizedAudio
+from robotsoul.voice.log import InMemoryVoiceEventLog
 from robotsoul.voice.service import VoiceService
 
 
@@ -45,7 +46,7 @@ class FakeEngine:
         self.resets += 1
 
     def accept_wake(self, _samples, _sample_rate):
-        return None
+        return getattr(self, "wake_text", None)
 
     def accept_vad(self, _samples):
         return False
@@ -130,6 +131,31 @@ class VoiceServiceTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(service.state, CaptureState.SLEEP)
             self.assertFalse(capture.opened)
+        finally:
+            service.stop()
+
+    def test_wake_and_transcript_are_recorded(self):
+        capture = FakeCapture(available=True)
+        engine = FakeEngine()
+        engine.wake_text = "索拉"
+        log = InMemoryVoiceEventLog()
+        service = VoiceService(
+            capture=capture,
+            engine=engine,
+            run_text=lambda text: text,
+            idle_probe_seconds=100,
+            event_log=log,
+        )
+        try:
+            self.assertEqual(service.start(), CaptureState.PASSIVE)
+            capture.callback((0.2, 0.1), 16000)
+            deadline = time.monotonic() + 2
+            while len(log.events) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual([(item["kind"], item["text"], item["source"]) for item in log.events], [
+                ("wake", "索拉", "local"),
+                ("transcript", "向前", "local"),
+            ])
         finally:
             service.stop()
 
