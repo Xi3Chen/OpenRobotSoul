@@ -7,3 +7,6 @@
 [submodule "third_party/sherpa-onnx"]
 	path = third_party/sherpa-onnx
 	url = https://github.com/k2-fsa/sherpa-onnx.git
+[submodule "adapters/unitree_go2/third_party/unitree_webrtc_connect"]
+	path = adapters/unitree_go2/third_party/unitree_webrtc_connect
+	url = https://github.com/legion1581/unitree_webrtc_connect.git
