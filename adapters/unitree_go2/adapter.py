@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from math import isfinite
+from typing import Any
 from uuid import uuid4
 
 from adapters.unitree_go2.driver import UnitreeGo2Driver
+from adapters.unitree_go2.speaker import start_go2_speaker
 from robotsoul.adapters.base import BatteryStatus
 from robotsoul.models import (
     CapabilitySpec,
@@ -17,6 +19,7 @@ from robotsoul.models import (
     utc_now,
 )
 from robotsoul.profiles import RobotProfile
+from robotsoul.runlog import log as runtime_log
 
 
 class UnitreeGo2Adapter:
@@ -29,6 +32,7 @@ class UnitreeGo2Adapter:
         self.driver = driver
         self.robot_id = profile.robot_id
         self.connected = False
+        self._speaker: Any | None = None
         self._capabilities: dict[str, CapabilitySpec] = {}
 
     def connect(self) -> None:
@@ -46,6 +50,15 @@ class UnitreeGo2Adapter:
             self.connected = False
             raise
         self.connected = True
+        self._start_speaker()
+
+    def _start_speaker(self) -> None:
+        self._speaker = None
+        try:
+            self._speaker = start_go2_speaker()
+        except Exception as exc:
+            self._speaker = None
+            runtime_log("Go2", "Warning", f"机身喇叭未登记：{exc}")
 
     def health(self) -> bool:
         return self.connected and self.driver.health()
@@ -90,6 +103,20 @@ class UnitreeGo2Adapter:
             raise RuntimeError("Go2 driver returned malformed observations")
         return observations
 
+    def sensor_snapshot(self) -> dict[str, Any]:
+        if not self.connected:
+            return {"streams": []}
+        reader = getattr(self.driver, "sensor_snapshot", None)
+        if not callable(reader):
+            return {"streams": []}
+        try:
+            snapshot = reader()
+        except Exception as exc:
+            return {"streams": [], "error": str(exc)}
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("streams"), list):
+            return {"streams": [], "error": "Go2 sensor snapshot is invalid"}
+        return snapshot
+
     def execute(self, command: Command) -> tuple[Feedback, ...]:
         error = self._validate_command(command)
         if error:
@@ -115,10 +142,16 @@ class UnitreeGo2Adapter:
         return self.driver.cancel(command)
 
     def close(self) -> None:
+        speaker = self._speaker
+        self._speaker = None
         try:
-            self.driver.close()
+            if speaker is not None:
+                speaker.close()
         finally:
-            self.connected = False
+            try:
+                self.driver.close()
+            finally:
+                self.connected = False
 
     def _validate_command(self, command: Command) -> str | None:
         if not self.connected or not self.driver.health():

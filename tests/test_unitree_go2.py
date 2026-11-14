@@ -114,6 +114,41 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         self.assertIsNone(adapter.battery())
         self.assertEqual(adapter.discover_capabilities(), {})
 
+    def test_speaker_failure_does_not_drop_the_motion_connection(self):
+        from unittest.mock import patch
+
+        adapter = UnitreeGo2Adapter(self.profile, FakeGo2Driver(self.profile.robot_id))
+        with patch.dict("os.environ", {"OPENROBOTSOUL_GO2_WEBRTC_IP": "192.0.2.10"}):
+            with patch(
+                "adapters.unitree_go2.adapter.start_go2_speaker",
+                side_effect=RuntimeError("robot busy"),
+            ):
+                adapter.connect()
+        self.assertTrue(adapter.health())
+        self.assertIsNone(adapter._speaker)
+        adapter.close()
+        self.assertTrue(adapter.driver.closed)
+        self.assertFalse(adapter.health())
+
+    def test_connected_speaker_closes_with_the_adapter(self):
+        from unittest.mock import patch
+
+        class Speaker:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        speaker = Speaker()
+        adapter = UnitreeGo2Adapter(self.profile, FakeGo2Driver(self.profile.robot_id))
+        with patch("adapters.unitree_go2.adapter.start_go2_speaker", return_value=speaker):
+            adapter.connect()
+        self.assertIs(adapter._speaker, speaker)
+        adapter.close()
+        self.assertTrue(speaker.closed)
+        self.assertTrue(adapter.driver.closed)
+
     def test_deployment_config_selects_robot_module_default_profile(self):
         from pathlib import Path
 
@@ -312,6 +347,109 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
 
         state["observed_at"] = (utc_now() - timedelta(seconds=3)).isoformat()
         self.assertEqual(driver.drain_observations(), ())
+
+    def test_sdk_driver_publishes_sensor_readings_and_keeps_the_full_snapshot(self):
+        import ctypes
+        import json
+        from unittest.mock import Mock
+
+        observed = utc_now().isoformat()
+        snapshot = {
+            "streams": [
+                {
+                    "id": "sport",
+                    "topic": "rt/sportmodestate",
+                    "event_type": "robot.sport_state",
+                    "language_summary": True,
+                    "available": True,
+                    "observed_at": observed,
+                    "payload": {
+                        "mode": 2,
+                        "progress": 0.4,
+                        "velocity": [0.1, 0.0, 0.0],
+                        "range_obstacle": [1.0, 1.0, 1.0, 1.0],
+                        "imu": {"rpy": [0.0, 0.2, 0.0]},
+                        "path_point": [{"x": 1.0}] * 10,
+                    },
+                },
+                {
+                    "id": "low",
+                    "topic": "rt/lowstate",
+                    "event_type": "robot.low_state",
+                    "language_summary": True,
+                    "available": True,
+                    "observed_at": observed,
+                    "payload": {
+                        "bms": {"soc": 77, "status": 0, "current": -4},
+                        "imu": {"rpy": [0.0, 0.0, 0.1], "temperature": 36},
+                        "motors": [{"temperature": 40}, {"temperature": 55}],
+                        "power_v": 28.0,
+                    },
+                },
+                {
+                    "id": "wireless_controller",
+                    "topic": "rt/wirelesscontroller",
+                    "event_type": "robot.wireless_controller",
+                    "language_summary": False,
+                    "available": True,
+                    "observed_at": observed,
+                    "payload": {"lx": 0.2, "keys": 3},
+                },
+                {
+                    "id": "cloud",
+                    "topic": "rt/utlidar/cloud",
+                    "event_type": "robot.lidar_cloud",
+                    "language_summary": True,
+                    "available": False,
+                    "observed_at": None,
+                    "payload": None,
+                },
+            ]
+        }
+        state = {
+            "api_version_client": "1.0.0.1",
+            "api_version_server": "1.0.0.1",
+            "observed_at": observed,
+            "state_stamp_sec": 1,
+            "state_stamp_nanosec": 2,
+            "mode": 2,
+            "velocity": [0.1, 0.0, 0.0],
+            "yaw_speed": 0.0,
+            "position": [1.0, 2.0, 0.0],
+            "error_code": 0,
+        }
+        driver = UnitreeGo2SdkDriver(self.profile, "eth0", bridge_library="bridge.so")
+        driver._handle = 1
+        driver._library = Mock()
+        driver._library.go2_bridge_health.return_value = 1
+        driver._library.go2_bridge_read_sensors.argtypes = ()
+
+        def write_json(payload):
+            def _write(_handle, output, _capacity, _error, _error_capacity):
+                encoded = json.dumps(payload).encode("utf-8") + b"\0"
+                ctypes.memmove(output, encoded, len(encoded))
+                return 1
+            return _write
+
+        driver._library.go2_bridge_read_state.side_effect = write_json(state)
+        driver._library.go2_bridge_read_sensors.side_effect = write_json(snapshot)
+
+        observations = driver.drain_observations()
+        by_type = {item.event_type: item for item in observations}
+
+        self.assertEqual(set(by_type), {"robot.sport_state", "robot.low_state"})
+        self.assertEqual(by_type["robot.sport_state"].payload["range_obstacle"], [1.0, 1.0, 1.0, 1.0])
+        self.assertEqual(by_type["robot.sport_state"].payload["imu_rpy"], [0.0, 0.2, 0.0])
+        self.assertNotIn("path_point", by_type["robot.sport_state"].payload)
+        self.assertEqual(by_type["robot.low_state"].payload["bms_soc"], 77)
+        self.assertEqual(by_type["robot.low_state"].payload["motor_temperature_max"], 55)
+        self.assertNotIn("motors", by_type["robot.low_state"].payload)
+
+        published = driver.sensor_snapshot()
+        wireless = next(item for item in published["streams"] if item["id"] == "wireless_controller")
+        low = next(item for item in published["streams"] if item["id"] == "low")
+        self.assertEqual(wireless["payload"]["keys"], 3)
+        self.assertEqual(low["payload"]["motors"][1]["temperature"], 55)
 
     def test_unadvertised_action_is_rejected_without_calling_the_driver(self):
         driver = FakeGo2Driver(self.profile.robot_id)

@@ -1,4 +1,5 @@
 #include "bridge.h"
+#include "sensors.h"
 
 #include <unitree/idl/go2/LowState_.hpp>
 #include <unitree/idl/go2/SportModeState_.hpp>
@@ -54,6 +55,7 @@ struct Bridge {
   bool closed = false;
   std::string client_version;
   std::string server_version;
+  Go2SensorCache sensors;
 
   void on_state(const void* message) {
     if (!message) return;
@@ -105,6 +107,7 @@ struct Bridge {
     } catch (...) {
     }
     low_subscriber.reset();
+    sensors.close();
     client.reset();
     try {
       unitree::robot::ChannelFactory::Instance()->Release();
@@ -343,6 +346,7 @@ void* go2_bridge_create(const char* network_interface, char* error,
     bridge->low_subscriber.reset(new LowSubscriber("rt/lowstate"));
     bridge->low_subscriber->InitChannel(
         [raw](const void* message) { raw->on_low_state(message); }, 1);
+    bridge->sensors.open();
     g_active_bridge = bridge.get();
     return bridge.release();
   } catch (const std::exception& e) {
@@ -458,6 +462,50 @@ int go2_bridge_read_battery(void* handle, char* output, size_t output_capacity,
     return 0;
   }
   return 1;
+}
+
+int go2_bridge_read_sensors(void* handle, char* output, size_t output_capacity,
+                            char* error, size_t error_capacity) {
+  if (error && error_capacity) error[0] = '\0';
+  auto* bridge = static_cast<Bridge*>(handle);
+  if (!valid(bridge) || !output || !output_capacity) {
+    set_error(error, error_capacity, "bridge handle and output buffer are required");
+    return 0;
+  }
+  try {
+    State sport;
+    LowStateMsg low;
+    bool sport_fresh = false;
+    bool low_fresh = false;
+    std::chrono::system_clock::time_point sport_at{};
+    std::chrono::system_clock::time_point low_at{};
+    {
+      std::lock_guard<std::mutex> lock(bridge->mutex);
+      if (bridge->closed) {
+        set_error(error, error_capacity, "bridge is closed");
+        return 0;
+      }
+      sport = bridge->state;
+      low = bridge->low_state;
+      sport_fresh = bridge->fresh_locked();
+      low_fresh = bridge->low_fresh_locked();
+      sport_at = bridge->state_observed_at;
+      low_at = bridge->low_observed_at;
+    }
+    const std::string body = bridge->sensors.to_json(
+        sport_fresh, sport, sport_at, low_fresh, low, low_at);
+    if (body.size() + 1 > output_capacity) {
+      set_error(error, error_capacity, "sensor output buffer is too small");
+      return 0;
+    }
+    std::memcpy(output, body.c_str(), body.size() + 1);
+    return 1;
+  } catch (const std::exception& e) {
+    set_error(error, error_capacity, e.what());
+  } catch (...) {
+    set_error(error, error_capacity, "unable to read Go2 sensors");
+  }
+  return 0;
 }
 
 int go2_bridge_call(void* handle, const char* action, const double* numbers,

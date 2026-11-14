@@ -25,6 +25,9 @@ GO2_BRIDGE_API int go2_bridge_read_state(void* bridge, char* output,
 GO2_BRIDGE_API int go2_bridge_read_battery(void* bridge, char* output,
                                             size_t output_capacity,
                                             char* error, size_t error_capacity);
+GO2_BRIDGE_API int go2_bridge_read_sensors(void* bridge, char* output,
+                                            size_t output_capacity,
+                                            char* error, size_t error_capacity);
 GO2_BRIDGE_API int go2_bridge_call(void* bridge, const char* action,
                                    const double* numbers, size_t number_count,
                                    int has_flag, int flag,

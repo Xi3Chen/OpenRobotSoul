@@ -13,6 +13,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from adapters.unitree_go2.actions import native_arguments, sport_action, sport_capabilities, validate_parameters
+from adapters.unitree_go2.sensors import sensor_observations, sport_language_fields
 from robotsoul.adapters.base import BatteryStatus
 from robotsoul.models import CapabilitySpec, Command, Feedback, FeedbackStatus, Observation, utc_now
 from robotsoul.profiles import RobotProfile
@@ -21,6 +22,7 @@ from robotsoul.profiles import RobotProfile
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_TTL_MS = 1500
 STATE_BUFFER_SIZE = 8192
+SENSOR_BUFFER_SIZE = 512 * 1024
 ERROR_BUFFER_SIZE = 1024
 # Unitree Go2 BmsState status: 6 PRECHG and 7 CHG are charging.
 # 0 SAFE, 1 WAKE_UP, 8 DCHG, 9 SELF_DCHG, 11 ALARM, 12 RESET_ALARM, and 13 AUTO_RECOVERY are not.
@@ -133,7 +135,10 @@ class UnitreeGo2SdkDriver:
             "position": state["position"],
             "error_code": state["error_code"],
         }
-        return (
+        snapshot = self._try_read_sensors()
+        if snapshot is not None:
+            payload.update(sport_language_fields(snapshot))
+        observations = [
             Observation(
                 event_id=str(uuid4()),
                 robot_id=self.robot_id,
@@ -145,8 +150,16 @@ class UnitreeGo2SdkDriver:
                 source="unitree_sdk2",
                 ttl_ms=STATE_TTL_MS,
                 privacy_class="operational",
-            ),
-        )
+            )
+        ]
+        if snapshot is not None:
+            observations.extend(sensor_observations(self.robot_id, snapshot, received_at=received_at))
+        return tuple(observations)
+
+    def sensor_snapshot(self) -> dict[str, Any]:
+        if self._library is None or self._handle is None:
+            return {"streams": []}
+        return self._read_sensors()
 
     def execute(self, command: Command) -> tuple[Feedback, ...]:
         action = sport_action(command.skill)
@@ -260,6 +273,46 @@ class UnitreeGo2SdkDriver:
             raise RuntimeError("Go2 bridge returned invalid battery JSON") from exc
         return state
 
+    def _try_read_sensors(self) -> dict[str, Any] | None:
+        if self._sensors_reader() is None:
+            return None
+        try:
+            return self._read_sensors()
+        except Exception:
+            return None
+
+    def _read_sensors(self) -> dict[str, Any]:
+        reader = self._sensors_reader()
+        if reader is None:
+            raise RuntimeError("Go2 bridge does not report sensors")
+        last_error = "Unable to read Go2 sensors"
+        for capacity in (SENSOR_BUFFER_SIZE, SENSOR_BUFFER_SIZE * 4):
+            error = ctypes.create_string_buffer(ERROR_BUFFER_SIZE)
+            output = ctypes.create_string_buffer(capacity)
+            try:
+                result = reader(self._handle, output, len(output), error, len(error))
+            except (OSError, ValueError) as exc:
+                raise RuntimeError("Unable to read Go2 sensors from the native bridge") from exc
+            if result:
+                try:
+                    snapshot = json.loads(output.value.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise RuntimeError("Go2 bridge returned invalid sensor JSON") from exc
+                if not isinstance(snapshot, dict) or not isinstance(snapshot.get("streams"), list):
+                    raise RuntimeError("Go2 bridge returned an invalid sensor catalog")
+                return snapshot
+            last_error = _error_text(error, "Unable to read Go2 sensors")
+            if "too small" not in last_error:
+                break
+        raise RuntimeError(last_error)
+
+    def _sensors_reader(self) -> Any | None:
+        reader = getattr(self._library, "go2_bridge_read_sensors", None)
+        argtypes = getattr(reader, "argtypes", None) if callable(reader) else None
+        if not isinstance(argtypes, (list, tuple)):
+            return None
+        return reader
+
     @staticmethod
     def _bind_functions(library: Any) -> None:
         char_pointer = ctypes.POINTER(ctypes.c_char)
@@ -285,6 +338,16 @@ class UnitreeGo2SdkDriver:
                 ctypes.c_size_t,
             ]
             read_battery.restype = ctypes.c_int
+        read_sensors = getattr(library, "go2_bridge_read_sensors", None)
+        if callable(read_sensors):
+            read_sensors.argtypes = [
+                ctypes.c_void_p,
+                char_pointer,
+                ctypes.c_size_t,
+                char_pointer,
+                ctypes.c_size_t,
+            ]
+            read_sensors.restype = ctypes.c_int
         library.go2_bridge_call.argtypes = [
             ctypes.c_void_p,
             ctypes.c_char_p,

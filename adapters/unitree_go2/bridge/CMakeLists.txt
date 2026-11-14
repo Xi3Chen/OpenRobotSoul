@@ -32,7 +32,7 @@ endif()
 set(BUILD_EXAMPLES OFF CACHE BOOL "Do not build all Unitree examples for the bridge" FORCE)
 add_subdirectory("${UNITREE_SDK_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/unitree-sdk2" EXCLUDE_FROM_ALL)
 
-add_library(unitree_go2_bridge SHARED bridge.cpp)
+add_library(unitree_go2_bridge SHARED bridge.cpp sensors.cpp)
 target_include_directories(unitree_go2_bridge PRIVATE
     "${UNITREE_SDK_ROOT}/include"
     "${UNITREE_SDK_ROOT}/thirdparty/include"
