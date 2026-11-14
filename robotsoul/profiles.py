@@ -221,30 +221,10 @@ def load_selected_profile(
     """Select a registered robot profile from deployment config or CLI override."""
     if robot_module is not None:
         return load_profile(profile_id, robot_module)
+    from robotsoul.robot_config import load_robot_deployment_config
+
     selected_path = Path(config_path) if config_path is not None else PROJECT_ROOT / "config" / "robot.json"
-    selected_path = selected_path.expanduser().resolve()
-    try:
-        config_text = selected_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        if config_path is not None:
-            raise ValueError(f"Could not read robot selection config: {selected_path}") from exc
-        try:
-            config_text = files("robotsoul").joinpath("data/robot.json").read_text(encoding="utf-8")
-        except OSError as resource_error:
-            raise ValueError(f"Could not read robot selection config: {selected_path}") from resource_error
-    try:
-        config = json.loads(config_text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Robot selection config is invalid JSON: {selected_path}") from exc
-    if not isinstance(config, dict) or set(config) not in (
-        {"robot_module"},
-        {"robot_module", "profile_id"},
-    ):
-        raise ValueError("Robot selection config must contain robot_module and optional profile_id fields")
-    selected_module = config["robot_module"]
-    if not isinstance(selected_module, str) or not selected_module:
-        raise ValueError("Robot selection config robot_module must be non-empty text")
-    selected_profile = profile_id if profile_id is not None else config.get("profile_id")
-    if selected_profile is not None and (not isinstance(selected_profile, str) or not selected_profile):
-        raise ValueError("Robot selection config profile_id must be non-empty text when provided")
+    deployment = load_robot_deployment_config(selected_path.expanduser().resolve())
+    selected_module = deployment.robot_module
+    selected_profile = profile_id if profile_id is not None else deployment.profile_id
     return load_profile(selected_profile, selected_module)
