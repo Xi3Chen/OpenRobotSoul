@@ -29,16 +29,14 @@ class VoiceAdapterTests(unittest.TestCase):
         configure(self._previous_log)
         self._logs.cleanup()
 
-    def test_sherpa_models_use_cpu_and_streaming_contracts(self):
+    def test_sherpa_keeps_wake_and_vad_and_sends_speech_to_the_api(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "models"
             specs = {
                 "kws-zh-en-3m": ("tokens.txt", "encoder-epoch-13-avg-2-chunk-8-left-64.int8.onnx",
                                     "decoder-epoch-13-avg-2-chunk-8-left-64.onnx",
                                     "joiner-epoch-13-avg-2-chunk-8-left-64.int8.onnx", "en.phone"),
-                "asr-zh-streaming-int8": ("tokens.txt", "encoder.int8.onnx", "decoder.onnx", "joiner.int8.onnx"),
                 "vad-silero-int8": ("silero_vad.int8.onnx",),
-                "tts-zh-xiao-ya-int8": ("tokens.txt", "voice.onnx", "lexicon.txt", "phone.fst", "date.fst", "number.fst"),
             }
             for directory, files in specs.items():
                 target = root / directory / "archive-root"
@@ -57,15 +55,6 @@ class VoiceAdapterTests(unittest.TestCase):
                 def decode_stream(self, stream): calls["kws_decoded"] = True
                 def get_result(self, stream): return "索拉"
                 def reset_stream(self, stream): calls["kws_reset"] = True
-            class Recognizer:
-                @classmethod
-                def from_transducer(cls, **kw): calls["asr_args"] = kw; return cls()
-                def create_stream(self): return Stream()
-                def is_ready(self, stream): return calls.pop("asr_ready", False)
-                def decode_stream(self, stream): calls["asr_decoded"] = True
-                def get_result(self, stream): return "向前"
-                def is_endpoint(self, stream): return True
-                def reset(self, stream): calls["asr_reset"] = True
             class VadConfig:
                 def __init__(self):
                     self.silero_vad = types.SimpleNamespace()
@@ -77,25 +66,24 @@ class VoiceAdapterTests(unittest.TestCase):
                 def is_speech_detected(self): return False
                 def front(self): return None
                 def pop(self): pass
-            class TtsConfig:
-                def __init__(self, **kw): pass
-                def validate(self): return True
-            class Tts:
-                def __init__(self, config): pass
-                def generate(self, text, generation): return types.SimpleNamespace(samples=[0.1, -0.1], sample_rate=22050)
+            class Speech:
+                def transcribe(self, samples, sample_rate, language=""):
+                    calls["api_audio"] = (tuple(samples), sample_rate, language)
+                    return "趴下去"
+                def synthesize(self, text):
+                    calls["api_text"] = text
+                    return (0.1, -0.1), 22050
             def text2token(*args, **kwargs):
                 calls["text2token"] = (args, kwargs)
                 return [["suǒ", "lā"]]
             fake = types.SimpleNamespace(
                 text2token=text2token,
-                KeywordSpotter=Kws, OnlineRecognizer=Recognizer, VadModelConfig=VadConfig,
-                VoiceActivityDetector=Vad, OfflineTtsConfig=TtsConfig,
-                OfflineTtsModelConfig=lambda **kw: kw, OfflineTtsVitsModelConfig=lambda **kw: kw,
-                OfflineTts=Tts, GenerationConfig=lambda: types.SimpleNamespace(),
+                KeywordSpotter=Kws, VadModelConfig=VadConfig,
+                VoiceActivityDetector=Vad,
             )
             fake_np = types.SimpleNamespace(float32="float32", asarray=lambda values, dtype: list(values))
             with patch.dict(sys.modules, {"sherpa_onnx": fake, "numpy": fake_np}):
-                engine = SherpaVoiceEngine(tmp, "索拉")
+                engine = SherpaVoiceEngine(tmp, "索拉", speech=Speech(), language="zh-CN")
                 engine.load()
                 self.assertEqual(calls["kws_args"]["num_threads"], 1)
                 self.assertEqual(calls["kws_args"]["provider"], "cpu")
@@ -105,25 +93,26 @@ class VoiceAdapterTests(unittest.TestCase):
                 self.assertIsNone(calls["keyword"])
                 self.assertEqual(engine.accept_wake([0.1], 16000), "索拉")
                 self.assertTrue(calls["kws_reset"])
-                calls["asr_ready"] = True
-                result = engine.accept_asr([0.2], 16000)
-                self.assertEqual(calls["asr_args"]["rule3_min_utterance_length"], 20.0)
-                self.assertEqual((result.text, result.is_endpoint), ("向前", True))
-                self.assertTrue(calls["asr_decoded"])
-                self.assertTrue(calls["asr_reset"])
+                pending = engine.accept_asr([0.2], 16000)
+                self.assertEqual((pending.text, pending.is_endpoint), ("", False))
+                segment = types.SimpleNamespace(samples=(0.2, 0.1))
+                result = engine.transcribe_segments([segment])
+                self.assertEqual((result.text, result.is_endpoint), ("趴下去", True))
+                self.assertEqual(calls["api_audio"][0], (0.2, 0.1))
+                self.assertEqual(calls["api_audio"][2], "zh-CN")
                 self.assertEqual(calls["vad_config"].num_threads, 1)
                 self.assertEqual(calls["vad_config"].provider, "cpu")
                 engine.accept_vad([0.3])
                 self.assertEqual(engine.drain_speech_segments(), [])
                 self.assertEqual(engine.synthesize("你好").sample_rate, 22050)
+                self.assertEqual(calls["api_text"], "你好")
                 keyword_text = Path(calls["kws_args"]["keywords_file"]).read_text(encoding="utf-8")
                 self.assertIn("suǒ lā :3.0 #0.1 @索拉", keyword_text)
                 lines = current().recent(20)
                 self.assertTrue(any("语音模型加载完成" in line for line in lines))
                 self.assertTrue(any("唤醒模型已加载" in line and "门槛=0.1" in line and "加权=3.0" in line for line in lines))
-                self.assertTrue(any("识别模型已加载" in line for line in lines))
+                self.assertTrue(any("识别与合成使用语音 API" in line for line in lines))
                 self.assertTrue(any("端点模型已加载" in line for line in lines))
-                self.assertTrue(any("合成模型已加载" in line for line in lines))
                 engine.close()
 
     def test_missing_sherpa_is_reported_lazily(self):
@@ -223,7 +212,7 @@ class VoiceAdapterTests(unittest.TestCase):
             output.play((0.1,), 16000); output.stop()
         self.assertEqual(events[:1], ["start"])
         self.assertIn("close", events)
-        self.assertIn(("play", {"samplerate": 16000, "device": None, "blocking": True}), events)
+        self.assertIn(("play", {"samplerate": 16000, "device": None, "blocking": False}), events)
 
     def test_missing_sounddevice_has_actionable_error(self):
         original = builtins.__import__

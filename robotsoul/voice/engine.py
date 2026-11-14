@@ -18,9 +18,6 @@ _KEYWORD_BOOST = 3.0
 _KEYWORD_THRESHOLD = 0.1
 _KEYWORD_TRAILING_BLANKS = 0
 _KEYWORD_ACTIVE_PATHS = 8
-# Sherpa treats rule 3 as "endpoint once the utterance reaches this many seconds".
-# Zero makes the first audio chunk an endpoint, so the command after the wake word is discarded.
-_ASR_MAX_UTTERANCE_SECONDS = 20.0
 
 
 def keyword_line(tokens: Sequence[str], phrase: str, *, score: float, threshold: float) -> str:
@@ -100,21 +97,32 @@ def _fallback_phone_pinyin(text: str, tokens_path: Path) -> list[str]:
 
 
 class SherpaVoiceEngine:
-    """CPU-only sherpa implementation; imports native dependencies only on load()."""
+    """Local wake word and VAD. Recognition and speech synthesis go through the speech API."""
 
-    def __init__(self, resource_root: str | Path, wake_phrase: str, sample_rate: int = 16000):
-        if not wake_phrase.strip():
+    def __init__(
+        self,
+        resource_root: str | Path,
+        wake_phrase: str | Sequence[str],
+        sample_rate: int = 16000,
+        speech: Any = None,
+        language: str = "zh-CN",
+    ):
+        if isinstance(wake_phrase, str):
+            phrases = tuple(phrase.strip() for phrase in wake_phrase.split(",") if phrase.strip())
+        else:
+            phrases = tuple(phrase.strip() for phrase in wake_phrase if isinstance(phrase, str) and phrase.strip())
+        if not phrases:
             raise ValueError("wake_phrase must not be empty")
         self.resource_root = Path(resource_root)
-        self.wake_phrase = wake_phrase.strip()
+        self.wake_phrases = phrases
+        self.wake_phrase = phrases[0]
         self.sample_rate = sample_rate
+        self.language = language
+        self._speech = speech
         self._sherpa: Any = None
         self._kws: Any = None
         self._kws_stream: Any = None
-        self._recognizer: Any = None
-        self._asr_stream: Any = None
         self._vad: Any = None
-        self._tts: Any = None
         self._keywords_file: Any = None
 
     def load(self) -> None:
@@ -141,37 +149,34 @@ class SherpaVoiceEngine:
             "decoder-epoch-13-avg-2-chunk-8-left-64.onnx",
             "joiner-epoch-13-avg-2-chunk-8-left-64.int8.onnx", "en.phone",
         ))
-        _, asr = _model_dir(self.resource_root, "asr-zh-streaming-int8",
-                            ("tokens.txt", "encoder.int8.onnx", "decoder.onnx", "joiner.int8.onnx"))
         _, vad_files = _model_dir(self.resource_root, "vad-silero-int8", ("silero_vad.int8.onnx",))
-        _, tts_files = _model_dir(self.resource_root, "tts-zh-xiao-ya-int8", (
-            "tokens.txt", "lexicon.txt", "phone.fst", "date.fst", "number.fst",
-        ))
-        tts_models = sorted((self.resource_root / "models" / "tts-zh-xiao-ya-int8").rglob("*.onnx"))
-        if len(tts_models) != 1:
-            raise VoiceEngineError(f"Expected one TTS ONNX model under {self.resource_root / 'models' / 'tts-zh-xiao-ya-int8'}; found {len(tts_models)}")
-        lexicons = sorted((self.resource_root / "models" / "tts-zh-xiao-ya-int8").rglob("lexicon.txt"))
 
         try:
             _voice_log("Info", "开始加载唤醒模型")
-            try:
-                encoded = sherpa_onnx.text2token(
-                    [self.wake_phrase],
-                    tokens=str(kws["tokens.txt"]), tokens_type="phone+ppinyin", lexicon=str(kws["en.phone"]),
-                )
-            except ModuleNotFoundError as exc:
-                if exc.name != "sentencepiece":
-                    raise
-                encoded = [_fallback_phone_pinyin(self.wake_phrase, kws["tokens.txt"])]
-            if not encoded or not encoded[0]:
-                raise VoiceEngineError(f"Wake phrase cannot be encoded by the configured KWS model: {self.wake_phrase}")
-            phones = " ".join(encoded[0])
+            encoded_rows: list[tuple[list[str], str]] = []
+            for phrase in self.wake_phrases:
+                try:
+                    encoded = sherpa_onnx.text2token(
+                        [phrase],
+                        tokens=str(kws["tokens.txt"]), tokens_type="phone+ppinyin", lexicon=str(kws["en.phone"]),
+                    )
+                except ModuleNotFoundError as exc:
+                    if exc.name != "sentencepiece":
+                        raise
+                    encoded = [_fallback_phone_pinyin(phrase, kws["tokens.txt"])]
+                if not encoded or not encoded[0]:
+                    raise VoiceEngineError(f"Wake phrase cannot be encoded by the configured KWS model: {phrase}")
+                encoded_rows.append((encoded[0], phrase))
+            phones = "；".join(" ".join(row[0]) for row in encoded_rows)
             boost = _env_float("ROBOTSOUL_VOICE_KWS_SCORE", _KEYWORD_BOOST)
             threshold = _env_float("ROBOTSOUL_VOICE_KWS_THRESHOLD", _KEYWORD_THRESHOLD)
             kws_threads = _env_int("ROBOTSOUL_VOICE_KWS_THREADS", 1)
-            keyword = keyword_line(encoded[0], self.wake_phrase, score=boost, threshold=threshold)
+            keyword_lines = [
+                keyword_line(tokens, phrase, score=boost, threshold=threshold)
+                for tokens, phrase in encoded_rows
+            ]
             self._keywords_file = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".keywords", delete=False)
-            self._keywords_file.write(keyword + "\n")
+            self._keywords_file.write("\n".join(keyword_lines) + "\n")
             self._keywords_file.flush()
             self._kws = sherpa_onnx.KeywordSpotter(
                 tokens=str(kws["tokens.txt"]), encoder=str(kws["encoder-epoch-13-avg-2-chunk-8-left-64.int8.onnx"]),
@@ -184,20 +189,10 @@ class SherpaVoiceEngine:
             self._kws_stream = self._kws.create_stream()
             _voice_log(
                 "Info",
-                f"唤醒模型已加载 短语={self.wake_phrase} 音素={phones} "
+                f"唤醒模型已加载 短语={','.join(self.wake_phrases)} 音素={phones} "
                 f"门槛={threshold} 加权={boost} 线程={kws_threads}",
             )
-            _voice_log("Info", "开始加载识别模型")
-            asr_threads = _env_int("ROBOTSOUL_VOICE_ASR_THREADS", 1)
-            self._recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
-                tokens=str(asr["tokens.txt"]), encoder=str(asr["encoder.int8.onnx"]),
-                decoder=str(asr["decoder.onnx"]), joiner=str(asr["joiner.int8.onnx"]),
-                num_threads=asr_threads, sample_rate=self.sample_rate, feature_dim=80, enable_endpoint_detection=True,
-                rule1_min_trailing_silence=0.5, rule2_min_trailing_silence=0.3,
-                rule3_min_utterance_length=_ASR_MAX_UTTERANCE_SECONDS,
-                decoding_method="greedy_search", provider="cpu",)
-            self._asr_stream = self._recognizer.create_stream()
-            _voice_log("Info", f"识别模型已加载 目录={asr['encoder.int8.onnx'].parent.name}")
+            _voice_log("Info", "识别与合成使用语音 API")
             _voice_log("Info", "开始加载端点模型")
             vad_config = sherpa_onnx.VadModelConfig()
             vad_config.silero_vad.model = str(vad_files["silero_vad.int8.onnx"])
@@ -213,20 +208,6 @@ class SherpaVoiceEngine:
                 raise VoiceEngineError("Invalid Silero VAD configuration")
             self._vad = sherpa_onnx.VoiceActivityDetector(vad_config, buffer_size_in_seconds=30)
             _voice_log("Info", "端点模型已加载")
-            _voice_log("Info", "开始加载合成模型")
-
-            tts_threads = _env_int("ROBOTSOUL_VOICE_TTS_THREADS", 1)
-            tts_config = sherpa_onnx.OfflineTtsConfig(
-                model=sherpa_onnx.OfflineTtsModelConfig(
-                    vits=sherpa_onnx.OfflineTtsVitsModelConfig(
-                        model=str(tts_models[0]), lexicon=str(tts_files["lexicon.txt"]),
-                        tokens=str(tts_files["tokens.txt"])),
-                    provider="cpu", debug=False, num_threads=tts_threads),
-                rule_fsts=",".join(str(tts_files[name]) for name in ("phone.fst", "date.fst", "number.fst")))
-            if not tts_config.validate():
-                raise VoiceEngineError("Invalid Xiao-Ya TTS configuration")
-            self._tts = sherpa_onnx.OfflineTts(tts_config)
-            _voice_log("Info", "合成模型已加载")
         except VoiceEngineError:
             self.close()
             raise
@@ -252,21 +233,24 @@ class SherpaVoiceEngine:
         return None
 
     def accept_asr(self, samples: Sequence[float], sample_rate: int) -> AsrResult:
+        """Streaming frames stay uncommitted; the speech API decodes a finished VAD segment."""
+        del samples, sample_rate
         self._ensure_loaded()
-        self._asr_stream.accept_waveform(sample_rate, self._np.asarray(samples, dtype=self._np.float32))
-        while self._recognizer.is_ready(self._asr_stream):
-            self._recognizer.decode_stream(self._asr_stream)
-        text = str(self._recognizer.get_result(self._asr_stream))
-        endpoint = bool(self._recognizer.is_endpoint(self._asr_stream))
-        if endpoint:
-            self._recognizer.reset(self._asr_stream)
-            self._asr_stream = self._recognizer.create_stream()
-        return AsrResult(text, endpoint)
+        return AsrResult("", False)
+
+    def transcribe_segments(self, segments: Sequence[Any]) -> AsrResult:
+        """Send one finished VAD utterance to the configured speech API."""
+        self._ensure_loaded()
+        samples = _segment_samples(segments)
+        if not samples:
+            return AsrResult("", True)
+        if self._speech is None:
+            raise VoiceEngineError("Speech API is not configured")
+        text = self._speech.transcribe(samples, self.sample_rate, language=self.language)
+        return AsrResult(text, True)
 
     def reset_asr(self) -> None:
         self._ensure_loaded()
-        self._recognizer.reset(self._asr_stream)
-        self._asr_stream = self._recognizer.create_stream()
 
     def reset_vad(self) -> None:
         self._ensure_loaded()
@@ -290,20 +274,19 @@ class SherpaVoiceEngine:
         return segments
 
     def synthesize(self, text: str, speaker_id: int = 0, speed: float = 1.0) -> SynthesizedAudio:
+        del speaker_id, speed
         if not text.strip():
             raise ValueError("text must not be empty")
         self._ensure_loaded()
-        generation = self._sherpa.GenerationConfig()
-        generation.sid = speaker_id
-        generation.speed = speed
-        generation.silence_scale = 0.2
-        audio = self._tts.generate(text, generation)
-        return SynthesizedAudio(tuple(float(x) for x in audio.samples), int(audio.sample_rate))
+        if self._speech is None:
+            raise VoiceEngineError("Speech API is not configured")
+        samples, sample_rate = self._speech.synthesize(text)
+        return SynthesizedAudio(tuple(samples), int(sample_rate))
 
     def close(self) -> None:
         """Release model references and the generated KWS keyword list."""
-        self._kws_stream = self._asr_stream = self._vad = None
-        self._kws = self._recognizer = self._vad = self._tts = self._sherpa = None
+        self._kws_stream = self._vad = None
+        self._kws = self._vad = self._sherpa = None
         if self._keywords_file is not None:
             path = Path(self._keywords_file.name)
             self._keywords_file.close()
@@ -315,6 +298,16 @@ def _voice_log(level: str, message: str) -> None:
     from robotsoul.runlog import log
 
     log("Voice", level, message)
+
+
+def _segment_samples(segments: Sequence[Any]) -> list[float]:
+    samples: list[float] = []
+    for segment in segments:
+        chunk = getattr(segment, "samples", segment)
+        if chunk is None:
+            continue
+        samples.extend(float(value) for value in chunk)
+    return samples
 
 
 def _vad_segment(vad: Any) -> Any:
