@@ -84,9 +84,11 @@ CAPABILITY_LABELS = {
     "sport.cross_step": "交叉步",
     "sport.auto_recover_set": "设置摔倒自动恢复",
     "sport.euler": "调整身体倾角",
-    "sport.move": "按速度移动",
+    "sport.move": "按时间移动",
+    "sport.move_distance": "按距离移动",
     "sport.speed_level": "设置速度档位",
     "sport.auto_recover_get": "查询摔倒自动恢复",
+    "vui.set_volume": "设置音量",
 }
 PARAMETER_LABELS = {
     "text": "播报内容",
@@ -102,6 +104,7 @@ PARAMETER_LABELS = {
     "pitch": "俯仰",
     "yaw": "偏航",
     "level": "速度档位",
+    "volume": "音量（0到10）",
     "enabled": "开关",
 }
 
@@ -595,6 +598,8 @@ class DashboardService:
                 for parameter, spec in capability.parameters.items()
             },
             "timeout_ms": capability.timeout_ms,
+            "estimate_ms": getattr(capability, "estimate_ms", 0),
+            "completion": getattr(capability, "completion", "accepted"),
             "interruptible": capability.interruptible,
         }
 
@@ -785,6 +790,8 @@ class DashboardService:
                 for name, spec in capability.parameters.items()
             },
             "timeout_ms": capability.timeout_ms,
+            "estimate_ms": getattr(capability, "estimate_ms", 0),
+            "completion": getattr(capability, "completion", "accepted"),
             "interruptible": capability.interruptible,
         }
 

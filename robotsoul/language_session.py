@@ -12,7 +12,7 @@ from threading import Lock, Thread
 from typing import Any, Callable
 from uuid import uuid4
 
-from robotsoul.agent import AgentIntent, AgentRejected
+from robotsoul.agent import AgentIntent, AgentPlan, AgentRejected
 from robotsoul.robot_config import default_robot_config_path, identity_document, load_robot_deployment_config
 from robotsoul.models import CapabilitySpec, Observation, ReviewProposal, ReviewVerdict, SafetyReviewResult
 from robotsoul.picoclaw import PicoClawCodingAgent
@@ -179,7 +179,7 @@ class LanguageSession:
 
 
 class LanguageAgent:
-    """Forwards natural language to the resident process and returns one intent."""
+    """Forwards natural language to the resident process and returns one skill or an ordered plan."""
 
     def __init__(
         self,
@@ -197,7 +197,7 @@ class LanguageAgent:
         user_input: str,
         capabilities: dict[str, CapabilitySpec],
         observations: tuple[Observation, ...] = (),
-    ) -> AgentIntent | None:
+    ) -> AgentIntent | AgentPlan | None:
         try:
             decision = self.session.request(
                 {
@@ -220,12 +220,27 @@ class LanguageAgent:
         if decision.get("rejected") is True:
             reason = decision.get("reason")
             raise AgentRejected(reason if isinstance(reason, str) else "")
+        plan = decision.get("plan")
+        rationale = decision.get("rationale")
+        rationale_text = rationale if isinstance(rationale, str) else ""
+        if isinstance(plan, list):
+            steps: list[AgentIntent] = []
+            for item in plan:
+                if not isinstance(item, dict):
+                    raise AgentRejected("语言进程返回了无法执行的计划")
+                skill = item.get("skill")
+                parameters = item.get("parameters") if isinstance(item.get("parameters"), dict) else None
+                if not isinstance(skill, str) or parameters is None:
+                    raise AgentRejected("语言进程返回了无法执行的计划")
+                steps.append(AgentIntent(skill, parameters))
+            if not steps:
+                raise AgentRejected("语言进程返回了无法执行的计划")
+            return AgentPlan(tuple(steps), rationale_text)
         skill = decision.get("skill")
         parameters = decision.get("parameters") if isinstance(decision.get("parameters"), dict) else None
         if not isinstance(skill, str) or parameters is None:
             raise AgentRejected("语言进程返回了无法执行的技能")
-        rationale = decision.get("rationale")
-        return AgentIntent(skill, parameters, rationale if isinstance(rationale, str) else "")
+        return AgentIntent(skill, parameters, rationale_text)
 
 
 class LanguageSafetyReviewer:
@@ -267,6 +282,8 @@ class LanguageSafetyReviewer:
 def _skill_descriptor(capability: CapabilitySpec) -> dict[str, Any]:
     descriptor = {
         "name": capability.name,
+        "estimate_ms": capability.estimate_ms,
+        "completion": capability.completion,
         "risk_level": capability.risk_level.value,
         "parameters": {
             name: {
@@ -280,6 +297,10 @@ def _skill_descriptor(capability: CapabilitySpec) -> dict[str, Any]:
     }
     if capability.description:
         descriptor["description"] = capability.description
+    if capability.completion == "timed":
+        descriptor["estimate_note"] = "一次调用的时长就是参数 duration_ms，程序按 2 秒循环补发。estimate_ms 是允许的最长时长。不要把同一次移动拆成多次调用。"
+    if capability.completion == "measured":
+        descriptor["estimate_note"] = "estimate_ms 只是截止预算。走到 distance_m 才算完成，到预算仍不够则失败。不要把同一次移动拆成多次调用。"
     return descriptor
 
 

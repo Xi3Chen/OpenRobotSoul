@@ -43,6 +43,7 @@ def _parse_capability(raw: Any) -> CapabilitySpec:
     allowed = {
         "name", "parameters", "risk_level", "allowed_callers", "requires_operator_confirmation",
         "interruptible", "timeout_ms", "required", "description",
+        "estimate_ms", "completion",
     }
     if set(raw) - allowed:
         raise ValueError(f"Unknown capability fields: {sorted(set(raw) - allowed)}")
@@ -111,6 +112,12 @@ def _parse_capability(raw: Any) -> CapabilitySpec:
         raise ValueError(f"Invalid boolean capability field for {name}")
     if not isinstance(description, str):
         raise ValueError(f"Invalid description for {name}")
+    estimate_ms = raw.get("estimate_ms", 0)
+    if isinstance(estimate_ms, bool) or not isinstance(estimate_ms, int) or estimate_ms < 0:
+        raise ValueError(f"Invalid estimate_ms for {name}")
+    completion = raw.get("completion", "accepted")
+    if completion not in {"accepted", "nominal", "timed", "measured"}:
+        raise ValueError(f"Invalid completion for {name}")
     return CapabilitySpec(
         name=name,
         parameters=parsed_parameters,
@@ -121,6 +128,8 @@ def _parse_capability(raw: Any) -> CapabilitySpec:
         timeout_ms=timeout_ms,
         required=required,
         description=description,
+        estimate_ms=estimate_ms,
+        completion=completion,
     )
 
 

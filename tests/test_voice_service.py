@@ -69,7 +69,7 @@ class FakeEngine:
         return AsrResult("向前", True)
 
     def drain_speech_segments(self):
-        return []
+        return [type("Seg", (), {"samples": (0.1, 0.2)})()]
 
     def synthesize(self, _text):
         self.synthesized.append(_text)
@@ -553,10 +553,11 @@ class VoiceServiceTests(unittest.TestCase):
             release.set()
             service.stop()
 
-    def test_second_transcript_drops_the_queued_command(self):
+    def test_split_vad_segments_are_merged_into_one_transcript(self):
         started = threading.Event()
         release = threading.Event()
         seen = []
+        heard = []
 
         class Engine(FakeEngine):
             def __init__(self):
@@ -568,7 +569,7 @@ class VoiceServiceTests(unittest.TestCase):
                 return AsrResult("", False)
 
             def accept_vad(self, _samples):
-                # The wake frame replays into VAD and is still the same utterance.
+                # Wake replay is still the same utterance; later frames end segments.
                 self._calls += 1
                 if self._calls == 1:
                     return False
@@ -576,18 +577,23 @@ class VoiceServiceTests(unittest.TestCase):
                 return True
 
             def drain_speech_segments(self):
-                return [self._endpoint]
+                if self._endpoint == 1:
+                    return [type("Seg", (), {"samples": (0.1,)})()]
+                return [type("Seg", (), {"samples": (0.2, 0.3)})()]
 
             def transcribe_segments(self, segments):
-                if segments == [1]:
-                    return AsrResult("先走", True)
-                return AsrResult("后走", True)
+                samples = []
+                for segment in segments:
+                    samples.extend(segment.samples)
+                heard.append(tuple(samples))
+                if samples == [0.1]:
+                    started.set()
+                    release.wait(2)
+                    return AsrResult("手拉起来然后", True)
+                return AsrResult("手拉起来然后向左转弯", True)
 
         def run_text(text):
             seen.append(text)
-            if text == "先走":
-                started.set()
-                release.wait(2)
             return text
 
         capture = FakeCapture(available=True)
@@ -601,18 +607,17 @@ class VoiceServiceTests(unittest.TestCase):
             capture.callback((0.2,), 16000)
             self.assertTrue(started.wait(2))
             capture.callback((0.2,), 16000)
-            deadline = time.monotonic() + 2
-            while time.monotonic() < deadline:
-                if any("识别：后走（本地麦克风）" in line for line in current().recent(30)):
-                    break
-                time.sleep(0.01)
-            self.assertTrue(any("识别：后走（本地麦克风）" in line for line in current().recent(30)))
-            self.assertEqual(seen, ["先走"])
             release.set()
             deadline = time.monotonic() + 2
-            while time.monotonic() < deadline and seen != ["先走", "后走"]:
+            while time.monotonic() < deadline:
+                if any("识别：手拉起来然后向左转弯（本地麦克风）" in line for line in current().recent(30)):
+                    break
                 time.sleep(0.01)
-            self.assertEqual(seen, ["先走", "后走"])
+            self.assertTrue(
+                any("识别：手拉起来然后向左转弯（本地麦克风）" in line for line in current().recent(30))
+            )
+            self.assertEqual(heard, [(0.1,), (0.1, 0.2, 0.3)])
+            self.assertEqual(seen, ["手拉起来然后向左转弯"])
         finally:
             release.set()
             service.stop()

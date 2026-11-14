@@ -47,6 +47,16 @@ def _owned_segments(segments: Any) -> list[Any]:
     return owned
 
 
+def _owned_segment_samples(segments: Any) -> list[float]:
+    samples: list[float] = []
+    for segment in segments or ():
+        chunk = getattr(segment, "samples", None)
+        if chunk is None:
+            continue
+        samples.extend(float(value) for value in chunk)
+    return samples
+
+
 @dataclass(frozen=True)
 class VoiceHealth:
     state: CaptureState
@@ -96,6 +106,9 @@ class VoiceService:
         self._asr_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="voice-asr")
         self._asr_lock = Lock()
         self._asr_token = 0
+        # Successive short VAD segments from one spoken command are concatenated
+        # here so a late pause does not replace the first half with the second.
+        self._utterance_samples: list[float] = []
         self._frames: Queue[AudioFrame] = Queue(maxsize=frame_queue_size)
         # Capture blocks are 100 ms, so 20 frames keep about 2 s. The keyword
         # spotter reports the wake phrase only after its chunk delay, which is
@@ -460,6 +473,7 @@ class VoiceService:
         if state == CaptureState.PASSIVE and self.gate.expired(now=now):
             self._note("Info", "等待指令超时，回到唤醒监听")
             self._pre_roll.clear()
+            self._reset_utterance()
             if self._engine_loaded:
                 self.engine.reset_asr()
                 if hasattr(self.engine, "reset_vad"):
@@ -477,6 +491,7 @@ class VoiceService:
                 return
             self.gate.wake()
             self._logged_recognition = ""
+            self._reset_utterance()
             with self._state_lock:
                 self._last_wake_at = monotonic()
             if self._wake_callback is not None:
@@ -495,6 +510,9 @@ class VoiceService:
             return
         self._consume_utterance(frame)
 
+    def _reset_utterance(self) -> None:
+        self._utterance_samples.clear()
+
     def _consume_utterance(self, frame: AudioFrame) -> None:
         samples = frame.samples
         if frame.sample_rate != self.sample_rate:
@@ -506,9 +524,16 @@ class VoiceService:
             segments = _owned_segments(self.engine.drain_speech_segments())
             if hasattr(self.engine, "reset_vad"):
                 self.engine.reset_vad()
+            for value in _owned_segment_samples(segments):
+                self._utterance_samples.append(value)
+            if not self._utterance_samples:
+                return
             self.gate.hold("asr")
             self._announce(self.gate.disengage("speech"))
-            self._submit_transcription(segments, frame.generation)
+            self._submit_transcription(
+                [_OwnedSegment(tuple(self._utterance_samples))],
+                frame.generation,
+            )
             return
         if speaking:
             self.gate.engage("speech")
@@ -566,6 +591,18 @@ class VoiceService:
                 return
             if self._stop.is_set() or token != self._current_asr_token() or generation != self.arbiter.generation:
                 return
+            # Speech resumed while the API was busy: keep the PCM and wait for
+            # the next VAD segment so the command is not cut in half.
+            with self._engine_lock:
+                speaking = callable(getattr(self.engine, "speech_detected", None)) and bool(
+                    self.engine.speech_detected()
+                )
+                pending = callable(getattr(self.engine, "has_speech_segment", None)) and bool(
+                    self.engine.has_speech_segment()
+                )
+            if (speaking or pending) and token == self._current_asr_token():
+                fresh = self.gate.mode
+                return
             submitted = self._handle_asr_result(result, force_endpoint=True, generation=generation, reset_endpoint=False)
             if not submitted and token == self._current_asr_token():
                 fresh = self.gate.mode
@@ -605,6 +642,7 @@ class VoiceService:
             # Saying only the wake word (then pausing before the command) is not
             # a command; keep the gate open and wait for the follow-up audio.
             self._note("Info", f"忽略仅唤醒词的识别：{cleaned}")
+            self._reset_utterance()
             return False
         self._note("Info", f"识别：{cleaned}（{self._audio_source_label()}）")
         self._logged_recognition = ""
@@ -619,6 +657,7 @@ class VoiceService:
         self._stop_spoken_output()
         self.runtime_executor.supersede()
         self._note("Info", f"提交运行时：{cleaned}")
+        self._reset_utterance()
         try:
             future = self.runtime_executor.submit_final(text, intent=intent)
         except Exception:
@@ -742,6 +781,7 @@ class VoiceService:
             except Empty:
                 break
         self._pre_roll.clear()
+        self._reset_utterance()
         self._call_disconnected_at = None if clear_sink else self._call_disconnected_at
         if clear_sink:
             with self._state_lock:

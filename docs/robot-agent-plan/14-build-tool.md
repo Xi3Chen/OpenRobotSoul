@@ -20,7 +20,7 @@ build/
     cmake/       # CMake cache、编译器中间文件和原始构建输出
     bridge/      # Go2 SDK bridge 的 CMake 构建目录
     go/          # Go build cache、Go module cache 和中间文件
-    bin/         # Go2 示例和 PicoClaw 可执行文件
+    bin/         # Go2 示例、picoclaw CLI 与 openrobotsoul-dialogue
     lib/         # bridge、Unitree 和 DDS 运行库副本
     manifest.json
 ```
@@ -40,4 +40,4 @@ build/
 
 当前 Unitree SDK checkout 的 CMake 工程直接导入 `lib/<arch>/libunitree_sdk2.a`、`thirdparty/lib/<arch>/libddsc.so` 和 `libddscxx.so`，预编译库只适用于 Linux `x86_64`/`aarch64`。构建工具会列出这些实际可用目标；Windows/macOS 或缺失架构必须先放入对应 SDK/依赖并调整 CMake 工程，工具不会假装完成构建。
 
-构建出的二进制包括 Go2 官方高层服务、视频、VUI 示例、`picoclaw` CLI 和带 Sport 动作的 `libopenrobotsoul_go2_bridge.so`。运行 Go2 还需设置 `OPENROBOTSOUL_GO2_NETWORK_INTERFACE` 为连接机器人网络的本机网卡名。编码任务使用这份 PicoClaw 可执行文件；Python 宿主默认从 `build/<platform>-<arch>/bin/` 加载，仍可通过 `OPENROBOTSOUL_PICOCLAW_BINARY` 覆盖。自然语言规划使用 `robotsoul.language_gateway`，不加载这份二进制。bridge 读取 DDS 运动状态并调用 profile 中的 Sport 动作；官方示例和 bridge 的编译成功不代表实机动作经过验证。
+构建出的二进制包括 Go2 官方高层服务、视频、VUI 示例、`picoclaw` CLI、链接 `third_party/picoclaw` 的 `openrobotsoul-dialogue`，以及带 Sport 动作的 `libopenrobotsoul_go2_bridge.so`。运行 Go2 还需设置 `OPENROBOTSOUL_GO2_NETWORK_INTERFACE` 为连接机器人网络的本机网卡名。编码任务使用 `picoclaw` 可执行文件；Python 宿主默认从 `build/<platform>-<arch>/bin/` 加载，仍可通过 `OPENROBOTSOUL_PICOCLAW_BINARY` 覆盖。自然语言规划使用常驻的 `openrobotsoul-dialogue`（Go `replace` 指向 `third_party/picoclaw`，不改子模块源码），不把编码 CLI 当作规划器。bridge 读取 DDS 运动状态并调用 profile 中的 Sport 动作；官方示例和 bridge 的编译成功不代表实机动作经过验证。

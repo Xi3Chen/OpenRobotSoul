@@ -23,7 +23,9 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": true,
-      "description": "停止高层速度运动。SDK 示例 go2w_sport_client.cpp 注释为「停止运动」，不是卸力。"
+      "description": "停止高层速度运动。SDK 示例 go2w_sport_client.cpp 注释为「停止运动」，不是卸力。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     },
     {
       "name": "sport.balance_stand",
@@ -35,9 +37,11 @@
       "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 8000,
       "required": false,
-      "description": "进入平衡站立。SDK 示例注释为「平衡站立」；go2_sport_client.cpp 写明该姿态可由 roll、pitch、yaw 调整。"
+      "description": "进入平衡站立。SDK 示例注释为「平衡站立」；go2_sport_client.cpp 写明该姿态可由 roll、pitch、yaw 调整。",
+      "estimate_ms": 3000,
+      "completion": "nominal"
     },
     {
       "name": "sport.stand_up",
@@ -49,9 +53,11 @@
       "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 8000,
       "required": false,
-      "description": "切换到站立锁定。SDK 示例 go2w_sport_client.cpp 注释为「站立锁定」，go2_sport_client.cpp 注释为 position stand up，也作为默认站立。"
+      "description": "切换到站立锁定。SDK 示例 go2w_sport_client.cpp 注释为「站立锁定」，go2_sport_client.cpp 注释为 position stand up，也作为默认站立。",
+      "estimate_ms": 3000,
+      "completion": "nominal"
     },
     {
       "name": "sport.stand_down",
@@ -63,9 +69,11 @@
       "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 8000,
       "required": false,
-      "description": "趴下。SDK 示例注释为「趴下」和 position stand down。"
+      "description": "趴下。SDK 示例注释为「趴下」和 position stand down。",
+      "estimate_ms": 3000,
+      "completion": "nominal"
     },
     {
       "name": "sport.sit",
@@ -77,9 +85,11 @@
       "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 8000,
       "required": false,
-      "description": "请求坐下。SDK 示例 go2_sport_client.cpp 将 Sit() 列为特殊动作，头文件没有更多说明。"
+      "description": "请求坐下。SDK 示例 go2_sport_client.cpp 将 Sit() 列为特殊动作，头文件没有更多说明。",
+      "estimate_ms": 3000,
+      "completion": "nominal"
     },
     {
       "name": "sport.rise_sit",
@@ -91,9 +101,11 @@
       "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 8000,
       "required": false,
-      "description": "请求从坐姿起身。SDK 示例将 RiseSit() 列为特殊动作，头文件没有更多说明。"
+      "description": "请求从坐姿起身。SDK 示例将 RiseSit() 列为特殊动作，头文件没有更多说明。",
+      "estimate_ms": 3000,
+      "completion": "nominal"
     },
     {
       "name": "sport.hello",
@@ -105,9 +117,11 @@
       "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 9000,
       "required": false,
-      "description": "SportClient::Hello()。SDK 只有方法名，无参数，头文件没有肢体动作说明。"
+      "description": "SportClient::Hello()。SDK 只有方法名，无参数，头文件没有肢体动作说明。",
+      "estimate_ms": 4000,
+      "completion": "nominal"
     },
     {
       "name": "sport.stretch",
@@ -119,9 +133,11 @@
       "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 9000,
       "required": false,
-      "description": "SportClient::Stretch()。SDK 只有方法名，无参数，头文件没有肢体动作说明。"
+      "description": "SportClient::Stretch()。SDK 只有方法名，无参数，头文件没有肢体动作说明。",
+      "estimate_ms": 4000,
+      "completion": "nominal"
     },
     {
       "name": "sport.content",
@@ -133,9 +149,11 @@
       "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 9000,
       "required": false,
-      "description": "SportClient::Content()。SDK 只有方法名，无参数，头文件没有说明具体表现。"
+      "description": "SportClient::Content()。SDK 只有方法名，无参数，头文件没有说明具体表现。",
+      "estimate_ms": 4000,
+      "completion": "nominal"
     },
     {
       "name": "sport.heart",
@@ -147,9 +165,11 @@
       "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 9000,
       "required": false,
-      "description": "SportClient::Heart()。SDK 只有方法名，无参数，头文件没有说明具体表现。"
+      "description": "SportClient::Heart()。SDK 只有方法名，无参数，头文件没有说明具体表现。",
+      "estimate_ms": 4000,
+      "completion": "nominal"
     },
     {
       "name": "sport.scrape",
@@ -161,9 +181,11 @@
       "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 9000,
       "required": false,
-      "description": "SportClient::Scrape()。SDK 只有方法名，无参数，头文件没有说明具体表现。"
+      "description": "SportClient::Scrape()。SDK 只有方法名，无参数，头文件没有说明具体表现。",
+      "estimate_ms": 4000,
+      "completion": "nominal"
     },
     {
       "name": "sport.free_walk",
@@ -177,7 +199,9 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": false,
-      "description": "SportClient::FreeWalk()。SDK 只有方法名，无参数，头文件没有进一步说明。"
+      "description": "SportClient::FreeWalk()。SDK 只有方法名，无参数，头文件没有进一步说明。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     },
     {
       "name": "sport.static_walk",
@@ -191,7 +215,9 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": false,
-      "description": "SportClient::StaticWalk()。SDK 只有方法名，无参数，头文件没有进一步说明。"
+      "description": "SportClient::StaticWalk()。SDK 只有方法名，无参数，头文件没有进一步说明。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     },
     {
       "name": "sport.trot_run",
@@ -205,7 +231,9 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": false,
-      "description": "SportClient::TrotRun()。SDK 只有方法名，无参数，头文件没有进一步说明。"
+      "description": "SportClient::TrotRun()。SDK 只有方法名，无参数，头文件没有进一步说明。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     },
     {
       "name": "sport.economic_gait",
@@ -219,7 +247,9 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": false,
-      "description": "SportClient::EconomicGait()。SDK 只有方法名，无参数，头文件没有进一步说明。"
+      "description": "SportClient::EconomicGait()。SDK 只有方法名，无参数，头文件没有进一步说明。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     },
     {
       "name": "sport.recovery_stand",
@@ -230,9 +260,11 @@
       "requires_operator_confirmation": true,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 9000,
       "required": false,
-      "description": "恢复站立。SDK 示例注释为「恢复站立」和 recovery stand。"
+      "description": "恢复站立。SDK 示例注释为「恢复站立」和 recovery stand。",
+      "estimate_ms": 4000,
+      "completion": "nominal"
     },
     {
       "name": "sport.front_flip",
@@ -243,9 +275,11 @@
       "requires_operator_confirmation": true,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 8000,
       "required": false,
-      "description": "SportClient::FrontFlip()，前空翻。无参数，头文件没有更多说明。"
+      "description": "SportClient::FrontFlip()，前空翻。无参数，头文件没有更多说明。",
+      "estimate_ms": 3000,
+      "completion": "nominal"
     },
     {
       "name": "sport.front_jump",
@@ -256,9 +290,11 @@
       "requires_operator_confirmation": true,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 8000,
       "required": false,
-      "description": "SportClient::FrontJump()，向前跳。无参数，头文件没有更多说明。"
+      "description": "SportClient::FrontJump()，向前跳。无参数，头文件没有更多说明。",
+      "estimate_ms": 3000,
+      "completion": "nominal"
     },
     {
       "name": "sport.front_pounce",
@@ -269,9 +305,11 @@
       "requires_operator_confirmation": true,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 8000,
       "required": false,
-      "description": "SportClient::FrontPounce()，向前扑。无参数，头文件没有更多说明。"
+      "description": "SportClient::FrontPounce()，向前扑。无参数，头文件没有更多说明。",
+      "estimate_ms": 3000,
+      "completion": "nominal"
     },
     {
       "name": "sport.dance1",
@@ -282,9 +320,11 @@
       "requires_operator_confirmation": true,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 13000,
       "required": false,
-      "description": "SportClient::Dance1()，舞蹈动作 1。无参数，头文件没有说明舞步内容。"
+      "description": "SportClient::Dance1()，舞蹈动作 1。无参数，头文件没有说明舞步内容。",
+      "estimate_ms": 8000,
+      "completion": "nominal"
     },
     {
       "name": "sport.dance2",
@@ -295,9 +335,11 @@
       "requires_operator_confirmation": true,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 13000,
       "required": false,
-      "description": "SportClient::Dance2()，舞蹈动作 2。无参数，头文件没有说明舞步内容。"
+      "description": "SportClient::Dance2()，舞蹈动作 2。无参数，头文件没有说明舞步内容。",
+      "estimate_ms": 8000,
+      "completion": "nominal"
     },
     {
       "name": "sport.left_flip",
@@ -308,9 +350,11 @@
       "requires_operator_confirmation": true,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 8000,
       "required": false,
-      "description": "SportClient::LeftFlip()，向左侧翻。无参数，头文件没有更多说明。"
+      "description": "SportClient::LeftFlip()，向左侧翻。无参数，头文件没有更多说明。",
+      "estimate_ms": 3000,
+      "completion": "nominal"
     },
     {
       "name": "sport.back_flip",
@@ -321,9 +365,11 @@
       "requires_operator_confirmation": true,
       "parameters": {},
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 8000,
       "required": false,
-      "description": "SportClient::BackFlip()，后空翻。无参数，头文件没有更多说明。"
+      "description": "SportClient::BackFlip()，后空翻。无参数，头文件没有更多说明。",
+      "estimate_ms": 3000,
+      "completion": "nominal"
     },
     {
       "name": "sport.switch_avoid_mode",
@@ -337,7 +383,9 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": false,
-      "description": "SportClient::SwitchAvoidMode()，切换避障模式。无参数，头文件没有说明切换后的具体模式。"
+      "description": "SportClient::SwitchAvoidMode()，切换避障模式。无参数，头文件没有说明切换后的具体模式。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     },
     {
       "name": "sport.pose",
@@ -353,9 +401,11 @@
         }
       },
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 7000,
       "required": false,
-      "description": "SportClient::Pose(flag)。enabled 为真时进入，为假时退出。头文件没有说明姿势内容。"
+      "description": "SportClient::Pose(flag)。enabled 为真时进入，为假时退出。头文件没有说明姿势内容。",
+      "estimate_ms": 2000,
+      "completion": "nominal"
     },
     {
       "name": "sport.classic_walk",
@@ -373,7 +423,9 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": false,
-      "description": "SportClient::ClassicWalk(flag)，经典步态。enabled 为真时进入，为假时退出。头文件没有更多说明。"
+      "description": "SportClient::ClassicWalk(flag)，经典步态。enabled 为真时进入，为假时退出。头文件没有更多说明。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     },
     {
       "name": "sport.switch_joystick",
@@ -390,7 +442,9 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": false,
-      "description": "SportClient::SwitchJoystick(flag)，切换手柄控制。enabled 为真时启用，为假时关闭。"
+      "description": "SportClient::SwitchJoystick(flag)，切换手柄控制。enabled 为真时启用，为假时关闭。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     },
     {
       "name": "sport.handstand",
@@ -405,9 +459,11 @@
         }
       },
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 8000,
       "required": false,
-      "description": "SportClient::HandStand(flag)，倒立。enabled 为真时进入，为假时退出。"
+      "description": "SportClient::HandStand(flag)，倒立。enabled 为真时进入，为假时退出。",
+      "estimate_ms": 3000,
+      "completion": "nominal"
     },
     {
       "name": "sport.free_bound",
@@ -424,7 +480,9 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": false,
-      "description": "SportClient::FreeBound(flag)，自由弹跳。enabled 为真时进入，为假时退出。头文件没有更多说明。"
+      "description": "SportClient::FreeBound(flag)，自由弹跳。enabled 为真时进入，为假时退出。头文件没有更多说明。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     },
     {
       "name": "sport.free_jump",
@@ -441,7 +499,9 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": false,
-      "description": "SportClient::FreeJump(flag)，自由跳跃。enabled 为真时进入，为假时退出。头文件没有更多说明。"
+      "description": "SportClient::FreeJump(flag)，自由跳跃。enabled 为真时进入，为假时退出。头文件没有更多说明。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     },
     {
       "name": "sport.free_avoid",
@@ -459,7 +519,9 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": false,
-      "description": "SportClient::FreeAvoid(flag)，行走时避让。enabled 为真时进入，为假时退出。头文件没有说明具体避让行为。"
+      "description": "SportClient::FreeAvoid(flag)，行走时避让。enabled 为真时进入，为假时退出。头文件没有说明具体避让行为。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     },
     {
       "name": "sport.walk_upright",
@@ -477,7 +539,9 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": false,
-      "description": "SportClient::WalkUpright(flag)，直立行走。enabled 为真时进入，为假时退出。头文件没有更多说明。"
+      "description": "SportClient::WalkUpright(flag)，直立行走。enabled 为真时进入，为假时退出。头文件没有更多说明。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     },
     {
       "name": "sport.cross_step",
@@ -495,7 +559,9 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": false,
-      "description": "SportClient::CrossStep(flag)，交叉步。enabled 为真时进入，为假时退出。头文件没有更多说明。"
+      "description": "SportClient::CrossStep(flag)，交叉步。enabled 为真时进入，为假时退出。头文件没有更多说明。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     },
     {
       "name": "sport.auto_recover_set",
@@ -512,7 +578,9 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": false,
-      "description": "SportClient::AutoRecoverSet(flag)，设置摔倒后是否自动恢复。enabled 为真时开启，为假时关闭。"
+      "description": "SportClient::AutoRecoverSet(flag)，设置摔倒后是否自动恢复。enabled 为真时开启，为假时关闭。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     },
     {
       "name": "sport.euler",
@@ -540,9 +608,11 @@
         }
       },
       "interruptible": true,
-      "timeout_ms": 5000,
+      "timeout_ms": 7000,
       "required": false,
-      "description": "SportClient::Euler(roll, pitch, yaw)，调整机身滚转、俯仰和偏航。SDK 示例写明平衡站立可由这三个值控制，但没有标明单位。"
+      "description": "SportClient::Euler(roll, pitch, yaw)，调整机身滚转、俯仰和偏航。SDK 示例写明平衡站立可由这三个值控制，但没有标明单位。",
+      "estimate_ms": 2000,
+      "completion": "nominal"
     },
     {
       "name": "sport.move",
@@ -571,13 +641,52 @@
         "duration_ms": {
           "type": "number",
           "min": 200.0,
-          "max": 2000.0
+          "max": 120000.0
         }
       },
       "interruptible": true,
       "timeout_ms": 8000,
       "required": false,
-      "description": "SportClient::Move(vx, vy, vyaw)，速度控制。SDK 示例 go2w_sport_client.cpp 写明调用一次后机器人大约移动 1 秒并停下，持续移动需要重复发送。本技能用 duration_ms 到时调用 StopMove。SDK 没有标明速度单位。"
+      "description": "按时间移动，速度控制。duration_ms 是整段时长，最长 120 秒。原生 Move 单次最长约 2 秒，程序按这个上限计算循环次数并重复发送，到时调用 StopMove。一次移动只调用一次，不要拆成多步。SDK 没有标明速度单位。",
+      "estimate_ms": 120000,
+      "completion": "timed"
+    },
+    {
+      "name": "sport.move_distance",
+      "risk_level": "normal",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {
+        "vx": {
+          "type": "number",
+          "min": -2.5,
+          "max": 3.8
+        },
+        "vy": {
+          "type": "number",
+          "min": -1.0,
+          "max": 1.0
+        },
+        "vyaw": {
+          "type": "number",
+          "min": -4.0,
+          "max": 4.0
+        },
+        "distance_m": {
+          "type": "number",
+          "min": 0.2,
+          "max": 8.0
+        }
+      },
+      "interruptible": true,
+      "timeout_ms": 90000,
+      "required": false,
+      "description": "按距离移动。distance_m 是相对起点的水平位移，范围 0.2 到 8 米。程序同时读取机体位置和雷达里程计，读数一致后调用 StopMove。到截止预算仍不够则失败。一次移动只调用一次，不要拆成多步。位置按米解释，坐标系未另行换算。",
+      "estimate_ms": 20000,
+      "completion": "measured"
     },
     {
       "name": "sport.speed_level",
@@ -597,7 +706,9 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": false,
-      "description": "SportClient::SpeedLevel(level)，速度档位。SDK 示例注释为「速度档位」，没有说明每个档位对应的速度。"
+      "description": "SportClient::SpeedLevel(level)，速度档位。SDK 示例注释为「速度档位」，没有说明每个档位对应的速度。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     },
     {
       "name": "sport.auto_recover_get",
@@ -611,7 +722,31 @@
       "interruptible": true,
       "timeout_ms": 5000,
       "required": false,
-      "description": "SportClient::AutoRecoverGet()，查询摔倒后自动恢复开关的当前值。"
+      "description": "SportClient::AutoRecoverGet()，查询摔倒后自动恢复开关的当前值。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
+    },
+    {
+      "name": "vui.set_volume",
+      "risk_level": "normal",
+      "allowed_callers": [
+        "agent",
+        "dashboard"
+      ],
+      "requires_operator_confirmation": false,
+      "parameters": {
+        "volume": {
+          "type": "number",
+          "min": 0.0,
+          "max": 10.0
+        }
+      },
+      "interruptible": true,
+      "timeout_ms": 5000,
+      "required": false,
+      "description": "VuiClient::SetVolume(level)，设置机身音量。volume 为整数，官方文档取值范围 0~10，0 为静音，10 为最大。",
+      "estimate_ms": 1500,
+      "completion": "accepted"
     }
   ]
 }

@@ -40,6 +40,32 @@ class ClosedCommandTests(unittest.TestCase):
         self.assertIsNone(match_closed_command("向前", capabilities))
         self.assertIsNone(match_closed_command("今天天气怎么样", {"sport.move": _move_capability()}))
 
+    def test_meters_and_minutes_use_separate_move_skills(self):
+        speed = ParameterSpec("number", -2.5, 3.8)
+        lateral = ParameterSpec("number", -1, 1)
+        yaw = ParameterSpec("number", -4, 4)
+        capabilities = {
+            "sport.move": CapabilitySpec(
+                "sport.move",
+                {"vx": speed, "vy": lateral, "vyaw": yaw, "duration_ms": ParameterSpec("number", 200, 120000)},
+            ),
+            "sport.move_distance": CapabilitySpec(
+                "sport.move_distance",
+                {"vx": speed, "vy": lateral, "vyaw": yaw, "distance_m": ParameterSpec("number", 0.2, 8)},
+            ),
+        }
+
+        distance = match_closed_command("向前走4米", capabilities)
+        minute = match_closed_command("向前走一分钟", capabilities)
+        seconds = match_closed_command("向后走4秒", capabilities)
+
+        self.assertEqual(distance.skill, "sport.move_distance")
+        self.assertEqual(distance.parameters["distance_m"], 4)
+        self.assertEqual(minute.skill, "sport.move")
+        self.assertEqual(minute.parameters["duration_ms"], 60000)
+        self.assertEqual(seconds.parameters["vx"], -0.3)
+        self.assertEqual(seconds.parameters["duration_ms"], 4000)
+
     def test_duration_stays_inside_the_declared_range(self):
         move = match_closed_command("向前走十步", {"sport.move": _move_capability()})
         self.assertEqual(move.parameters["duration_ms"], 2000)

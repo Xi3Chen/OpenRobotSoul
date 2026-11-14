@@ -2,6 +2,7 @@
 
 from robotsoul.models import (
     AgentIntent,
+    AgentPlan,
     CapabilitySpec,
     Command,
     Evaluation,
@@ -30,6 +31,7 @@ from robotsoul.runtime import RobotRuntime, SafetyReviewer
 
 __all__ = [
     "AgentIntent",
+    "AgentPlan",
     "CapabilitySpec",
     "CodingTaskResult",
     "Command",

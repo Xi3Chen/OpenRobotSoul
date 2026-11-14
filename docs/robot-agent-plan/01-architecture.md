@@ -19,7 +19,7 @@ flowchart LR
   H[传感器与机器人控制器] --> PA[感知适配器]
   PA --> E[标准化观测事件]
   E --> L[事务流与状态估计]
-  L --> A[language_gateway 自然语言规划]
+  L --> A[openrobotsoul-dialogue 自然语言规划]
   A --> I[受约束的技能意图]
   I --> L
   L --> G[动作适配器与本地安全监督]
@@ -39,7 +39,7 @@ flowchart LR
 
 ### Agent
 
-接收经过筛选的任务上下文和最新状态摘要，由常驻语言进程 `robotsoul.language_gateway` 调用云端模型并提出高层技能请求。这个进程不是 Go 版 PicoClaw。Dashboard 文本、本地语音最终转写和通话最终转写都进入这一规划。Agent 不直接发原始驱动命令、不拥有任务最终状态，也不能绕过本地安全检查。
+接收经过筛选的任务上下文和最新状态摘要，由常驻对话进程 `openrobotsoul-dialogue` 调用云端模型并提出高层技能请求。该进程通过 Go `replace` 链接 `third_party/picoclaw` 的 `pkg/agent`（含 session 与上下文压缩），不启动 `cmd/picoclaw` CLI，也不执行机器人技能。Dashboard 文本、本地语音最终转写和通话最终转写都进入这一规划。Agent 不直接发原始驱动命令、不拥有任务最终状态，也不能绕过本地安全检查。
 
 ### 事务处理流回环
 

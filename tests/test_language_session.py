@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from robotsoul import RobotRuntime, load_profile
-from robotsoul.models import CapabilitySpec, ParameterSpec, RiskLevel
+from robotsoul.models import AgentPlan, CapabilitySpec, ParameterSpec, RiskLevel
 from robotsoul.language_gateway import handle_request
 from robotsoul.language_session import (
     AgentRejected,
@@ -202,6 +202,8 @@ class LanguageGatewayTests(unittest.TestCase):
         )
 
         self.assertIn("description", seen["system"])
+        self.assertIn("顺序计划", seen["system"])
+        self.assertIn("不要填写它们", seen["system"])
         self.assertIn("切换到站立锁定", seen["user"])
 
     def test_decide_prompt_includes_sensor_readings(self):
@@ -267,6 +269,107 @@ class LanguageGatewayTests(unittest.TestCase):
 
         self.assertTrue(response["rejected"])
         self.assertIn("未注册", response["reason"])
+
+    def test_plan_keeps_registered_steps_and_drops_model_timing(self):
+        response = handle_request(
+            {
+                "id": "plan",
+                "type": "decide",
+                "text": "先站起来再趴下",
+                "skills": [
+                    {"name": "sport.stand_up", "parameters": {}, "estimate_ms": 3000, "completion": "nominal"},
+                    {
+                        "name": "sport.move",
+                        "parameters": {"vx": {}, "duration_ms": {}},
+                        "estimate_ms": 2000,
+                        "completion": "timed",
+                    },
+                ],
+            },
+            lambda _messages: json.dumps({
+                "plan": [
+                    {"skill": "sport.stand_up", "parameters": {"estimate_ms": 1}, "estimate_ms": 9},
+                    {"skill": "sport.move", "parameters": {"vx": 0.2, "duration_ms": 500, "completion": "timed"}},
+                ],
+                "rationale": "按顺序做",
+            }),
+        )
+
+        self.assertEqual(
+            response["plan"],
+            [
+                {"skill": "sport.stand_up", "parameters": {}},
+                {"skill": "sport.move", "parameters": {"vx": 0.2, "duration_ms": 500}},
+            ],
+        )
+        self.assertEqual(response["rationale"], "按顺序做")
+        self.assertNotIn("estimate_ms", response)
+
+    def test_unknown_skill_inside_a_plan_rejects_the_whole_plan(self):
+        response = handle_request(
+            {
+                "id": "plan-unknown",
+                "type": "decide",
+                "text": "站起来再飞",
+                "skills": [{"name": "sport.stand_up", "parameters": {}}],
+            },
+            lambda _messages: json.dumps({
+                "plan": [
+                    {"skill": "sport.stand_up", "parameters": {}},
+                    {"skill": "sport.fly", "parameters": {}},
+                ],
+            }),
+        )
+
+        self.assertTrue(response["rejected"])
+        self.assertIn("未注册", response["reason"])
+        self.assertNotIn("plan", response)
+
+    def test_repeated_move_steps_collapse_into_one_duration(self):
+        response = handle_request(
+            {
+                "id": "collapse",
+                "type": "decide",
+                "text": "向前走8秒",
+                "skills": [{
+                    "name": "sport.move",
+                    "parameters": {
+                        "vx": {"type": "number", "max": 3.8},
+                        "vy": {"type": "number"},
+                        "vyaw": {"type": "number"},
+                        "duration_ms": {"type": "number", "max": 120000},
+                    },
+                }],
+            },
+            lambda _messages: json.dumps({
+                "plan": [
+                    {"skill": "sport.move", "parameters": {"vx": 0.3, "vy": 0, "vyaw": 0, "duration_ms": 2000}},
+                    {"skill": "sport.move", "parameters": {"vx": 0.3, "vy": 0, "vyaw": 0, "duration_ms": 2000}},
+                    {"skill": "sport.move", "parameters": {"vx": 0.3, "vy": 0, "vyaw": 0, "duration_ms": 2000}},
+                    {"skill": "sport.move", "parameters": {"vx": 0.3, "vy": 0, "vyaw": 0, "duration_ms": 2000}},
+                ],
+            }),
+        )
+
+        self.assertEqual(len(response["plan"]), 1)
+        self.assertEqual(response["plan"][0]["parameters"]["duration_ms"], 8000)
+
+    def test_language_agent_returns_an_ordered_plan(self):
+        class Session:
+            def request(self, _payload):
+                return {
+                    "plan": [
+                        {"skill": "sport.stand_up", "parameters": {}},
+                        {"skill": "sport.stand_down", "parameters": {}},
+                    ],
+                    "rationale": "先站后趴",
+                }
+
+        plan = LanguageAgent(Session(), CodingDispatcher(lambda prompt: prompt)).plan("先站起来再趴下", {})
+
+        self.assertIsInstance(plan, AgentPlan)
+        self.assertEqual([step.skill for step in plan.steps], ["sport.stand_up", "sport.stand_down"])
+        self.assertEqual(plan.rationale, "先站后趴")
 
     def test_review_keeps_the_model_rationale(self):
         response = handle_request(

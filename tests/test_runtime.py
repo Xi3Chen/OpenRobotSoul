@@ -10,7 +10,7 @@ from pathlib import Path
 from robotsoul import InMemoryToolCallAuditSink, JsonlToolCallAuditSink, RobotRuntime, load_profile
 from robotsoul.agent import DemoAgent
 from robotsoul.models import (
-    AgentIntent, CapabilitySpec, Command, Feedback, FeedbackStatus, InvocationContext,
+    AgentIntent, AgentPlan, CapabilitySpec, Command, Feedback, FeedbackStatus, InvocationContext,
     InvocationSource, Observation, ParameterSpec, ReviewVerdict, RiskLevel,
     SafetyReviewResult, utc_now,
 )
@@ -58,6 +58,28 @@ class ObservationAgent(FixedIntentAgent):
 
 
 class RuntimeContractTests(unittest.TestCase):
+    def test_repeated_move_steps_collapse_before_execution(self):
+        from robotsoul.runtime import _collapse_repeated_motion
+
+        move = CapabilitySpec(
+            "sport.move",
+            {
+                "vx": ParameterSpec("number", -2.5, 3.8),
+                "vy": ParameterSpec("number", -1, 1),
+                "vyaw": ParameterSpec("number", -4, 4),
+                "duration_ms": ParameterSpec("number", 200, 120000),
+            },
+        )
+        step = lambda duration: AgentIntent(
+            "sport.move", {"vx": 0.3, "vy": 0, "vyaw": 0, "duration_ms": duration}
+        )
+        collapsed = _collapse_repeated_motion(
+            (step(2000), step(2000), step(2000), step(2000)),
+            {"sport.move": move},
+        )
+
+        self.assertEqual(len(collapsed), 1)
+        self.assertEqual(collapsed[0].parameters["duration_ms"], 8000)
     def test_close_releases_adapter_once(self):
         from unittest.mock import Mock
 
@@ -84,6 +106,81 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(result.task.status, "failed")
         self.assertEqual(result.task.error, "Voice command was replaced")
+
+    def test_ordered_plan_runs_steps_until_one_fails(self):
+        runtime = RobotRuntime.from_profile(load_profile("simulator-basic"))
+        calls = []
+        execute = runtime.adapter.execute
+        fail_speech = True
+
+        def wrapped(command):
+            calls.append(command.skill)
+            if command.skill == "speech.say" and fail_speech:
+                return (Feedback(
+                    feedback_id="failed-step",
+                    command_id=command.command_id,
+                    task_id=command.task_id,
+                    trace_id=command.trace_id,
+                    status=FeedbackStatus.FAILED,
+                    timestamp=utc_now(),
+                    message="speech failed",
+                    error_code="speech_failed",
+                ),)
+            return execute(command)
+
+        runtime.adapter.execute = wrapped
+        plan = AgentPlan((
+            AgentIntent("head.look", {"yaw_deg": 0, "pitch_deg": 10}),
+            AgentIntent("speech.say", {"text": "你好"}),
+            AgentIntent("head.look", {"yaw_deg": 5, "pitch_deg": 0}),
+        ), "先看再说")
+
+        failed = runtime.run_text("先看再说", task_id="plan-fail", _intent=plan)
+        fail_speech = False
+        completed = runtime.run_text(
+            "先看再说",
+            task_id="plan-ok",
+            _intent=AgentPlan((
+                AgentIntent("head.look", {"yaw_deg": 0, "pitch_deg": 10}),
+                AgentIntent("speech.say", {"text": "你好"}),
+            )),
+        )
+
+        self.assertEqual(failed.task.status, "failed")
+        self.assertEqual(failed.task.error, "speech failed")
+        self.assertEqual(calls, ["head.look", "speech.say", "head.look", "speech.say"])
+        self.assertEqual(completed.task.status, "completed")
+        self.assertEqual(completed.evaluation.conclusion, "Plan completed")
+        self.assertEqual(
+            [item.details["skill"] for item in completed.history if item.event_type == "command.created"],
+            ["head.look", "speech.say"],
+        )
+
+    def test_plan_with_a_forbidden_step_does_not_start(self):
+        profile = load_profile("simulator-basic")
+        high = CapabilitySpec(
+            "test.high",
+            {"enable": ParameterSpec("boolean")},
+            risk_level=RiskLevel.HIGH,
+            allowed_callers=("dashboard",),
+            requires_operator_confirmation=True,
+        )
+        head = next(item for item in profile.capabilities if item.name == "head.look")
+        profile = replace(profile, capabilities=(head, high), required_capabilities=())
+        runtime = RobotRuntime.from_profile(profile)
+
+        result = runtime.run_text(
+            "先看再做高风险动作",
+            task_id="plan-high",
+            _intent=AgentPlan((
+                AgentIntent("head.look", {"yaw_deg": 0, "pitch_deg": 10}),
+                AgentIntent("test.high", {"enable": False}),
+            )),
+        )
+
+        self.assertEqual(result.task.status, "failed")
+        self.assertEqual(runtime.adapter.executed_commands, [])
+        self.assertEqual(result.task.error, "Caller is not permitted for this capability")
 
     def test_basic_profile_runs_registered_skill_to_completion(self):
         result = RobotRuntime.from_profile(load_profile("simulator-basic")).run_text("/head.look yaw_deg=0 pitch_deg=10")

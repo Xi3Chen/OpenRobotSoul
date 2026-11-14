@@ -369,7 +369,7 @@ cat /run/mimax2-voice/status.json
 | --- | --- |
 | 官方 API Base URL（OpenAI 格式） | `https://api.deepseek.com`，chat completions 路径为 `/chat/completions` |
 | 模型名 | `deepseek-flash`（旧名 `deepseek-v4-flash` 仍被接受，实际由 V4.1-Flash 服务） |
-| 代码入口 | `robotsoul/language_gateway.py`（常驻子进程）+ `robotsoul/language_session.py` 的 `LanguageAgent` |
+| 代码入口 | 规划态：`openrobotsoul-dialogue`（链接 `third_party/picoclaw`）+ `robotsoul/language_session.py` 的 `LanguageAgent`；过渡期仍可能见到 `robotsoul/language_gateway.py` 无状态单轮入口 |
 | 配置 | `config/llm.json`（`provider`/`base_url`/`model`/`timeout_seconds`/`api_key`），也可用 Dashboard 的模型设置页写入 |
 | 依赖 | 仅标准库 `urllib`，不新增第三方包 |
 
@@ -391,7 +391,7 @@ sudo systemctl restart mimax2-voice.service
 cat /run/mimax2-voice/status.json   # agent 字段应为 language:deepseek-flash
 ```
 
-服务单元用 `Environment=ROBOTSOUL_LLM_CONFIG=/home/user/mimax2-voice/release/config/llm.json` 指向该文件；文件不存在时 runner 回退到 `DemoAgent`。网关进程继承服务的 `PYTHONPATH`，并以同一个 venv 解释器运行 `python -m robotsoul.language_gateway`。手机实测：模型对 `打开手电筒`/`关闭手电筒` 分别返回 `flash.toggle{enabled:true/false}`，无关问题返回拒绝理由。轮换 key 时只改该 JSON 并重启服务即可。
+服务单元用 `Environment=ROBOTSOUL_LLM_CONFIG=/home/user/mimax2-voice/release/config/llm.json` 指向该文件；文件不存在时 runner 回退到 `DemoAgent`。对话进程由 `LanguageSession` 拉起 `openrobotsoul-dialogue`（链接 `third_party/picoclaw`，持有多轮 session）；过渡期部署若仍启动 `python -m robotsoul.language_gateway`，则为无状态单轮决策。手机实测：模型对 `打开手电筒`/`关闭手电筒` 分别返回 `flash.toggle{enabled:true/false}`，无关问题返回拒绝理由。轮换 key 时只改该 JSON 并重启服务即可。
 
 MiMax2 部署注意事项：
 

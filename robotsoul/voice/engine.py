@@ -197,8 +197,12 @@ class SherpaVoiceEngine:
             vad_config = sherpa_onnx.VadModelConfig()
             vad_config.silero_vad.model = str(vad_files["silero_vad.int8.onnx"])
             vad_config.silero_vad.threshold = 0.5
-            vad_config.silero_vad.min_silence_duration = 0.25
-            vad_config.silero_vad.min_speech_duration = 0.1
+            # 0.25 s splits Mandarin commands on natural pauses ("然后"/"请").
+            # Keep one spoken command in a single segment for the speech API.
+            vad_config.silero_vad.min_silence_duration = _env_float(
+                "ROBOTSOUL_VOICE_VAD_MIN_SILENCE", 0.7
+            )
+            vad_config.silero_vad.min_speech_duration = 0.25
             vad_config.silero_vad.max_speech_duration = 20.0
             vad_config.sample_rate = self.sample_rate
             vad_config.num_threads = 1
@@ -264,6 +268,10 @@ class SherpaVoiceEngine:
     def speech_detected(self) -> bool:
         self._ensure_loaded()
         return bool(self._vad.is_speech_detected())
+
+    def has_speech_segment(self) -> bool:
+        self._ensure_loaded()
+        return not self._vad.empty()
 
     def drain_speech_segments(self) -> list[Any]:
         self._ensure_loaded()

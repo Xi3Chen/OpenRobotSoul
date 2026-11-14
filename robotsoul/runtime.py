@@ -26,6 +26,7 @@ from robotsoul.agent import AgentProvider, AgentRejected, DemoAgent, resolve_sla
 from robotsoul.runlog import log as runtime_log
 from robotsoul.models import (
     AgentIntent,
+    AgentPlan,
     AuditRecord,
     CapabilitySpec,
     Command,
@@ -46,10 +47,91 @@ from robotsoul.models import (
     ParameterSpec,
     utc_now,
 )
+from robotsoul.motion_plan import combined_amount, motion_amount_key, same_velocity
 from robotsoul.profiles import RobotProfile
 
 
 _REVIEW_WINDOW = timedelta(seconds=120)
+_PLAN_MARGIN_MS = 2000
+_MAX_PLAN_STEPS = 8
+
+
+def step_allowance_ms(capability: CapabilitySpec, parameters: dict[str, Any]) -> int:
+    """Return the command budget for one step.
+
+    Timed steps use the requested duration. Nominal and measured steps use the
+    skill's own estimate. The model does not supply this number.
+    """
+
+    completion = capability.completion
+    estimate_ms = capability.estimate_ms
+    if completion == "timed":
+        raw = parameters.get("duration_ms", estimate_ms)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            duration = estimate_ms
+        else:
+            duration = int(raw)
+        return max(capability.timeout_ms, duration + 5500)
+    if completion == "nominal":
+        return max(capability.timeout_ms, estimate_ms + 4500)
+    if completion == "measured":
+        return _measured_budget_ms(parameters, capability.timeout_ms, estimate_ms)
+    return capability.timeout_ms
+
+
+def _measured_budget_ms(parameters: dict[str, Any], timeout_ms: int, estimate_ms: int) -> int:
+    distance = parameters.get("distance_m")
+    speed = parameters.get("vx")
+    if isinstance(distance, bool) or not isinstance(distance, (int, float)):
+        return max(timeout_ms, estimate_ms)
+    if isinstance(speed, bool) or not isinstance(speed, (int, float)) or abs(float(speed)) < 0.2:
+        return max(timeout_ms, estimate_ms)
+    budget = int(abs(float(distance)) / abs(float(speed)) * 2000) + 5000
+    return min(max(budget, 3000), timeout_ms)
+
+
+def _coerce_steps(intent: Any) -> tuple[tuple[AgentIntent, ...], str | None]:
+    if isinstance(intent, AgentPlan):
+        if not intent.steps or len(intent.steps) > _MAX_PLAN_STEPS:
+            return (), f"Agent plan must contain 1 to {_MAX_PLAN_STEPS} steps"
+        if any(not isinstance(step, AgentIntent) for step in intent.steps):
+            return (), "Agent returned an invalid plan"
+        return intent.steps, None
+    if isinstance(intent, AgentIntent):
+        return (intent,), None
+    return (), "Agent returned an invalid intent"
+
+
+def _collapse_repeated_motion(
+    steps: tuple[AgentIntent, ...],
+    capabilities: dict[str, CapabilitySpec],
+) -> tuple[AgentIntent, ...]:
+    collapsed: list[AgentIntent] = []
+    for step in steps:
+        key = motion_amount_key(step.skill)
+        previous = collapsed[-1] if collapsed else None
+        if (
+            key
+            and previous is not None
+            and previous.skill == step.skill
+            and isinstance(previous.parameters, dict)
+            and isinstance(step.parameters, dict)
+            and same_velocity(previous.parameters, step.parameters)
+            and key in previous.parameters
+            and key in step.parameters
+        ):
+            spec = capabilities.get(step.skill)
+            parameter = spec.parameters.get(key) if spec is not None else None
+            cap = parameter.maximum if parameter is not None else None
+            amount = combined_amount(previous.parameters[key], step.parameters[key], key, cap)
+            collapsed[-1] = AgentIntent(
+                previous.skill,
+                {**previous.parameters, key: amount},
+                previous.rationale,
+            )
+            continue
+        collapsed.append(step)
+    return tuple(collapsed)
 
 
 class SafetyReviewer:
@@ -200,6 +282,8 @@ class RobotRuntime:
             timeout_ms=min(declared.timeout_ms, discovered.timeout_ms),
             required=declared.required,
             description=declared.description,
+            estimate_ms=discovered.estimate_ms or declared.estimate_ms,
+            completion=discovered.completion if discovered.estimate_ms or discovered.completion != "accepted" else declared.completion,
         )
 
     def available_tools(self) -> dict[str, dict[str, Any]]:
@@ -216,6 +300,8 @@ class RobotRuntime:
                     for parameter, spec in capability.parameters.items()
                 },
                 "timeout_ms": capability.timeout_ms,
+                "estimate_ms": capability.estimate_ms,
+                "completion": capability.completion,
                 "interruptible": capability.interruptible,
             }
             for name, capability in self.capabilities.items()
@@ -424,7 +510,7 @@ class RobotRuntime:
         task_id: str | None = None,
         trace_id: str | None = None,
         *,
-        _intent: AgentIntent | None = None,
+        _intent: AgentIntent | AgentPlan | None = None,
         _invocation_context: InvocationContext | None = None,
         _operator_confirmed: bool = False,
     ) -> TaskResult:
@@ -483,20 +569,151 @@ class RobotRuntime:
             return self._failed_result(task, history, f"Agent request failed: {exc}", transition, record)
         if intent is None:
             return self._failed_result(task, history, "No supported skill matched the request", transition, record)
-        if not isinstance(intent, AgentIntent):
-            return self._failed_result(task, history, "Agent returned an invalid intent", transition, record)
-        record("agent.intent", {"skill": intent.skill, "parameter_names": sorted(intent.parameters) if isinstance(intent.parameters, dict) else []})
-        rationale = intent.rationale.strip() if isinstance(intent.rationale, str) else ""
-        _trace("Info", task.task_id, f"已选择技能 {intent.skill}" + (f" 理由={rationale}" if rationale else ""))
+        steps, plan_error = _coerce_steps(intent)
+        if plan_error:
+            return self._failed_result(task, history, plan_error, transition, record)
+        requested = len(steps)
+        steps = _collapse_repeated_motion(steps, self.capabilities)
+        if len(steps) != requested:
+            record(
+                "plan.collapsed",
+                {"from": requested, "to": len(steps), "skills": [step.skill for step in steps]},
+            )
+        if len(steps) == 1:
+            record("agent.intent", {"skill": steps[0].skill, "parameter_names": sorted(steps[0].parameters) if isinstance(steps[0].parameters, dict) else []})
+            rationale = steps[0].rationale.strip() if isinstance(steps[0].rationale, str) else ""
+            _trace("Info", task.task_id, f"已选择技能 {steps[0].skill}" + (f" 理由={rationale}" if rationale else ""))
+        else:
+            record(
+                "agent.plan",
+                {
+                    "steps": [
+                        {
+                            "skill": step.skill,
+                            "parameter_names": sorted(step.parameters) if isinstance(step.parameters, dict) else [],
+                        }
+                        for step in steps
+                    ],
+                    "rationale": intent.rationale if isinstance(intent, AgentPlan) else "",
+                },
+            )
+            _trace("Info", task.task_id, f"已编排计划 步数={len(steps)}")
+        context = _invocation_context or InvocationContext(InvocationSource.AGENT)
+        if len(steps) > 1:
+            for step in steps:
+                authorization_error = self._authorize_step(step, context, _operator_confirmed)
+                if authorization_error:
+                    return self._failed_result(task, history, authorization_error, transition, record)
+        allowances = []
+        for step in steps:
+            capability = self.capabilities.get(step.skill) if isinstance(step.parameters, dict) else None
+            allowances.append(step_allowance_ms(capability, step.parameters) if capability is not None else 0)
+        plan_deadline = utc_now() + timedelta(milliseconds=sum(allowances) + _PLAN_MARGIN_MS)
+        record(
+            "plan.scheduled",
+            {"steps": [step.skill for step in steps], "allowance_ms": allowances, "margin_ms": _PLAN_MARGIN_MS},
+        )
+        executed: list[Feedback] = []
+        for index, step in enumerate(steps):
+            if utc_now() > plan_deadline:
+                return self._failed_result(
+                    task,
+                    history,
+                    "Plan deadline expired before the next step",
+                    transition,
+                    record,
+                    tuple(executed),
+                )
+            outcome = self._execute_step(
+                task,
+                history,
+                step,
+                context,
+                _operator_confirmed,
+                text,
+                transition,
+                record,
+                prior_feedback=tuple(executed),
+                finalize=index == len(steps) - 1,
+            )
+            if isinstance(outcome, TaskResult):
+                return outcome
+            executed.extend(outcome)
+        return self._failed_result(task, history, "Plan produced no result", transition, record, tuple(executed))
+
+    def _authorize_step(
+        self,
+        intent: AgentIntent,
+        context: InvocationContext,
+        operator_confirmed: bool,
+    ) -> str | None:
+        validation_error = self._validate_intent(intent)
+        if validation_error:
+            return validation_error
+        capability = self.capabilities[intent.skill]
+        if context.source.value not in capability.allowed_callers:
+            return "Caller is not permitted for this capability"
+        dashboard_operator = (
+            context.source == InvocationSource.DASHBOARD
+            and context.role == "operator"
+            and bool(context.principal_id)
+            and bool(context.session_id)
+            and operator_confirmed
+            and context.operator_confirmed
+        )
+        if capability.risk_level == RiskLevel.HIGH and not dashboard_operator:
+            return "High-risk capability requires authenticated Dashboard operator confirmation"
+        if capability.requires_operator_confirmation and not dashboard_operator:
+            return "Capability requires authenticated operator confirmation"
+        if capability.risk_level == RiskLevel.CONFIRM and self.safety_reviewer is None and not _authenticated_dashboard_operator(context):
+            return "Safety reviewer unavailable; operation was not executed"
+        return None
+
+    def _finish_failure(
+        self,
+        prior_feedback: tuple[Feedback, ...],
+        task: Task,
+        history: list[AuditRecord],
+        error: str,
+        transition: Any,
+        record: Any,
+        feedback: tuple[Feedback, ...] = (),
+        evaluation: Evaluation | None = None,
+    ) -> TaskResult:
+        return self._failed_result(
+            task,
+            history,
+            error,
+            transition,
+            record,
+            prior_feedback + tuple(feedback),
+            evaluation,
+        )
+
+    def _execute_step(
+        self,
+        task: Task,
+        history: list[AuditRecord],
+        intent: AgentIntent,
+        invocation_context: InvocationContext,
+        _operator_confirmed: bool,
+        text: str,
+        transition: Any,
+        record: Any,
+        *,
+        prior_feedback: tuple[Feedback, ...],
+        finalize: bool,
+    ) -> TaskResult | tuple[Feedback, ...]:
         transition(TaskStatus.VALIDATING_INTENT)
         validation_error = self._validate_intent(intent)
         if validation_error:
-            return self._failed_result(task, history, validation_error, transition, record)
+            return self._finish_failure(prior_feedback, task, history, validation_error, transition, record)
 
         capability = self.capabilities[intent.skill]
-        context = _invocation_context or InvocationContext(InvocationSource.AGENT)
+        allowance = step_allowance_ms(capability, intent.parameters)
+        context = invocation_context
         if context.source.value not in capability.allowed_callers:
-            return self._failed_result(task, history, "Caller is not permitted for this capability", transition, record)
+            return self._finish_failure(prior_feedback, task, history, "Caller is not permitted for this capability", transition, record)
         if capability.risk_level == RiskLevel.HIGH and (
             context.source != InvocationSource.DASHBOARD
             or context.role != "operator"
@@ -505,7 +722,7 @@ class RobotRuntime:
             or not _operator_confirmed
             or not context.operator_confirmed
         ):
-            return self._failed_result(task, history, "High-risk capability requires authenticated Dashboard operator confirmation", transition, record)
+            return self._finish_failure(prior_feedback, task, history, "High-risk capability requires authenticated Dashboard operator confirmation", transition, record)
         if capability.requires_operator_confirmation and (
             context.source != InvocationSource.DASHBOARD
             or context.role != "operator"
@@ -514,7 +731,7 @@ class RobotRuntime:
             or not _operator_confirmed
             or not context.operator_confirmed
         ):
-            return self._failed_result(task, history, "Capability requires authenticated operator confirmation", transition, record)
+            return self._finish_failure(prior_feedback, task, history, "Capability requires authenticated operator confirmation", transition, record)
         proposal_command: Command | None = None
         operator_confirmation_id = None
         if capability.risk_level == RiskLevel.HIGH or capability.requires_operator_confirmation:
@@ -524,13 +741,13 @@ class RobotRuntime:
             _trace("Info", task.task_id, f"开始安全复核 技能={intent.skill} 风险={capability.risk_level.value}")
             dashboard_operator = _authenticated_dashboard_operator(context)
             if self.safety_reviewer is None and not dashboard_operator:
-                return self._failed_result(task, history, "Safety reviewer unavailable; operation was not executed", transition, record)
+                return self._finish_failure(prior_feedback, task, history, "Safety reviewer unavailable; operation was not executed", transition, record)
             canonical_parameters = json.dumps(intent.parameters, sort_keys=True, separators=(",", ":"), allow_nan=False)
             now = utc_now()
             proposal_command = Command(
                 command_id=str(uuid4()), task_id=task.task_id, trace_id=task.trace_id,
                 robot_id=task.robot_id, skill=intent.skill, parameters=json.loads(canonical_parameters),
-                deadline=now + timedelta(milliseconds=capability.timeout_ms),
+                deadline=now + timedelta(milliseconds=allowance),
                 risk_level=capability.risk_level, invocation_source=context.source,
                 policy_version=self.profile.profile_version,
                 operator_confirmed=context.operator_confirmed,
@@ -559,7 +776,7 @@ class RobotRuntime:
                     review = self.safety_reviewer.review(proposal)
                 except Exception as exc:
                     record("safety.review.failed", {"proposal_id": proposal.proposal_id, "error_type": type(exc).__name__})
-                    return self._failed_result(task, history, "Safety review failed closed", transition, record)
+                    return self._finish_failure(prior_feedback, task, history, "Safety review failed closed", transition, record)
                 record("safety.review.completed", {"proposal_id": proposal.proposal_id, "verdict": getattr(getattr(review, "verdict", None), "value", "invalid"), "arguments_digest": digest})
                 reviewed_digest = command_proposal_digest(proposal.command, self.profile.profile_version)
                 expired = utc_now() >= proposal.expires_at
@@ -585,12 +802,12 @@ class RobotRuntime:
                         reason = f"{intent.skill} 的安全复核超时，没有执行"
                     elif not digest_matches:
                         reason = f"{intent.skill} 的复核结果与提案不一致，没有执行"
-                    return self._failed_result(task, history, reason, transition, record)
+                    return self._finish_failure(prior_feedback, task, history, reason, transition, record)
         if proposal_command is not None:
             proposal_command = Command(
                 **{
                     **proposal_command.__dict__,
-                    "deadline": utc_now() + timedelta(milliseconds=capability.timeout_ms),
+                    "deadline": utc_now() + timedelta(milliseconds=allowance),
                 }
             )
         command = proposal_command or Command(
@@ -600,7 +817,7 @@ class RobotRuntime:
             robot_id=task.robot_id,
             skill=intent.skill,
             parameters=dict(intent.parameters),
-            deadline=utc_now() + timedelta(milliseconds=capability.timeout_ms),
+            deadline=utc_now() + timedelta(milliseconds=allowance),
             risk_level=capability.risk_level,
             invocation_source=context.source,
             review_digest=proposal_command.review_digest if proposal_command is not None else None,
@@ -621,13 +838,13 @@ class RobotRuntime:
             })
         if capability.risk_level == RiskLevel.CONFIRM:
             if command_proposal_digest(command, self.profile.profile_version) != command.review_digest:
-                return self._failed_result(task, history, "Reviewed command changed before dispatch", transition, record)
+                return self._finish_failure(prior_feedback, task, history, "Reviewed command changed before dispatch", transition, record)
             with self._runtime_lock:
                 if command.review_digest in self._used_review_bindings:
-                    return self._failed_result(task, history, "Reviewed proposal was already consumed", transition, record)
+                    return self._finish_failure(prior_feedback, task, history, "Reviewed proposal was already consumed", transition, record)
                 self._used_review_bindings.add(command.review_digest)
         if self._consume_preempted(task.task_id):
-            return self._failed_result(task, history, "Voice command was replaced", transition, record)
+            return self._finish_failure(prior_feedback, task, history, "Voice command was replaced", transition, record)
         record("command.created", {"command_id": command.command_id, "skill": command.skill})
         transition(TaskStatus.EXECUTING)
         _trace("Info", task.task_id, f"开始执行 技能={command.skill}")
@@ -648,7 +865,7 @@ class RobotRuntime:
                 "tool.audit_write_failed",
                 {"phase": "started", "tool": command.skill, "error": audit_start_error},
             )
-            return self._failed_result(
+            return self._finish_failure(prior_feedback, 
                 task,
                 history,
                 "Tool call audit could not be recorded; command was not executed",
@@ -686,7 +903,7 @@ class RobotRuntime:
                 confirmation = self._cancel_confirmations.pop(task.task_id, None)
             if confirmation is not None:
                 record("command.cancel_confirmation", {"status": confirmation.status.value})
-            return self._failed_result(
+            return self._finish_failure(prior_feedback, 
                 task,
                 history,
                 f"Adapter execution failed: {exc}",
@@ -720,7 +937,7 @@ class RobotRuntime:
                 {"status": confirmation.status.value, "feedback_id": confirmation.feedback_id},
             )
         if utc_now() > command.deadline:
-            return self._failed_result(
+            return self._finish_failure(prior_feedback, 
                 task,
                 history,
                 "Adapter returned after the command deadline",
@@ -730,13 +947,13 @@ class RobotRuntime:
         feedback_error = self._validate_feedback(command, feedback)
         if feedback_error:
             record("command.feedback_rejected", {"error": feedback_error})
-            return self._failed_result(task, history, feedback_error, transition, record)
+            return self._finish_failure(prior_feedback, task, history, feedback_error, transition, record)
         terminal_cancel = next(
             (item for item in feedback if item.status == FeedbackStatus.CANCELLED),
             None,
         )
         if confirmation is not None and terminal_cancel is None:
-            return self._failed_result(
+            return self._finish_failure(prior_feedback, 
                 task,
                 history,
                 "Adapter cancellation confirmation contradicted command feedback",
@@ -757,15 +974,16 @@ class RobotRuntime:
         if any(item.status == FeedbackStatus.CANCELLED for item in feedback):
             transition(TaskStatus.CANCELLED)
             _trace("Warning", task.task_id, f"执行已取消 技能={command.skill}")
-            return TaskResult(task, feedback, None, tuple(history))
+            return TaskResult(task, prior_feedback + tuple(feedback), None, tuple(history))
         terminal = next(
             (item for item in reversed(feedback) if item.status in {FeedbackStatus.SUCCEEDED, FeedbackStatus.FAILED}),
             None,
         )
         if terminal is None:
-            return self._failed_result(task, history, "Adapter returned no terminal command feedback", transition, record, feedback)
+            return self._finish_failure(prior_feedback, task, history, "Adapter returned no terminal command feedback", transition, record, feedback)
         if terminal.status == FeedbackStatus.FAILED:
-            return self._failed_result(
+            return self._finish_failure(
+                prior_feedback,
                 task,
                 history,
                 terminal.message or "Command execution failed",
@@ -773,14 +991,30 @@ class RobotRuntime:
                 record,
                 feedback,
             )
+        condition_met = terminal.evidence.get("condition_met") is True
+        nominal = terminal.evidence.get("completion") == "nominal"
+        if condition_met and nominal:
+            conclusion = "Nominal duration elapsed; body completion is estimated"
+        elif condition_met:
+            conclusion = "Skill completed with observable evidence"
+        else:
+            conclusion = "Completion evidence is missing"
+        if prior_feedback and condition_met:
+            conclusion = (
+                "Plan completed; body completion is estimated where a step used a nominal duration"
+                if any(item.evidence.get("completion") == "nominal" for item in (*prior_feedback, terminal))
+                else "Plan completed"
+            )
+        if not finalize and condition_met:
+            record("plan.step_completed", {"skill": command.skill})
+            return feedback
         transition(TaskStatus.MONITORING)
         transition(TaskStatus.EVALUATING)
-        condition_met = terminal.evidence.get("condition_met") is True
         evaluation = Evaluation(
             task_id=task.task_id,
             trace_id=task.trace_id,
             success=condition_met,
-            conclusion="Skill completed with observable evidence" if condition_met else "Completion evidence is missing",
+            conclusion=conclusion,
             evidence=(terminal.message,) if condition_met else (),
             confidence=1.0 if condition_met else 0.0,
         )
@@ -789,8 +1023,8 @@ class RobotRuntime:
             transition(TaskStatus.COMPLETED)
             _trace("Info", task.task_id, f"执行完成 技能={command.skill} 结论={evaluation.conclusion}")
         else:
-            return self._failed_result(task, history, evaluation.conclusion, transition, record, feedback, evaluation)
-        return TaskResult(task, feedback, evaluation, tuple(history))
+            return self._finish_failure(prior_feedback, task, history, evaluation.conclusion, transition, record, feedback, evaluation)
+        return TaskResult(task, prior_feedback + tuple(feedback), evaluation, tuple(history))
 
     def _validate_intent(self, intent: AgentIntent) -> str | None:
         if not isinstance(intent.skill, str) or not intent.skill:

@@ -35,7 +35,7 @@ AI 复核与人员确认是不同记录和门禁。语音、文字任务或 UI �
 - `POST /api/settings/accounts`、`POST /api/settings/accounts/delete`：新增或更新账户，以及删除其他账户。两次都要提交当前登录账户的密码。不能删除当前登录账户，也不能删除最后一个账户。
 - `GET /api/dashboard/overview`、`GET /api/capabilities`：只读总览和能力目录。
 - `GET /api/logs`：已登录会话读取当天运行日志。可选 `limit`（1 到 200，默认 100）和 `level`。返回原文文本行。
-- `POST /api/tasks`：提交自然语言任务。它与本地语音最终转写、Dashboard 通话最终转写进入同一条 `robotsoul.language_gateway` 规划入口，再经 capability surface 和 runtime 策略处理。这个进程不是 Go 版 PicoClaw。
+- `POST /api/tasks`：提交自然语言任务。它与本地语音最终转写、Dashboard 通话最终转写进入同一条 `openrobotsoul-dialogue` 规划入口（链接 `third_party/picoclaw` AgentLoop，session 为 `dashboard`），再经 capability surface 和 runtime 策略处理。编码用的 Go 版 PicoClaw CLI 不参与这次规划。
 - `POST /api/actions/prepare`：服务端校验 caller、skill、schema、参数边界与当前策略，建立短时挑战；客户端不能设置 caller/risk/确认结果。
 - `POST /api/actions/execute`：提交挑战 ID。服务端原子消费挑战，重验策略与 digest；高危操作还需再次输入当前账户密码，然后通过 `InvocationContext` 调用 Runtime。
 

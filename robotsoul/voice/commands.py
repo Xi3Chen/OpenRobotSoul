@@ -16,7 +16,8 @@ _STAND_UP = re.compile(r"^(?:请)?(?:你)?(?:站起来|起立|站立)$")
 _STAND_DOWN = re.compile(r"^(?:请)?(?:你)?(?:趴下|卧倒)$")
 _MOVE = re.compile(
     r"^(?:请)?(?:你)?(?:向|往)?(?P<direction>前|后)(?:边|面)?(?:走|移动)"
-    r"(?P<count>[0-9]+|[一二两三四五六七八九十])?(?:步|秒|下)?$"
+    r"(?:(?P<count>[0-9]+(?:\.[0-9]+)?|[一二两三四五六七八九十])(?P<unit>步|秒|分钟|分|米|[mM]))?"
+    r"$"
 )
 _COUNTS = {
     "一": 1,
@@ -48,12 +49,35 @@ def match_closed_command(
     if _STAND_DOWN.fullmatch(phrase) and "sport.stand_down" in capabilities:
         return AgentIntent("sport.stand_down", {}, "闭集：趴下")
     move = _MOVE.fullmatch(phrase)
-    capability = capabilities.get("sport.move") if move else None
-    if move is None or capability is None:
+    if move is None:
         return None
-    count = _count(move.group("count"))
-    duration = _clamp(1000 if count is None else count * 1000, _limit(capability, "duration_ms", 200, 2000))
+    unit = (move.group("unit") or "").lower()
+    amount = _count(move.group("count"))
     speed = _WALK_SPEED if move.group("direction") == "前" else -_WALK_SPEED
+    if unit in {"米", "m"}:
+        capability = capabilities.get("sport.move_distance")
+        if capability is None or amount is None:
+            return None
+        low, high = _limit(capability, "vx", -2.5, 3.8)
+        return AgentIntent(
+            "sport.move_distance",
+            {
+                "vx": _clamp(speed, (low, high)),
+                "vy": 0.0,
+                "vyaw": 0.0,
+                "distance_m": _clamp(amount, _limit(capability, "distance_m", 0.2, 8.0)),
+            },
+            "闭集：按距离移动",
+        )
+    capability = capabilities.get("sport.move")
+    if capability is None:
+        return None
+    if unit in {"分钟", "分"}:
+        duration = 1000 if amount is None else amount * 60000
+    elif unit == "秒":
+        duration = 1000 if amount is None else amount * 1000
+    else:
+        duration = 1000 if amount is None else amount * 1000
     low, high = _limit(capability, "vx", -2.5, 3.8)
     return AgentIntent(
         "sport.move",
@@ -61,9 +85,9 @@ def match_closed_command(
             "vx": _clamp(speed, (low, high)),
             "vy": 0,
             "vyaw": 0,
-            "duration_ms": duration,
+            "duration_ms": _clamp(duration, _limit(capability, "duration_ms", 200, 120000)),
         },
-        "闭集：移动",
+        "闭集：按时间移动",
     )
 
 
@@ -80,15 +104,17 @@ def _normalize(text: str, wake_phrase: str | Sequence[str]) -> str:
     return cleaned
 
 
-def _count(value: str | None) -> int | None:
+def _count(value: str | None) -> float | None:
     if not value:
         return None
     if value in _COUNTS:
         return _COUNTS[value]
     try:
-        parsed = int(value)
+        parsed: float | int = float(value) if "." in value else int(value)
     except ValueError:
         return None
+    if isinstance(parsed, float) and parsed.is_integer():
+        parsed = int(parsed)
     return parsed if parsed > 0 else None
 
 

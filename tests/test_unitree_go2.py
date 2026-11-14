@@ -12,7 +12,7 @@ from adapters.unitree_go2.sdk_driver import (
     create_sdk_driver,
 )
 from robotsoul.adapters.base import BatteryStatus
-from adapters.unitree_go2.actions import sport_capabilities
+from adapters.unitree_go2.actions import SPORT_ACTIONS, sport_capabilities
 from robotsoul.models import CapabilitySpec, ParameterSpec, RiskLevel, utc_now
 
 
@@ -104,8 +104,13 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
             self.assertEqual(declared[name].risk_level, RiskLevel.NORMAL)
             self.assertIn("agent", declared[name].allowed_callers)
         source = __import__("pathlib").Path("adapters/unitree_go2/bridge/bridge.cpp").read_text(encoding="utf-8")
-        for name in declared:
-            self.assertIn(f'"{name.removeprefix("sport.")}"', source)
+        for action in SPORT_ACTIONS:
+            self.assertIn(f'"{action.bridge_name}"', source)
+        volume = declared["vui.set_volume"]
+        self.assertEqual(volume.risk_level, RiskLevel.NORMAL)
+        self.assertIn("agent", volume.allowed_callers)
+        self.assertEqual(volume.parameters["volume"].minimum, 0)
+        self.assertEqual(volume.parameters["volume"].maximum, 10)
         self.assertIn("damp is not exposed", source)
         adapter = UnitreeGo2Adapter(self.profile, FakeGo2Driver(self.profile.robot_id))
         adapter.connect()
@@ -487,6 +492,7 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
 
         self.assertIn("sport.stand_up", runtime.available_tools())
         self.assertIn("sport.move", runtime.available_tools())
+        self.assertIn("vui.set_volume", runtime.available_tools())
         self.assertNotIn("sport.front_flip", runtime.available_tools())
         self.assertIn("sport.front_flip", runtime.dashboard_tools())
 
@@ -506,8 +512,31 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
             FeedbackStatus.ACCEPTED, FeedbackStatus.RUNNING, FeedbackStatus.SUCCEEDED,
         ])
         self.assertTrue(accepted[-1].evidence["condition_met"])
+        self.assertEqual(accepted[-1].evidence["completion"], "nominal")
+        self.assertFalse(accepted[-1].evidence["completion_verified"])
+        self.assertIn("estimated", accepted[-1].message)
         self.assertEqual(calls, ["stand_up"])
         self.assertEqual(rejected[0].error_code, "invalid_parameters")
+
+    def test_sdk_driver_sets_volume_inside_the_documented_range(self):
+        calls = []
+        driver = _connected_driver(self.profile, calls)
+        accepted = driver.execute(_sport_command(
+            self.profile, "vui.set_volume", {"volume": 6}, RiskLevel.NORMAL,
+        ))
+        rejected = driver.execute(_sport_command(
+            self.profile, "vui.set_volume", {"volume": 11}, RiskLevel.NORMAL,
+        ))
+        fractional = driver.execute(_sport_command(
+            self.profile, "vui.set_volume", {"volume": 1.5}, RiskLevel.NORMAL,
+        ))
+
+        self.assertEqual(accepted[-1].status, FeedbackStatus.SUCCEEDED)
+        self.assertIn("volume", accepted[-1].message)
+        self.assertEqual(accepted[-1].evidence["bridge_action"], "set_volume")
+        self.assertEqual(calls, ["set_volume"])
+        self.assertEqual(rejected[0].error_code, "invalid_parameters")
+        self.assertEqual(fractional[0].error_code, "invalid_parameters")
 
     def test_sdk_driver_bounds_move_with_stop_and_cancel(self):
         import threading
@@ -655,6 +684,103 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         self.assertIsNone(driver.battery())
         driver._library = object()
         self.assertIsNone(driver.battery())
+
+
+    def test_timed_move_repeats_native_calls_across_two_second_cycles(self):
+        from unittest.mock import patch
+
+        from adapters.unitree_go2 import motion
+        from adapters.unitree_go2 import sdk_driver as driver_module
+
+        calls = []
+        driver = _connected_driver(self.profile, calls)
+        with patch.object(driver_module, "NATIVE_MOVE_MS", 80), patch.object(motion, "MOVE_RESEND_MS", 20):
+            feedback = driver.execute(_sport_command(
+                self.profile, "sport.move",
+                {"vx": 0.3, "vy": 0, "vyaw": 0, "duration_ms": 200},
+                RiskLevel.NORMAL,
+            ))
+
+        self.assertEqual(feedback[-1].status, FeedbackStatus.SUCCEEDED)
+        self.assertEqual(feedback[-1].evidence["cycles"], 3)
+        self.assertGreaterEqual(feedback[-1].evidence["move_sends"], 3)
+        self.assertGreaterEqual(calls.count("move"), 3)
+        self.assertEqual(calls[-1], "stop_move")
+
+    def test_distance_move_stops_on_fused_position_and_fails_when_sensors_disagree(self):
+        calls = []
+        driver = _connected_driver(self.profile, calls)
+        seen = {"n": 0}
+
+        def pose(distance):
+            return {
+                "position": [distance, 0.0, 0.0],
+                "mode": 1,
+                "error_code": 0,
+                "velocity": [0.3, 0.0, 0.0],
+                "yaw_speed": 0.0,
+            }
+
+        def read_state():
+            seen["n"] += 1
+            return pose(0.0 if seen["n"] < 3 else 4.0)
+
+        driver._read_state = read_state
+        driver._try_read_sensors = lambda: {
+            "streams": [{
+                "id": "odometry",
+                "available": True,
+                "payload": {"position": [0.0 if seen["n"] < 3 else 4.0, 0.0, 0.0]},
+            }]
+        }
+        reached = driver.execute(_sport_command(
+            self.profile, "sport.move_distance",
+            {"vx": 0.4, "vy": 0, "vyaw": 0, "distance_m": 4},
+            RiskLevel.NORMAL,
+            seconds=5,
+        ))
+        self.assertEqual(reached[-1].status, FeedbackStatus.SUCCEEDED)
+        self.assertTrue(reached[-1].evidence["condition_met"])
+        self.assertGreaterEqual(reached[-1].evidence["traveled_m"], 4)
+        self.assertIn("stop_move", calls)
+
+        calls.clear()
+        seen["n"] = 0
+
+        def disagree():
+            seen["n"] += 1
+            return pose(0.0 if seen["n"] < 2 else 1.0)
+
+        driver._read_state = disagree
+        driver._try_read_sensors = lambda: {
+            "streams": [{
+                "id": "odometry",
+                "available": True,
+                "payload": {"position": [0.0 if seen["n"] < 2 else 4.0, 0.0, 0.0]},
+            }]
+        }
+        missed = driver.execute(_sport_command(
+            self.profile, "sport.move_distance",
+            {"vx": 0.4, "vy": 0, "vyaw": 0, "distance_m": 4},
+            RiskLevel.NORMAL,
+            seconds=2.5,
+        ))
+        self.assertEqual(missed[-1].status, FeedbackStatus.FAILED)
+        self.assertEqual(missed[-1].error_code, "distance_timeout")
+        self.assertIn("stop_move", calls)
+
+    def test_distance_move_does_not_start_without_a_position(self):
+        calls = []
+        driver = _connected_driver(self.profile, calls)
+        driver._read_state = lambda: (_ for _ in ()).throw(RuntimeError("missing"))
+        driver._try_read_sensors = lambda: {"streams": []}
+        feedback = driver.execute(_sport_command(
+            self.profile, "sport.move_distance",
+            {"vx": 0.4, "vy": 0, "vyaw": 0, "distance_m": 1},
+            RiskLevel.NORMAL,
+        ))
+        self.assertEqual(feedback[-1].error_code, "distance_unavailable")
+        self.assertEqual(calls, [])
 
 
 class _FixedAgent:

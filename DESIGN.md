@@ -5,7 +5,7 @@
 Status: Draft
 Date: 2026-11-07
 Product surfaces: local robot runtime, LAN operator Dashboard, later mobile voice session.
-Evidence reviewed: `README.md`, `docs/robot-agent-plan/01-architecture.md`, `02-adapter-contract.md`, `04-transaction-loop.md`, and `.omx/plans/prd-dashboard-sdk-risk.md`. The repository has no existing RobotHarness product UI. The resident process `robotsoul.language_gateway` plans natural-language robot tasks, including dashboard text and final voice transcripts. The Go PicoClaw binary runs isolated coding tasks and is a different program. Its bundled web UI is for agent setup and is not part of the robot control product.
+Evidence reviewed: `README.md`, `docs/robot-agent-plan/01-architecture.md`, `02-adapter-contract.md`, `04-transaction-loop.md`, `11-agent-tooling-decision.md`, `18-picoclaw-dialogue-context.md`, and `.omx/plans/prd-dashboard-sdk-risk.md`. The repository has no existing RobotHarness product UI. The resident dialogue binary `openrobotsoul-dialogue` links `third_party/picoclaw` AgentLoop to plan natural-language robot tasks (with session context), including dashboard text and final voice transcripts. The Go PicoClaw CLI binary still runs isolated coding tasks and is a different program. Its bundled web UI is for agent setup and is not part of the robot control product.
 
 ## Brand
 

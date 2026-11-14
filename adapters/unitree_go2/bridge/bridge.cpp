@@ -6,6 +6,7 @@
 #include <unitree/robot/channel/channel_factory.hpp>
 #include <unitree/robot/channel/channel_subscriber.hpp>
 #include <unitree/robot/go2/sport/sport_client.hpp>
+#include <unitree/robot/go2/vui/vui_client.hpp>
 
 #include <chrono>
 #include <cinttypes>
@@ -41,6 +42,7 @@ struct Bridge {
   std::mutex command_mutex;
   std::mutex mutex;
   std::unique_ptr<unitree::robot::go2::SportClient> client;
+  std::unique_ptr<unitree::robot::go2::VuiClient> vui;
   std::unique_ptr<Subscriber> subscriber;
   std::unique_ptr<LowSubscriber> low_subscriber;
   State state;
@@ -108,6 +110,7 @@ struct Bridge {
     }
     low_subscriber.reset();
     sensors.close();
+    vui.reset();
     client.reset();
     try {
       unitree::robot::ChannelFactory::Instance()->Release();
@@ -292,6 +295,21 @@ SportResult invoke_sport(SportClient& client, const std::string& action,
   }
   require_shape(number_count, 0, has_flag, false);
   result.code = call_named(client, action);
+  return result;
+}
+
+SportResult invoke_volume(unitree::robot::go2::VuiClient& client,
+                          const double* numbers, size_t number_count,
+                          int has_flag, int flag) {
+  if (has_flag != 0 || flag != 0 || number_count != 1 || numbers == nullptr) {
+    throw std::runtime_error("unexpected vui parameters");
+  }
+  const double level = numbers[0];
+  if (!std::isfinite(level) || level < 0.0 || level > 10.0 || level != std::trunc(level)) {
+    throw std::runtime_error("volume is outside the Vui API range");
+  }
+  SportResult result;
+  result.code = client.SetVolume(static_cast<int>(level));
   return result;
 }
 
@@ -539,7 +557,20 @@ int go2_bridge_call(void* handle, const char* action, const double* numbers,
       }
       client = bridge->client.get();
     }
-    const SportResult result = invoke_sport(*client, action, numbers, number_count, has_flag, flag);
+    const std::string action_name(action);
+    SportResult result;
+    if (action_name == "set_volume") {
+      if (!bridge->vui) {
+        std::unique_ptr<unitree::robot::go2::VuiClient> created(
+            new unitree::robot::go2::VuiClient());
+        created->SetTimeout(1.0f);
+        created->Init();
+        bridge->vui = std::move(created);
+      }
+      result = invoke_volume(*bridge->vui, numbers, number_count, has_flag, flag);
+    } else {
+      result = invoke_sport(*client, action_name, numbers, number_count, has_flag, flag);
+    }
     if (!write_call_result(output, output_capacity, result)) {
       set_error(error, error_capacity, "action output buffer is too small");
       return 0;

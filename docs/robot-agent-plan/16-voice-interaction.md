@@ -2,7 +2,7 @@
 
 ## 目标与边界
 
-Voice Service 为单台机器人提供本地待机唤醒、连续会话识别和 Dashboard 通话入口。它是机器人侧受监督的独立服务；下列职责是服务内逻辑组件，不要求各自拆成进程。音频采集、唤醒和实时识别不依赖云端 Agent。通过置信度和轮次检查的最终转写是自然语言任务，与 Dashboard 文本框进入同一条运行时入口，由 `robotsoul.language_gateway` 对照已注册技能规划。中间识别结果和音频帧不提交。唤醒或通话本身不授予动作权限；最终文本仍须经 RobotRuntime、caller policy、能力 schema 和本地安全检查。
+Voice Service 为单台机器人提供本地待机唤醒、连续会话识别和 Dashboard 通话入口。它是机器人侧受监督的独立服务；下列职责是服务内逻辑组件，不要求各自拆成进程。音频采集、唤醒和实时识别不依赖云端 Agent。通过置信度和轮次检查的最终转写是自然语言任务，与 Dashboard 文本框进入同一条运行时入口，由 `openrobotsoul-dialogue`（链接 `third_party/picoclaw` AgentLoop）对照已注册技能规划；本地语音与通话分别使用 `voice` / `call` session。中间识别结果和音频帧不提交。唤醒或通话本身不授予动作权限；最终文本仍须经 RobotRuntime、caller policy、能力 schema 和本地安全检查。跟进窗口到期只停止收音，不清对话 session。
 
 部署时在 `config/robot.json` 设置 `robot_name` 与 `soul.personality`（机器人灵魂）；语言进程会把它们拼进系统提示词。`config/voice.json` 只保存唤醒短语、ASR 语言和设备偏好；`wake_phrase` 可用英文逗号分隔多个唤醒词，留空时默认使用 `robot_name`。名称与唤醒词可以相同，但显示名不是识别器配置的隐式来源。`config/robot.json` 仍负责选择 `robot_module` / `profile_id`。模型和设备均通过静态 registry 选择，不允许配置路径动态加载可执行代码。运行时代码和默认配置也随 Python wheel 打包。
 
@@ -22,7 +22,7 @@ Voice Service 为单台机器人提供本地待机唤醒、连续会话识别和
 | Wake Detector | PASSIVE 下唯一持续运行的推理器，检测配置的中文唤醒短语，输出置信度、时间和音源 generation。唤醒只建立交互会话，不代表身份认证。 |
 | Streaming ASR + VAD | 唤醒后消费 pre-roll 和小块实时 PCM，持续产出 partial/final transcript；VAD 负责语音活动及端点，不能单独判断讲话是否面向机器人。低置信度、多人重叠或端点不确定时请求重复/唤醒，不提交动作任务。 |
 | Turn / Addressing Manager | 管理唤醒、用户轮次、机器人回复、跟进窗口、空闲超时、取消和回到被动监听。通过唤醒词、当前交互的轮次时序及可用的方向/阵列线索判断是否继续对机器人说话；不把单纯 VAD speech 当成面向机器人。 |
-| Dashboard Call Gateway | 仅接受已认证操作员显式发起的通话；负责信令、WebRTC 媒体和断线/挂断收尾。通话输入的 browser microphone 音轨经此网关转成 Voice Service 输入。通话最终转写与本地语音最终转写、Dashboard 文本任务同为自然语言，交给 `robotsoul.language_gateway`。 |
+| Dashboard Call Gateway | 仅接受已认证操作员显式发起的通话；负责信令、WebRTC 媒体和断线/挂断收尾。通话输入的 browser microphone 音轨经此网关转成 Voice Service 输入。通话最终转写与本地语音最终转写、Dashboard 文本任务同为自然语言，交给 `openrobotsoul-dialogue`（session=`call`）。 |
 | Runtime / Response Gateway | 只传递 `wake.detected`、最终 `speech.transcript`、`interaction.cancelled` 和语音状态等有界事件；音频帧、partial transcript 不放进通用 Observation 队列。语音回复按当前模式路由到浏览器通话或已验证的机器人扬声器。 |
 | Health Supervisor | 监控 Voice Service、设备租约、帧新鲜度、识别延迟和资源。语音服务重启不得重启 RobotRuntime 或阻塞机器人安全控制；进程失效时关闭音源，回到安全休眠并有限退避重试。 |
 

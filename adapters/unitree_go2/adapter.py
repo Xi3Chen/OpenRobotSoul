@@ -264,4 +264,6 @@ def _intersect_capabilities(
         timeout_ms=min(profile.timeout_ms, device.timeout_ms),
         required=profile.required,
         description=profile.description,
+        estimate_ms=device.estimate_ms or profile.estimate_ms,
+        completion=device.completion if device.estimate_ms or device.completion != "accepted" else profile.completion,
     )

@@ -170,6 +170,8 @@ def tool_call_event(
         event["actor_hash"] = command.actor_hash
     if capability is not None:
         event["timeout_ms"] = capability.timeout_ms
+        event["estimate_ms"] = getattr(capability, "estimate_ms", 0)
+        event["completion"] = getattr(capability, "completion", "accepted")
         event["interruptible"] = capability.interruptible
     if duration_ms is not None:
         event["duration_ms"] = round(duration_ms, 3)

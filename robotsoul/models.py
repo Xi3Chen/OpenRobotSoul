@@ -71,6 +71,8 @@ class CapabilitySpec:
     timeout_ms: int = 5000
     required: bool = False
     description: str = ""
+    estimate_ms: int = 0
+    completion: str = "accepted"
 
     @property
     def safety_class(self) -> str:
@@ -101,6 +103,14 @@ class Observation:
 class AgentIntent:
     skill: str
     parameters: dict[str, Any]
+    rationale: str = ""
+
+
+@dataclass(frozen=True)
+class AgentPlan:
+    """Ordered skill steps. Timing stays on the skill, not in this object."""
+
+    steps: tuple[AgentIntent, ...]
     rationale: str = ""
 
 

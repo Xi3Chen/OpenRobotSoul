@@ -23,6 +23,7 @@
 - [Dashboard 与接口风险门禁](15-dashboard.md)
 - [语音交互子系统](16-voice-interaction.md)
 - [运行日志](17-runtime-log.md)
+- [对话上下文与 PicoClaw AgentLoop](18-picoclaw-dialogue-context.md)
 
 ## 核心决策
 
@@ -41,7 +42,7 @@
 - 感知适配器可先接入一种输入；没有相机时仍可通过语音或文本任务工作。
 - 动作必须通过有参数约束的工具调用，不能将自由文本直接解释为运动命令。
 - 高层推理使用云端 API；本地运行确定性的运动控制、安全监督及设备驱动。
-- `robotsoul.language_gateway` 承担全部自然语言规划，包括文本任务、本地语音最终转写和 Dashboard 通话最终转写。Go 版 PicoClaw 的编码任务仍限制在隔离工作区，工具权限与自然语言会话分开。
+- 常驻对话进程 `openrobotsoul-dialogue` 链接 `third_party/picoclaw` 的 AgentLoop，承担全部自然语言规划（含多轮上下文与压缩），包括文本任务、本地语音最终转写和 Dashboard 通话最终转写。Go 版 PicoClaw CLI 的编码任务仍限制在隔离工作区，工具权限与自然语言会话分开。
 - VLA 模型不是 MVP 的前置条件。未来可作为某个技能或策略实现接入。
 - 通过手势、语音等感知信号触发人机交互；视觉注意力可作为可选唤醒条件。
 - 记忆可用于个性化和生成改进建议；生效策略须经过验证、授权和可回滚部署。
@@ -54,6 +55,6 @@
 
 ## 决策状态
 
-这是首版实施规划，不是现有实现的代码审计。机器人型号、传感器型号、云端模型供应方、运行时语言和部署拓扑仍需在技术预研后通过 ADR（架构决策记录）确定。自然语言规划已定为常驻语言进程 `robotsoul.language_gateway`：文本与语音最终转写走同一入口。Go 版 PicoClaw 只用于隔离编码。集成、工具隔离和验收见 [Agent 选型与 PicoClaw 集成决策](11-agent-tooling-decision.md)。OpenRobotSoul 为当前项目名。
+这是首版实施规划，不是现有实现的代码审计。机器人型号、传感器型号、云端模型供应方、运行时语言和部署拓扑仍需在技术预研后通过 ADR（架构决策记录）确定。自然语言规划已定为常驻对话进程 `openrobotsoul-dialogue`（链接 `third_party/picoclaw`）：文本与语音最终转写走同一入口并持有 session 上下文。Go 版 PicoClaw CLI 只用于隔离编码。集成、工具隔离和验收见 [Agent 选型与 PicoClaw 集成决策](11-agent-tooling-decision.md) 与 [对话上下文与 PicoClaw AgentLoop](18-picoclaw-dialogue-context.md)。OpenRobotSoul 为当前项目名。
 
 机器人代码、profile 和该机器人专属第三方依赖按 `adapters/<robot_code>/` 组织；部署目标通过 `config/robot.json` 选择已登记的静态模块。新增模块的目录、registry、profile 和验收规范见[机器人模块组织规范](12-robot-module-standard.md)。

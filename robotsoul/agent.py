@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Protocol
 
-from robotsoul.models import AgentIntent, CapabilitySpec, Observation
+from robotsoul.models import AgentIntent, AgentPlan, CapabilitySpec, Observation
 
 
 class AgentRejected(RuntimeError):
@@ -20,8 +20,8 @@ class AgentProvider(Protocol):
         user_input: str,
         capabilities: dict[str, CapabilitySpec],
         observations: tuple[Observation, ...] = (),
-    ) -> AgentIntent | None:
-        """Return a bounded high-level plan; providers must enforce their own request timeout."""
+    ) -> AgentIntent | AgentPlan | None:
+        """Return one skill or an ordered plan; providers must enforce their own request timeout."""
 
 
 _SLASH_COMMAND = re.compile(r"^/(\S+)(?:\s+(.*))?$", re.DOTALL)
