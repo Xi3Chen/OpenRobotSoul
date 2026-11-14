@@ -623,5 +623,158 @@ class VoiceServiceTests(unittest.TestCase):
             service.stop()
 
 
+    # --- over-segmentation ("one sentence became two ASR results") -----------
+
+    def test_split_transcript_is_held_and_merged_before_dispatch(self):
+        from robotsoul.voice.engine import AsrResult
+
+        seen = []
+        service = VoiceService(
+            capture=FakeCapture(available=False),
+            engine=FakeEngine(),
+            run_text=lambda text: seen.append(text) or text,
+            idle_probe_seconds=100,
+        )
+        try:
+            service._handle_asr_result(AsrResult("手拉起来然后", True))
+            self.assertEqual(seen, [])
+            service._handle_asr_result(AsrResult("向左转弯", True))
+            deadline = time.monotonic() + 2
+            while not seen and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(seen, ["手拉起来然后向左转弯"])
+            self.assertTrue(
+                any("合并被拆开的语音片段" in line for line in current().recent(30))
+            )
+        finally:
+            service.stop()
+
+    def test_continuation_after_dispatch_supersedes_previous_runtime(self):
+        from robotsoul.voice.engine import AsrResult
+
+        seen = []
+        service = VoiceService(
+            capture=FakeCapture(available=False),
+            engine=FakeEngine(),
+            run_text=lambda text: seen.append(text) or text,
+            idle_probe_seconds=100,
+        )
+        try:
+            service._handle_asr_result(AsrResult("把客厅的灯", True))
+            deadline = time.monotonic() + 2
+            while not seen and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(seen, ["把客厅的灯"])
+            epoch_before = service.runtime_executor.epoch
+            service._handle_asr_result(AsrResult("打开", True))
+            deadline = time.monotonic() + 2
+            while len(seen) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(seen, ["把客厅的灯", "把客厅的灯，打开"])
+            self.assertGreater(service.runtime_executor.epoch, epoch_before)
+        finally:
+            service.stop()
+
+    def test_closed_command_is_not_merged_with_the_next_transcript(self):
+        from robotsoul.voice.engine import AsrResult
+
+        seen = []
+
+        def matcher(text):
+            return type("Intent", (), {"skill": "go_forward"})() if text.strip() == "向前走" else None
+
+        service = VoiceService(
+            capture=FakeCapture(available=False),
+            engine=FakeEngine(),
+            run_text=lambda text: seen.append(text) or text,
+            command_matcher=matcher,
+            idle_probe_seconds=100,
+        )
+        try:
+            service._handle_asr_result(AsrResult("向前走", True))
+            deadline = time.monotonic() + 2
+            while not seen and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(seen, ["向前走"])
+            service._handle_asr_result(AsrResult("向左转", True))
+            deadline = time.monotonic() + 2
+            while len(seen) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(seen, ["向前走", "向左转"])
+        finally:
+            service.stop()
+
+    def test_homophone_wake_only_transcript_is_ignored(self):
+        from robotsoul.voice.engine import AsrResult
+
+        seen = []
+        service = VoiceService(
+            capture=FakeCapture(available=False),
+            engine=FakeEngine(),
+            run_text=lambda text: seen.append(text) or text,
+            idle_probe_seconds=100,
+        )
+        try:
+            service._handle_asr_result(AsrResult("锁拉", True))
+            self.assertEqual(seen, [])
+            self.assertTrue(any("忽略仅唤醒词" in line for line in current().recent(20)))
+        finally:
+            service.stop()
+
+    def test_reply_pipeline_streams_reply_units_to_speaker(self):
+        from concurrent.futures import Future
+
+        class Speaker:
+            supports_streaming = True
+
+            def __init__(self):
+                self.started = []
+                self.writes = []
+                self.finished = 0
+
+            def start(self, sample_rate):
+                self.started.append(sample_rate)
+
+            def write(self, samples):
+                self.writes.append(tuple(samples))
+
+            def finish(self, timeout=5.0):
+                self.finished += 1
+
+            def stop(self):
+                return
+
+        class Task:
+            task_id = "task-1"
+            error = None
+
+            class status:
+                value = "succeeded"
+
+        class Result:
+            task = Task()
+            evaluation = type("Evaluation", (), {"success": True, "conclusion": "好的，我正在打开手电筒。"})()
+
+        engine = FakeEngine()
+        speaker = Speaker()
+        service = VoiceService(
+            capture=FakeCapture(available=False),
+            engine=engine,
+            run_text=lambda text: text,
+            speaker=speaker,
+            idle_probe_seconds=100,
+        )
+        try:
+            future = Future()
+            future.set_result(Result())
+            service._handle_runtime_result(future, service.arbiter.generation)
+            self.assertEqual(speaker.started, [16000])
+            self.assertEqual(len(speaker.writes), 2)
+            self.assertEqual(speaker.finished, 1)
+            self.assertIsNotNone(service.last_reply_timing)
+        finally:
+            service.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

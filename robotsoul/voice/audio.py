@@ -244,30 +244,47 @@ class PulseAudioCapture:
 
 
 class PulseAudioOutput:
-    """Linux PulseAudio playback adapter used on phones without PortAudio."""
+    """Linux PulseAudio playback adapter used on phones without PortAudio.
+
+    ``play`` is the blocking path used for one-off sounds.  ``start``/``write``/
+    ``finish`` keep a single pacat process for a whole reply, so every TTS unit
+    can be written as soon as it is synthesized instead of restarting the player
+    per unit.
+    """
+
+    supports_streaming = True
 
     def __init__(self, device: str | None = None):
         self.device = device or os.environ.get("ROBOTSOUL_VOICE_PULSE_SINK")
         self._process: subprocess.Popen[bytes] | None = None
+        self._sample_rate: int | None = None
         self._lock = Lock()
+
+    def _command(self, sample_rate: int) -> list[str]:
+        command = ["pacat", "--raw", "--format=s16le", f"--rate={sample_rate}", "--channels=1"]
+        if self.device:
+            command.append(f"--device={self.device}")
+        return command
+
+    @staticmethod
+    def _pcm(samples: Sequence[float]) -> bytes:
+        values = array("h", (max(-32768, min(32767, int(float(value) * 32767.0))) for value in samples))
+        return values.tobytes()
 
     def play(self, samples: Sequence[float], sample_rate: int, cancel: Event | None = None) -> None:
         if not samples:
             return
         if shutil.which("pacat") is None:
             raise VoiceAudioError("pacat is required for PulseAudio playback")
-        values = array("h", (max(-32768, min(32767, int(float(value) * 32767.0))) for value in samples))
-        command = ["pacat", "--raw", "--format=s16le", f"--rate={sample_rate}", "--channels=1"]
-        if self.device:
-            command.append(f"--device={self.device}")
-        data = values.tobytes()
+        data = self._pcm(samples)
+        command = self._command(sample_rate)
         process: subprocess.Popen[bytes] | None = None
         try:
             process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             with self._lock:
                 self._process = process
             if cancel is None:
-                process.communicate(data, timeout=max(2.0, len(values) / sample_rate + 2.0))
+                process.communicate(data, timeout=max(2.0, len(data) / (sample_rate * 2) + 2.0))
                 return
             writer = Thread(target=_write_pacat, args=(process, data), name="pulseaudio-playback", daemon=True)
             writer.start()
@@ -289,14 +306,70 @@ class PulseAudioOutput:
                 if self._process is process:
                     self._process = None
 
+    def start(self, sample_rate: int) -> None:
+        """Start a persistent pacat process for chunked playback."""
+        with self._lock:
+            process = self._process
+            self._process = None
+        if process is not None:
+            _kill(process)
+        if shutil.which("pacat") is None:
+            raise VoiceAudioError("pacat is required for PulseAudio playback")
+        try:
+            process = subprocess.Popen(self._command(sample_rate), stdin=subprocess.PIPE,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        except OSError as exc:
+            raise VoiceAudioError(f"Unable to start PulseAudio playback: {exc}") from exc
+        with self._lock:
+            self._process = process
+            self._sample_rate = sample_rate
+
+    def write(self, samples: Sequence[float]) -> None:
+        """Write one PCM chunk to the persistent player (blocks only on backpressure)."""
+        with self._lock:
+            process = self._process
+        if process is None or process.stdin is None:
+            raise VoiceAudioError("PulseAudio playback has not been started")
+        if not samples:
+            return
+        try:
+            process.stdin.write(self._pcm(samples))
+            process.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            self.stop()
+            raise VoiceAudioError(f"Unable to write audio to PulseAudio: {exc}") from exc
+
+    def finish(self, timeout: float = 5.0) -> None:
+        """Close stdin so pacat drains, then wait for it to exit."""
+        with self._lock:
+            process, self._process = self._process, None
+            self._sample_rate = None
+        if process is None:
+            return
+        try:
+            if process.stdin is not None:
+                process.stdin.close()
+            process.wait(timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            _kill(process)
+
     def stop(self) -> None:
         with self._lock:
             process, self._process = self._process, None
-        if process is not None and process.poll() is None:
-            process.kill()
+            self._sample_rate = None
+        if process is not None:
+            _kill(process)
 
     def close(self) -> None:
         self.stop()
+
+
+def _kill(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            return
 
 
 def _write_pacat(process: subprocess.Popen[bytes], data: bytes) -> None:
@@ -320,7 +393,12 @@ def _sounddevice_active(sd: Any) -> bool | None:
 
 
 class InterruptibleOutput:
-    """One current utterance. A new play() or stop() drops whatever is still queued."""
+    """One current utterance. A new play() or stop() drops whatever is still queued.
+
+    When the backend supports streaming (``start``/``write``/``finish``), a whole
+    reply is written into one player process; the low-latency reply pipeline
+    uses that path and falls back to one ``play`` call per TTS unit otherwise.
+    """
 
     def __init__(self, backend: Any):
         self._backend = backend
@@ -328,6 +406,33 @@ class InterruptibleOutput:
         self._playback = Lock()
         self._generation = 0
         self._cancel = Event()
+
+    @property
+    def supports_streaming(self) -> bool:
+        starter = getattr(self._backend, "start", None)
+        writer = getattr(self._backend, "write", None)
+        return callable(starter) and callable(writer)
+
+    def start(self, sample_rate: int) -> None:
+        """Begin one streamed utterance; a previous one is stopped first."""
+        with self._state:
+            self._generation += 1
+            previous = self._cancel
+            self._cancel = Event()
+        previous.set()
+        _stop_backend(self._backend)
+        self._backend.start(sample_rate)
+
+    def write(self, samples: Sequence[float]) -> None:
+        writer = getattr(self._backend, "write", None)
+        if not callable(writer):
+            raise VoiceAudioError("audio backend does not support streamed playback")
+        writer(samples)
+
+    def finish(self, timeout: float = 5.0) -> None:
+        finisher = getattr(self._backend, "finish", None)
+        if callable(finisher):
+            finisher(timeout)
 
     def play(self, samples: Sequence[float], sample_rate: int) -> bool:
         """Play one utterance. Returns True when this utterance is replaced or stopped."""

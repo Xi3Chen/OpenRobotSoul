@@ -3,9 +3,10 @@ from __future__ import annotations
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+import os
 from queue import Empty, Full, Queue
 import re
-from threading import Event, Lock, RLock, Thread
+from threading import Event, Lock, RLock, Thread, Timer
 from time import monotonic
 from typing import Any, Callable
 
@@ -20,6 +21,7 @@ from robotsoul.voice.core import (
 )
 from robotsoul.voice.engine import VoiceEngineError
 from robotsoul.voice.monitor import AudioLevelMonitor
+from robotsoul.voice.reply_speech import ReplySpeechPipeline
 from robotsoul.voice.speech_api import SpeechApiError
 
 
@@ -27,6 +29,84 @@ def _recognition_text(value: Any) -> str:
     if not isinstance(value, str):
         return ""
     return " ".join(value.split())
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return default
+
+
+def _toneless_pinyin(text: str) -> list[str] | None:
+    try:
+        from pypinyin import lazy_pinyin
+    except ImportError:
+        return None
+    return [item.lower() for item in lazy_pinyin(text)]
+
+
+def _is_wake_only(text: str, wake_phrase: str) -> bool:
+    """True when the transcript is the wake word itself (including homophones)."""
+    cleaned = "".join(text.split())
+    wake = "".join(wake_phrase.split())
+    if not cleaned or not wake:
+        return False
+    if cleaned == wake:
+        return True
+    wake_syllables = _toneless_pinyin(wake)
+    text_syllables = _toneless_pinyin(cleaned)
+    if wake_syllables is not None and text_syllables is not None:
+        return text_syllables == wake_syllables
+    # Minimal environment without pypinyin: accept a same-length, same-final
+    # transcription (e.g. 索拉 -> 锁拉) as the wake word.
+    return len(cleaned) == len(wake) and cleaned[-1] == wake[-1]
+
+
+def _shorten_spoken_reply(text: str, success: bool, limit: int) -> str:
+    """Keep spoken replies short: long replies add seconds of TTS latency."""
+    if len(text) <= limit:
+        return text
+    return "好的，已完成。" if success else "抱歉，这个操作没有成功。"
+
+
+def _command_matches(expected: str, text: str) -> bool:
+    """True when two command texts refer to the same utterance (rapid ASR/final)."""
+    left = "".join(expected.split())
+    right = "".join(text.split())
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    shorter, longer = sorted((left, right), key=len)
+    return shorter in longer and len(longer) - len(shorter) <= 3
+
+
+# A transcript that ends with one of these is very likely only the first half of
+# one spoken command ("把…", "然后…"): hold the dispatch briefly so a second VAD
+# segment can be merged instead of running two unrelated runtimes.
+_CONTINUATION_ENDINGS = (
+    "然后", "并且", "而且", "接着", "再", "把", "给", "帮", "请", "跟", "向",
+    "往", "朝", "对", "将", "让", "为", "和", "并", "去", "到",
+)
+# The same words at the start of the next segment also signal a continuation
+# ("……然后，向左转弯").
+_CONTINUATION_STARTERS = (
+    "然后", "并且", "而且", "接着", "再", "就", "再往", "往", "向", "朝", "把",
+)
 
 
 @dataclass(frozen=True)
@@ -55,6 +135,17 @@ def _owned_segment_samples(segments: Any) -> list[float]:
             continue
         samples.extend(float(value) for value in chunk)
     return samples
+
+
+@dataclass
+class _HeldTranscript:
+    """A final that looks like half of one spoken command, waiting for its tail."""
+
+    text: str
+    cleaned: str
+    generation: int
+    deadline: float
+    merges: int = 0
 
 
 @dataclass(frozen=True)
@@ -140,6 +231,29 @@ class VoiceService:
         self._call_pending_at: float | None = None
         self._call_disconnected_at: float | None = None
         self._asr_reset_requested = Event()
+        self._reply_queue: Queue[Callable[[], None]] = Queue(maxsize=8)
+        self._reply_worker: Thread | None = None
+        self._reply_pipeline: ReplySpeechPipeline | None = None
+        self._reply_cache_thread: Thread | None = None
+        self._last_reply_timing: dict[str, Any] | None = None
+        # True while the user is still talking; a fast runtime result is held
+        # back so the reply never talks over the command itself.
+        self._utterance_active = False
+        self._deferred_reply: tuple[str, int, int | None] | None = None
+        self._turn_marks: dict[str, float] = {}
+        self._recent_dispatch_text = ""
+        self._recent_dispatch_until = 0.0
+        self._recent_dispatch_mergeable = False
+        self._held_transcript: _HeldTranscript | None = None
+        self._held_timer: Timer | None = None
+        self._held_lock = Lock()
+        self._utterance_lock = Lock()
+        self._max_spoken_chars = _env_int("ROBOTSOUL_VOICE_MAX_SPOKEN_CHARS", 30)
+        # How long a half-command may wait for its second VAD segment. The
+        # first segment already looked incomplete, so waiting here costs less
+        # than paying a longer silence wait on every utterance.
+        self._merge_grace = _env_float("ROBOTSOUL_VOICE_MERGE_GRACE_SECONDS", 0.8)
+        self._merge_max_merges = _env_int("ROBOTSOUL_VOICE_MERGE_MAX_SEGMENTS", 3)
         if hasattr(self.capture, "set_callback"):
             self.capture.set_callback(self._on_local_audio)
 
@@ -153,6 +267,7 @@ class VoiceService:
             if self.capture.probe():
                 self._load_engine()
                 self._open_local_stream()
+                self._start_reply_cache()
                 self._note("Info", self._capture_status("本地麦克风已打开"))
                 self.arbiter.refresh_local()
                 self._reset_retry()
@@ -165,6 +280,8 @@ class VoiceService:
         self._stop.clear()
         self._worker = Thread(target=self._run, name="voice-recognition", daemon=True)
         self._worker.start()
+        self._reply_worker = Thread(target=self._run_reply_queue, name="voice-reply", daemon=True)
+        self._reply_worker.start()
         state = self.arbiter.state
         if self._error:
             self._note("Error", self._error)
@@ -176,10 +293,22 @@ class VoiceService:
 
     def stop(self, *, wait: bool = True) -> None:
         self._stop.set()
+        # Abort TTS/playback first: the pipeline may be blocked in a speech API
+        # call, and joining the reply thread would otherwise wait for it.
+        if self._reply_pipeline is not None:
+            try:
+                self._reply_pipeline.stop()
+            except Exception:
+                pass
         worker = self._worker
         if wait and worker is not None:
             worker.join(timeout=2)
         self._worker = None
+        self._cancel_held()
+        reply_worker = self._reply_worker
+        if wait and reply_worker is not None:
+            reply_worker.join(timeout=2)
+        self._reply_worker = None
         self._asr_pool.shutdown(wait=wait, cancel_futures=not wait)
         self.runtime_executor.close(wait=wait)
         try:
@@ -193,6 +322,7 @@ class VoiceService:
                 self.engine.close()
                 self._engine_loaded = False
         if self.speaker is not None:
+            self._reply_pipeline = None
             try:
                 self.speaker.close()
             except Exception:
@@ -306,6 +436,13 @@ class VoiceService:
             self._call_audio_sink = sink
 
     def _stop_spoken_output(self) -> None:
+        if self._reply_pipeline is not None:
+            # Abort the producer thread as well: otherwise it keeps synthesizing
+            # the rest of a reply nobody will hear.
+            try:
+                self._reply_pipeline.stop()
+            except Exception:
+                pass
         if self.speaker is not None and hasattr(self.speaker, "stop"):
             try:
                 self.speaker.stop()
@@ -473,6 +610,9 @@ class VoiceService:
         if state == CaptureState.PASSIVE and self.gate.expired(now=now):
             self._note("Info", "等待指令超时，回到唤醒监听")
             self._pre_roll.clear()
+            self._utterance_active = False
+            self._cancel_held()
+            self._flush_deferred_reply()
             self._reset_utterance()
             if self._engine_loaded:
                 self.engine.reset_asr()
@@ -492,8 +632,13 @@ class VoiceService:
             self.gate.wake()
             self._logged_recognition = ""
             self._reset_utterance()
+            self._cancel_held()
+            self._utterance_active = False
+            self._deferred_reply = None
+            self._turn_marks = {}
             with self._state_lock:
                 self._last_wake_at = monotonic()
+            self._turn_mark("wake", self._last_wake_at)
             if self._wake_callback is not None:
                 self._wake_callback(str(wake))
             self._note("Info", f"唤醒：{str(wake).strip()}")
@@ -511,7 +656,8 @@ class VoiceService:
         self._consume_utterance(frame)
 
     def _reset_utterance(self) -> None:
-        self._utterance_samples.clear()
+        with self._utterance_lock:
+            self._utterance_samples.clear()
 
     def _consume_utterance(self, frame: AudioFrame) -> None:
         samples = frame.samples
@@ -522,20 +668,24 @@ class VoiceService:
         transcribe = getattr(self.engine, "transcribe_segments", None)
         if endpoint and callable(transcribe):
             segments = _owned_segments(self.engine.drain_speech_segments())
-            if hasattr(self.engine, "reset_vad"):
-                self.engine.reset_vad()
-            for value in _owned_segment_samples(segments):
-                self._utterance_samples.append(value)
-            if not self._utterance_samples:
+            # Do not reset the VAD here: draining already popped the finished
+            # segment, and a reset would drop the first samples of the next
+            # utterance when B starts in the same frame the endpoint fires.
+            with self._utterance_lock:
+                for value in _owned_segment_samples(segments):
+                    self._utterance_samples.append(value)
+                snapshot = tuple(self._utterance_samples)
+            if not snapshot:
                 return
             self.gate.hold("asr")
             self._announce(self.gate.disengage("speech"))
             self._submit_transcription(
-                [_OwnedSegment(tuple(self._utterance_samples))],
+                [_OwnedSegment(snapshot)],
                 frame.generation,
             )
             return
         if speaking:
+            self._utterance_active = True
             self.gate.engage("speech")
         else:
             self._announce(self.gate.disengage("speech"))
@@ -622,7 +772,13 @@ class VoiceService:
     ) -> bool:
         text = getattr(result, "text", "")
         endpoint = bool(getattr(result, "is_endpoint", False) or force_endpoint)
-        if not endpoint or not isinstance(text, str) or not text.strip():
+        if not endpoint:
+            return False
+        # The user stopped talking (or the turn timed out): a reply that was
+        # deferred while they were still speaking may be spoken now.
+        self._utterance_active = False
+        self._flush_deferred_reply()
+        if not isinstance(text, str) or not text.strip():
             return False
         if reset_endpoint:
             with self._engine_lock:
@@ -638,7 +794,10 @@ class VoiceService:
             (str(getattr(self.engine, "wake_phrase", "")).strip(),) if getattr(self.engine, "wake_phrase", "") else ()
         )
         normalized = cleaned.replace(" ", "")
-        if normalized and any(normalized == phrase.strip().replace(" ", "") for phrase in phrases):
+        if normalized and any(
+            normalized == phrase.strip().replace(" ", "") or _is_wake_only(cleaned, phrase)
+            for phrase in phrases
+        ):
             # Saying only the wake word (then pausing before the command) is not
             # a command; keep the gate open and wait for the follow-up audio.
             self._note("Info", f"忽略仅唤醒词的识别：{cleaned}")
@@ -650,9 +809,138 @@ class VoiceService:
         if expected_generation != self.arbiter.generation:
             self._note("Warning", f"会话已更换，未提交：{cleaned}")
             return False
+        return self._consider_final(text, cleaned, expected_generation)
+
+    # --- split-transcript merge, dispatch and reply pipeline -----------------
+
+    def _consider_final(self, text: str, cleaned: str, generation: int) -> bool:
+        """Dispatch now, merge a split continuation, or briefly hold a half-command."""
+        with self._held_lock:
+            held = self._held_transcript
+        if held is not None and held.generation == generation:
+            merged = self._merge_transcript(held, cleaned)
+            self._cancel_held()
+            if merged is not None:
+                self._turn_mark("merge")
+                self._note("Info", f"合并被拆开的语音片段：{merged}")
+                if (
+                    self._should_hold_dispatch(merged, None)
+                    and held.merges < self._merge_max_merges
+                ):
+                    self._hold_dispatch(merged, merged, generation, merges=held.merges + 2)
+                    return True
+                return self._dispatch_final(merged, merged, generation)
+        merged_after_dispatch = self._continuation_of_dispatch(cleaned)
+        if merged_after_dispatch is not None:
+            self._turn_mark("merge_after_dispatch")
+            self._note("Info", f"续接上一句识别并重新提交：{merged_after_dispatch}")
+            return self._dispatch_final(merged_after_dispatch, merged_after_dispatch, generation)
+        if self._recent_dispatch_matches(cleaned):
+            self._recent_dispatch_text = ""
+            self._note("Info", f"同一条指令已提前执行，跳过重复识别：{cleaned}")
+            return False
+        intent = self._command_matcher(cleaned) if self._command_matcher is not None else None
+        if self._should_hold_dispatch(cleaned, intent):
+            self._hold_dispatch(text, cleaned, generation)
+            return True
+        return self._dispatch_final(text, cleaned, generation)
+
+    def _should_hold_dispatch(self, cleaned: str, intent: Any) -> bool:
+        """True for a transcript that looks like only the first half of a command.
+
+        A complete closed-set command is always dispatched immediately: it is
+        already actionable and waiting would only add latency. A transcript
+        with a dangling continuation word or clause punctuation waits briefly
+        for one more VAD segment instead of running two unrelated runtimes when
+        a natural pause split the sentence.
+        """
+        if intent is not None:
+            return False
+        text = cleaned.strip()
+        if not text:
+            return False
+        if text.endswith(_CONTINUATION_ENDINGS):
+            return True
+        return text[-1] in "，,、：:"
+
+    def _merge_transcript(self, held: _HeldTranscript, cleaned: str) -> str | None:
+        """Join a held fragment with a following one, when they are one sentence."""
+        left = held.cleaned
+        right = cleaned.strip()
+        if not left or not right:
+            return None
+        separator = "" if (left.endswith("，,、：:") or right.startswith(_CONTINUATION_STARTERS)) else "，"
+        return (left.rstrip("，,、：: ") + separator + right).strip()
+
+    def _continuation_of_dispatch(self, cleaned: str) -> str | None:
+        """A later final that continues a recently dispatched open-ended command.
+
+        The VAD can split one sentence into A and B even after A was already
+        dispatched. Rather than executing A and B twice, the runtime task is
+        superseded by the joined text; a closed-set command (already executed on
+        its own) is never merged with a later transcript.
+        """
+        previous = self._recent_dispatch_text
+        if not previous or not self._recent_dispatch_mergeable:
+            return None
+        if monotonic() >= self._recent_dispatch_until:
+            return None
+        right = cleaned.strip()
+        if not right or right == previous:
+            return None
+        if right.startswith(previous):
+            # The ASR already re-transcribed the accumulated PCM (A+B).
+            return right
+        return (previous.rstrip("，,、：: ") + "，" + right).strip()
+
+    def _hold_dispatch(self, text: str, cleaned: str, generation: int, *, merges: int = 1) -> None:
+        self._cancel_held()
+        held = _HeldTranscript(
+            text=text,
+            cleaned=cleaned,
+            generation=generation,
+            deadline=monotonic() + self._merge_grace,
+            merges=merges,
+        )
+        timer = Timer(self._merge_grace, self._flush_held, args=(held,))
+        timer.daemon = True
+        with self._held_lock:
+            self._held_transcript = held
+            self._held_timer = timer
+        self._turn_mark("hold")
+        self._note("Info", f"疑似未说完，短暂等待后续语音：{cleaned}")
+        timer.start()
+
+    def _flush_held(self, held: _HeldTranscript) -> None:
+        with self._held_lock:
+            if self._held_transcript is not held:
+                return
+            self._held_transcript = None
+            self._held_timer = None
+        if self._stop.is_set() or held.generation != self.arbiter.generation:
+            return
+        self._turn_mark("hold_flush")
+        self._note("Info", f"等待超时，按原识别提交：{held.cleaned}")
+        try:
+            self._dispatch_final(held.text, held.cleaned, held.generation)
+        except Exception as exc:
+            self._fail(exc)
+
+    def _cancel_held(self) -> None:
+        with self._held_lock:
+            timer, self._held_timer = self._held_timer, None
+            self._held_transcript = None
+        if timer is not None:
+            timer.cancel()
+
+    def _dispatch_final(self, text: str, cleaned: str, generation: int) -> bool:
+        if self._stop.is_set():
+            return False
         intent = self._command_matcher(cleaned) if self._command_matcher is not None else None
         if intent is not None:
             self._note("Info", f"闭集技能：{getattr(intent, 'skill', '')}")
+        self._turn_mark("dispatch")
+        self._remember_dispatch(cleaned, mergeable=intent is None)
         self.gate.hold("runtime")
         self._stop_spoken_output()
         self.runtime_executor.supersede()
@@ -665,11 +953,113 @@ class VoiceService:
             raise
         epoch = getattr(future, "voice_epoch", None)
         future.add_done_callback(
-            lambda completed, generation=expected_generation, epoch=epoch: self._handle_runtime_result(
+            lambda completed, generation=generation, epoch=epoch: self._enqueue_reply(
                 completed, generation, epoch
             )
         )
         return True
+
+    def _enqueue_reply(self, future: Future[Any], generation: int, epoch: int | None = None) -> None:
+        """Handle a runtime result on the dedicated reply thread.
+
+        The recognition worker holds ``_engine_lock`` while processing one audio
+        frame, and a completed runtime future can invoke its callback in that
+        same thread. Speaking there would deadlock against synthesis, so the
+        reply is always produced by the reply thread.
+        """
+        action = lambda: self._handle_runtime_result(future, generation, epoch)
+        try:
+            self._reply_queue.put_nowait(action)
+        except Full:
+            self._note("Warning", "回复队列已满，丢弃一条过期播报")
+
+    def _run_reply_queue(self) -> None:
+        while not self._stop.is_set():
+            try:
+                action = self._reply_queue.get(timeout=0.2)
+            except Empty:
+                continue
+            try:
+                action()
+            except Exception as exc:  # noqa: BLE001 - reply thread must stay alive
+                self._fail(exc)
+            finally:
+                self._reply_queue.task_done()
+
+    def _flush_deferred_reply(self) -> None:
+        deferred, self._deferred_reply = self._deferred_reply, None
+        if deferred is None:
+            return
+        response, generation, epoch = deferred
+        action = lambda: self._speak_reply_guarded(response, generation, epoch)
+        try:
+            self._reply_queue.put_nowait(action)
+        except Full:
+            pass
+
+    def _speak_reply_guarded(self, response: str, generation: int, epoch: int | None = None) -> None:
+        try:
+            self._speak_reply(response, generation, epoch)
+        except Exception as exc:  # noqa: BLE001 - reply thread must stay alive
+            self._release_turn("playback")
+            self._fail(exc)
+
+    def _reply_pipeline_instance(self) -> ReplySpeechPipeline:
+        pipeline = self._reply_pipeline
+        if pipeline is None:
+            # The speech API does not need the engine lock; taking it here would
+            # block the VAD/ASR frame loop for the whole TTS round trip.
+            pipeline = ReplySpeechPipeline(self.engine, self.speaker, logger=self._note)
+            self._reply_pipeline = pipeline
+        return pipeline
+
+    def _start_reply_cache(self) -> None:
+        """Warm the fixed acknowledgement PCM in the background after model load."""
+        if self.speaker is None:
+            return
+        pipeline = self._reply_pipeline_instance()
+
+        def warm() -> None:
+            try:
+                pipeline.prepare_cache()
+            except Exception as exc:  # noqa: BLE001 - cache is an optimisation only
+                self._note("Warning", f"回复语音缓存预热失败：{type(exc).__name__}: {exc}")
+
+        thread = Thread(target=warm, name="tts-cache", daemon=True)
+        self._reply_cache_thread = thread
+        thread.start()
+
+    @property
+    def reply_cache_size(self) -> int:
+        pipeline = self._reply_pipeline
+        return pipeline.cache_size if pipeline is not None else 0
+
+    @property
+    def last_reply_timing(self) -> dict[str, Any] | None:
+        return None if self._last_reply_timing is None else dict(self._last_reply_timing)
+
+    def _recent_dispatch_matches(self, text: str) -> bool:
+        return bool(self._recent_dispatch_text) and monotonic() < self._recent_dispatch_until \
+            and _command_matches(self._recent_dispatch_text, text)
+
+    def _remember_dispatch(self, text: str, *, mergeable: bool = False) -> None:
+        self._recent_dispatch_text = text.strip()
+        self._recent_dispatch_until = monotonic() + max(2.0, self._merge_grace * 2.0)
+        self._recent_dispatch_mergeable = mergeable
+
+    def _turn_mark(self, stage: str, at: float | None = None) -> None:
+        with self._state_lock:
+            self._turn_marks[stage] = monotonic() if at is None else at
+
+    @property
+    def last_turn_timings(self) -> dict[str, float]:
+        """Per-stage latency in ms relative to the wake event (diagnostics)."""
+        with self._state_lock:
+            marks = dict(self._turn_marks)
+            wake = self._last_wake_at
+        if not marks or wake is None:
+            return {}
+        return {stage: round((at - wake) * 1000.0, 1) for stage, at in marks.items()}
 
     def _handle_runtime_result(self, future: Future[Any], generation: int, epoch: int | None = None) -> None:
         if epoch is None:
@@ -700,52 +1090,106 @@ class VoiceService:
                 success = False
                 self._note("Info", f"运行时返回 id={task_id} 状态={status} 结论={response}")
             response = self._spoken_reply(response, success=success)
+            # Long replies cost seconds of TTS before the first audio; a short
+            # acknowledgement keeps the turn responsive.
+            response = _shorten_spoken_reply(response, success, self._max_spoken_chars)
+            self._turn_mark("runtime_done")
             self.gate.hold("playback")
             self._release_turn("runtime")
-            try:
-                audio = self.engine.synthesize(response)
-            except (SpeechApiError, VoiceEngineError) as exc:
-                self._note("Warning", f"合成接口失败：{exc}")
-                self._release_turn("playback")
-                if not self._turn_replaced(epoch):
-                    self._finish_reply()
+            if self._utterance_active:
+                # A speculative command can finish before the user stops
+                # talking; wait for the ASR endpoint so TTS never talks over
+                # the command itself.
+                self._deferred_reply = (response, generation, epoch)
+                self._turn_mark("reply_deferred")
+                self._note("Info", "指令已执行，等用户说完再播报")
                 return
-            if generation != self.arbiter.generation or self._turn_replaced(epoch):
-                self._release_turn("playback")
-                self._note("Warning", f"合成完成但会话已更换，未播放 id={task_id}")
-                return
-            samples = getattr(audio, "samples", audio)
-            sample_rate = int(getattr(audio, "sample_rate", self.sample_rate))
-            self._push_level("output", samples, sample_rate)
-            with self._state_lock:
-                call_sink = self._call_audio_sink
-            cancelled = False
-            if self.arbiter.state in {CaptureState.CALL, CaptureState.CALL_RECONNECTING}:
-                if call_sink is not None:
-                    call_sink(samples, sample_rate)
-            elif self.speaker is not None:
-                cancelled = self.speaker.play(samples, sample_rate) is True
-                # A replaced utterance must not clear the microphone after the
-                # next sentence has already started playing.
-                if not cancelled:
-                    # Without acoustic echo cancellation the microphone hears the
-                    # reply that was just played. Drop that buffered audio only
-                    # after this utterance finishes; a replaced utterance must
-                    # leave the next sentence's playback alone.
-                    self._clear_audio()
-                    with self._engine_lock:
-                        self.engine.reset_asr()
-                        if hasattr(self.engine, "reset_vad"):
-                            self.engine.reset_vad()
-            if cancelled:
-                self._note("Info", "上一句播报已打断")
-            self._release_turn("playback")
-            if not self._turn_replaced(epoch):
-                self._finish_reply()
+            self._speak_reply(response, generation, epoch)
         except Exception as exc:
             self._release_turn("runtime")
             self._release_turn("playback")
             self._fail(exc)
+
+    def _speak_reply(self, response: str, generation: int, epoch: int | None = None) -> None:
+        """Synthesize and play one reply, using the low-latency unit pipeline."""
+        # A newer reply replaces whatever is still playing; the reply queue is
+        # serial, but a direct caller (or a cancelled turn) can race here.
+        self._stop_spoken_output()
+        if generation != self.arbiter.generation or self._turn_replaced(epoch):
+            self._release_turn("playback")
+            self._note("Warning", "合成完成但会话已更换，未播放")
+            return
+        call_mode = self.arbiter.state in {CaptureState.CALL, CaptureState.CALL_RECONNECTING}
+        with self._state_lock:
+            call_sink = self._call_audio_sink
+        if call_mode or self.speaker is None:
+            self._speak_reply_whole(response, generation, epoch, call_sink if call_mode else None)
+            return
+        pipeline = self._reply_pipeline_instance()
+        try:
+            timing = pipeline.speak(
+                response,
+                on_first_audio=lambda: self._turn_mark("first_audio"),
+                on_chunk=lambda chunk, rate: self._push_level("output", chunk, rate),
+            )
+        except (SpeechApiError, VoiceEngineError) as exc:
+            self._note("Warning", f"合成接口失败：{exc}")
+            self._release_turn("playback")
+            if not self._turn_replaced(epoch):
+                self._finish_reply()
+            return
+        self._last_reply_timing = timing.as_dict()
+        self._turn_mark("reply_done")
+        if timing.aborted:
+            self._note("Info", "上一句播报已打断")
+        else:
+            # Without acoustic echo cancellation the microphone hears the reply
+            # that was just played. Drop that audio only after this utterance
+            # finishes; a replaced utterance must leave the next sentence alone.
+            self._clear_audio()
+            with self._engine_lock:
+                self.engine.reset_asr()
+                if hasattr(self.engine, "reset_vad"):
+                    self.engine.reset_vad()
+            self._turn_mark("clear_audio")
+        self._release_turn("playback")
+        if not self._turn_replaced(epoch):
+            self._finish_reply()
+
+    def _speak_reply_whole(self, response: str, generation: int, epoch: int | None,
+                           call_sink: Callable[[Any, int], None] | None) -> None:
+        """Non-local or call path: one synthesis, then play the whole reply."""
+        try:
+            audio = self.engine.synthesize(response)
+        except (SpeechApiError, VoiceEngineError) as exc:
+            self._note("Warning", f"合成接口失败：{exc}")
+            self._release_turn("playback")
+            if not self._turn_replaced(epoch):
+                self._finish_reply()
+            return
+        if generation != self.arbiter.generation or self._turn_replaced(epoch):
+            self._release_turn("playback")
+            self._note("Warning", f"合成完成但会话已更换，未播放")
+            return
+        samples = getattr(audio, "samples", audio)
+        sample_rate = int(getattr(audio, "sample_rate", self.sample_rate))
+        self._push_level("output", samples, sample_rate)
+        cancelled = False
+        if call_sink is not None:
+            call_sink(samples, sample_rate)
+        elif self.speaker is not None:
+            cancelled = self.speaker.play(samples, sample_rate) is True
+            if not cancelled:
+                self._clear_audio()
+                with self._engine_lock:
+                    self.engine.reset_asr()
+                    if hasattr(self.engine, "reset_vad"):
+                        self.engine.reset_vad()
+        if cancelled:
+            self._note("Info", "上一句播报已打断")
+        self._release_turn("playback")
+        if not self._turn_replaced(epoch):
+            self._finish_reply()
 
     def _turn_replaced(self, epoch: int | None) -> bool:
         return epoch is not None and epoch != self.runtime_executor.epoch
@@ -817,6 +1261,9 @@ class VoiceService:
         with self._state_lock:
             self._error = f"{type(error).__name__}: {error}"
         self._note("Error", self._error or "语音服务失败")
+        self._cancel_held()
+        self._deferred_reply = None
+        self._utterance_active = False
         self._clear_audio()
         try:
             self.arbiter.sleep()

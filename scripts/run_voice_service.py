@@ -184,8 +184,11 @@ def main(argv: list[str] | None = None) -> int:
         events["transcript"] = {"text": str(text), "at": _now_iso()}
         print(f"transcript: {text}", flush=True)
 
-    def run_text_logged(text: str):
-        result = runtime.run_text(text)
+    def run_text_logged(text: str, task_id=None, intent=None):
+        # Mirror the default factory path: the voice executor passes a task_id
+        # (needed by runtime.preempt_task to cancel a replaced utterance) and a
+        # closed-set intent (so those commands skip the LLM planner).
+        result = runtime.run_text(text, task_id=task_id, _intent=intent)
         task = getattr(result, "task", None)
         evaluation = getattr(result, "evaluation", None)
         events["last_result"] = {
