@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from queue import Empty, Full, Queue
 import re
@@ -18,13 +18,33 @@ from robotsoul.voice.core import (
     ConversationGate,
     RuntimeTextExecutor,
 )
+from robotsoul.voice.engine import VoiceEngineError
 from robotsoul.voice.monitor import AudioLevelMonitor
+from robotsoul.voice.speech_api import SpeechApiError
 
 
 def _recognition_text(value: Any) -> str:
     if not isinstance(value, str):
         return ""
     return " ".join(value.split())
+
+
+@dataclass(frozen=True)
+class _OwnedSegment:
+    """PCM copied off the VAD before ``reset`` reuses its buffers."""
+
+    samples: tuple[float, ...]
+
+
+def _owned_segments(segments: Any) -> list[Any]:
+    owned: list[Any] = []
+    for segment in segments or ():
+        samples = getattr(segment, "samples", None)
+        if samples is None:
+            owned.append(segment)
+            continue
+        owned.append(_OwnedSegment(tuple(float(value) for value in samples)))
+    return owned
 
 
 @dataclass(frozen=True)
@@ -53,11 +73,13 @@ class VoiceService:
         follow_up_seconds: float = 8,
         session_max_seconds: float = 120,
         frame_queue_size: int = 20,
-        pre_roll_frames: int = 8,
+        pre_roll_frames: int = 20,
         idle_probe_seconds: float = 2,
         call_reconnect_grace_seconds: float = 15,
         wake_callback: Callable[[str], None] | None = None,
         transcript_callback: Callable[[str], None] | None = None,
+        command_matcher: Callable[[str], Any] | None = None,
+        cancel_task: Callable[[str], Any] | None = None,
     ) -> None:
         self.capture = capture
         self.engine = engine
@@ -69,8 +91,16 @@ class VoiceService:
             follow_up_seconds=follow_up_seconds,
             session_max_seconds=session_max_seconds,
         )
-        self.runtime_executor = RuntimeTextExecutor(run_text, max_pending=4)
+        self.runtime_executor = RuntimeTextExecutor(run_text, max_pending=4, cancel_task=cancel_task)
+        self._command_matcher = command_matcher
+        self._asr_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="voice-asr")
+        self._asr_lock = Lock()
+        self._asr_token = 0
         self._frames: Queue[AudioFrame] = Queue(maxsize=frame_queue_size)
+        # Capture blocks are 100 ms, so 20 frames keep about 2 s. The keyword
+        # spotter reports the wake phrase only after its chunk delay, which is
+        # already inside the following command. This window has to hold the
+        # wake phrase itself, or that audio never reaches VAD.
         self._pre_roll: deque[AudioFrame] = deque(maxlen=pre_roll_frames)
         self._idle_probe_seconds = idle_probe_seconds
         self._call_reconnect_grace_seconds = call_reconnect_grace_seconds
@@ -137,6 +167,7 @@ class VoiceService:
         if wait and worker is not None:
             worker.join(timeout=2)
         self._worker = None
+        self._asr_pool.shutdown(wait=wait, cancel_futures=not wait)
         self.runtime_executor.close(wait=wait)
         try:
             self.arbiter.sleep()
@@ -260,6 +291,21 @@ class VoiceService:
     def set_call_audio_sink(self, sink: Callable[[Any, int], None] | None) -> None:
         with self._state_lock:
             self._call_audio_sink = sink
+
+    def _stop_spoken_output(self) -> None:
+        if self.speaker is not None and hasattr(self.speaker, "stop"):
+            try:
+                self.speaker.stop()
+            except Exception:
+                pass
+        with self._state_lock:
+            sink = self._call_audio_sink
+        clear = getattr(sink, "clear", None)
+        if callable(clear):
+            try:
+                clear()
+            except Exception:
+                pass
 
     def health(self) -> VoiceHealth:
         with self._state_lock:
@@ -436,23 +482,38 @@ class VoiceService:
             if self._wake_callback is not None:
                 self._wake_callback(str(wake))
             self._note("Info", f"唤醒：{str(wake).strip()}")
+            if hasattr(self.engine, "reset_vad"):
+                self.engine.reset_vad()
+            # The spotter fires after the wake phrase has already been spoken.
+            # Replay that audio into VAD; accept_asr does not keep samples.
             pre_roll = tuple(self._pre_roll)
             self._pre_roll.clear()
             for buffered in pre_roll:
-                buffered_samples = buffered.samples
-                if buffered.sample_rate != self.sample_rate:
-                    buffered_samples = self._resample(buffered_samples, buffered.sample_rate, self.sample_rate)
-                result = self.engine.accept_asr(buffered_samples, self.sample_rate)
-                self._observe_recognition(result)
-                self._handle_asr_result(result, generation=frame.generation)
+                self._consume_utterance(buffered)
             return
         if state not in {CaptureState.CALL, CaptureState.CALL_RECONNECTING} and not self.gate.active:
             return
+        self._consume_utterance(frame)
+
+    def _consume_utterance(self, frame: AudioFrame) -> None:
+        samples = frame.samples
         if frame.sample_rate != self.sample_rate:
             samples = self._resample(samples, frame.sample_rate, self.sample_rate)
         endpoint = self.engine.accept_vad(samples)
-        if callable(getattr(self.engine, "speech_detected", None)) and self.engine.speech_detected():
-            self.gate.note_command_audio()
+        speaking = callable(getattr(self.engine, "speech_detected", None)) and bool(self.engine.speech_detected())
+        transcribe = getattr(self.engine, "transcribe_segments", None)
+        if endpoint and callable(transcribe):
+            segments = _owned_segments(self.engine.drain_speech_segments())
+            if hasattr(self.engine, "reset_vad"):
+                self.engine.reset_vad()
+            self.gate.hold("asr")
+            self._announce(self.gate.disengage("speech"))
+            self._submit_transcription(segments, frame.generation)
+            return
+        if speaking:
+            self.gate.engage("speech")
+        else:
+            self._announce(self.gate.disengage("speech"))
         result = self.engine.accept_asr(samples, self.sample_rate)
         self._observe_recognition(result)
         if endpoint or (result is not None and result.is_endpoint):
@@ -481,50 +542,110 @@ class VoiceService:
             converted.append(samples[left] * (1.0 - fraction) + samples[right] * fraction)
         return tuple(converted)
 
+    def _submit_transcription(self, segments: Any, generation: int) -> None:
+        with self._asr_lock:
+            self._asr_token += 1
+            token = self._asr_token
+        self._asr_pool.submit(self._recognize, segments, generation, token)
+
+    def _current_asr_token(self) -> int:
+        with self._asr_lock:
+            return self._asr_token
+
+    def _recognize(self, segments: Any, generation: int, token: int) -> None:
+        fresh: str | None = None
+        try:
+            if self._stop.is_set() or token != self._current_asr_token():
+                return
+            try:
+                result = self.engine.transcribe_segments(segments)
+            except Exception as exc:
+                if token == self._current_asr_token():
+                    self._note("Warning", f"识别接口失败：{exc}")
+                    fresh = self.gate.mode
+                return
+            if self._stop.is_set() or token != self._current_asr_token() or generation != self.arbiter.generation:
+                return
+            submitted = self._handle_asr_result(result, force_endpoint=True, generation=generation, reset_endpoint=False)
+            if not submitted and token == self._current_asr_token():
+                fresh = self.gate.mode
+        finally:
+            latest = token == self._current_asr_token()
+            kind = self.gate.release("asr", fresh=fresh if latest else None)
+            if latest:
+                self._announce(kind)
+
     def _handle_asr_result(
         self,
         result: Any,
         *,
         force_endpoint: bool = False,
         generation: int | None = None,
-    ) -> None:
+        reset_endpoint: bool = True,
+    ) -> bool:
         text = getattr(result, "text", "")
         endpoint = bool(getattr(result, "is_endpoint", False) or force_endpoint)
         if not endpoint or not isinstance(text, str) or not text.strip():
-            return
-        with self._engine_lock:
-            self.engine.reset_asr()
-            if hasattr(self.engine, "reset_vad"):
-                self.engine.reset_vad()
+            return False
+        if reset_endpoint:
+            with self._engine_lock:
+                self.engine.reset_asr()
+                if hasattr(self.engine, "reset_vad"):
+                    self.engine.reset_vad()
         with self._state_lock:
             self._last_transcript_at = monotonic()
         if self._transcript_callback is not None:
             self._transcript_callback(text)
         cleaned = _recognition_text(text)
-        wake_phrase = str(getattr(self.engine, "wake_phrase", "")).strip().replace(" ", "")
-        if wake_phrase and cleaned.replace(" ", "") == wake_phrase:
+        phrases = getattr(self.engine, "wake_phrases", None) or (
+            (str(getattr(self.engine, "wake_phrase", "")).strip(),) if getattr(self.engine, "wake_phrase", "") else ()
+        )
+        normalized = cleaned.replace(" ", "")
+        if normalized and any(normalized == phrase.strip().replace(" ", "") for phrase in phrases):
             # Saying only the wake word (then pausing before the command) is not
             # a command; keep the gate open and wait for the follow-up audio.
             self._note("Info", f"忽略仅唤醒词的识别：{cleaned}")
-            return
+            return False
         self._note("Info", f"识别：{cleaned}（{self._audio_source_label()}）")
         self._logged_recognition = ""
         expected_generation = self.arbiter.generation if generation is None else generation
         if expected_generation != self.arbiter.generation:
             self._note("Warning", f"会话已更换，未提交：{cleaned}")
-            return
+            return False
+        intent = self._command_matcher(cleaned) if self._command_matcher is not None else None
+        if intent is not None:
+            self._note("Info", f"闭集技能：{getattr(intent, 'skill', '')}")
+        self.gate.hold("runtime")
+        self._stop_spoken_output()
+        self.runtime_executor.supersede()
         self._note("Info", f"提交运行时：{cleaned}")
-        future = self.runtime_executor.submit_final(text)
-        future.add_done_callback(lambda completed: self._handle_runtime_result(completed, expected_generation))
-
-    def _handle_runtime_result(self, future: Future[Any], generation: int) -> None:
         try:
+            future = self.runtime_executor.submit_final(text, intent=intent)
+        except Exception:
+            self._release_turn("runtime")
+            raise
+        epoch = getattr(future, "voice_epoch", None)
+        future.add_done_callback(
+            lambda completed, generation=expected_generation, epoch=epoch: self._handle_runtime_result(
+                completed, generation, epoch
+            )
+        )
+        return True
+
+    def _handle_runtime_result(self, future: Future[Any], generation: int, epoch: int | None = None) -> None:
+        if epoch is None:
+            epoch = getattr(future, "voice_epoch", None)
+        try:
+            if future.cancelled() or self._turn_replaced(epoch):
+                self._release_turn("runtime")
+                return
             result = future.result()
             task = getattr(result, "task", None)
             task_id = getattr(task, "task_id", "")
             status = getattr(getattr(task, "status", None), "value", None) or getattr(task, "status", "") or "unknown"
             evaluation = getattr(result, "evaluation", None)
-            if generation != self.arbiter.generation:
+            if generation != self.arbiter.generation or self._turn_replaced(epoch):
+                self._release_turn("runtime")
                 self._note("Warning", f"运行时结果已过期，未播报 id={task_id} 状态={status}")
                 return
             if evaluation is not None and evaluation.success:
@@ -540,9 +661,18 @@ class VoiceService:
                 success = False
                 self._note("Info", f"运行时返回 id={task_id} 状态={status} 结论={response}")
             response = self._spoken_reply(response, success=success)
-            with self._engine_lock:
+            self.gate.hold("playback")
+            self._release_turn("runtime")
+            try:
                 audio = self.engine.synthesize(response)
-            if generation != self.arbiter.generation:
+            except (SpeechApiError, VoiceEngineError) as exc:
+                self._note("Warning", f"合成接口失败：{exc}")
+                self._release_turn("playback")
+                if not self._turn_replaced(epoch):
+                    self._finish_reply()
+                return
+            if generation != self.arbiter.generation or self._turn_replaced(epoch):
+                self._release_turn("playback")
                 self._note("Warning", f"合成完成但会话已更换，未播放 id={task_id}")
                 return
             samples = getattr(audio, "samples", audio)
@@ -550,34 +680,55 @@ class VoiceService:
             self._push_level("output", samples, sample_rate)
             with self._state_lock:
                 call_sink = self._call_audio_sink
+            cancelled = False
             if self.arbiter.state in {CaptureState.CALL, CaptureState.CALL_RECONNECTING}:
                 if call_sink is not None:
                     call_sink(samples, sample_rate)
             elif self.speaker is not None:
-                self.speaker.play(samples, sample_rate)
-                # Without acoustic echo cancellation the microphone hears the
-                # reply that was just played and would transcribe it as a new
-                # command during the follow-up window. Drop the audio captured
-                # while the speaker was busy and reset the recognizer/VAD state.
-                self._clear_audio()
-                with self._engine_lock:
-                    self.engine.reset_asr()
-                    if hasattr(self.engine, "reset_vad"):
-                        self.engine.reset_vad()
-            self.gate.reply_finished()
-            self._note("Info", "回复结束，等待后续指令")
+                cancelled = self.speaker.play(samples, sample_rate) is True
+                # A replaced utterance must not clear the microphone after the
+                # next sentence has already started playing.
+                if not cancelled:
+                    # Without acoustic echo cancellation the microphone hears the
+                    # reply that was just played. Drop that buffered audio only
+                    # after this utterance finishes; a replaced utterance must
+                    # leave the next sentence's playback alone.
+                    self._clear_audio()
+                    with self._engine_lock:
+                        self.engine.reset_asr()
+                        if hasattr(self.engine, "reset_vad"):
+                            self.engine.reset_vad()
+            if cancelled:
+                self._note("Info", "上一句播报已打断")
+            self._release_turn("playback")
+            if not self._turn_replaced(epoch):
+                self._finish_reply()
         except Exception as exc:
+            self._release_turn("runtime")
+            self._release_turn("playback")
             self._fail(exc)
+
+    def _turn_replaced(self, epoch: int | None) -> bool:
+        return epoch is not None and epoch != self.runtime_executor.epoch
+
+    def _finish_reply(self) -> None:
+        if self.gate.reply_finished():
+            self._note("Info", "回复结束，等待后续指令")
+
+    def _release_turn(self, reason: str, *, fresh: str | None = None) -> None:
+        self._announce(self.gate.release(reason, fresh=fresh))
+
+    def _announce(self, kind: str) -> None:
+        if kind == "follow_up":
+            self._note("Info", "回复结束，等待后续指令")
 
     _CJK = re.compile(r"[\u4e00-\u9fff]")
 
     def _spoken_reply(self, text: Any, *, success: bool) -> str:
-        """Keep spoken output in Chinese: the bundled TTS voice is Chinese-only.
+        """Keep spoken output in Chinese.
 
-        Runtime and adapter messages are English (for logs and the dashboard),
-        so an English conclusion synthesized through the Xiao-Ya model drops
-        every word as out-of-vocabulary. Speak a short Chinese acknowledgement
-        instead of mixed-language noise.
+        Runtime and adapter messages are English (for logs and the dashboard).
+        Speak a short Chinese acknowledgement instead of mixed-language replies.
         """
         if isinstance(text, str) and self._CJK.search(text):
             return text

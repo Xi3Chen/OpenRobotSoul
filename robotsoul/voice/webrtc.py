@@ -22,6 +22,20 @@ class _Call:
         self.disconnect_task: asyncio.Task[Any] | None = None
 
 
+class _CallAudioSink:
+    """PCM callback for one browser call. clear() drops audio already queued to play."""
+
+    def __init__(self, bridge: AiortcCallMedia, call_id: str):
+        self._bridge = bridge
+        self._call_id = call_id
+
+    def __call__(self, samples: Any, sample_rate: int) -> None:
+        self._bridge._push(self._call_id, samples, sample_rate)
+
+    def clear(self) -> None:
+        self._bridge._clear_outgoing(self._call_id)
+
+
 class AiortcCallMedia:
     """Terminates one authenticated browser call and routes PCM to VoiceService."""
 
@@ -77,16 +91,31 @@ class AiortcCallMedia:
                 self._queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=2000)
                 self._timestamp = 0
                 self._closed = False
+                self._generation = 0
+
+            def clear(self) -> None:
+                self._generation += 1
+                self._drop_queued()
+
+            def _drop_queued(self) -> None:
+                while not self._queue.empty():
+                    try:
+                        self._queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
 
             async def feed(self, samples: Any, sample_rate: int) -> None:
                 if self._closed:
                     return
+                self._generation += 1
+                generation = self._generation
+                self._drop_queued()
                 frames = await asyncio.to_thread(self._encode_audio, samples, sample_rate, self._timestamp)
-                if not frames:
+                if not frames or self._closed or generation != self._generation:
                     return
                 self._timestamp = frames[-1].pts + 960
                 for frame in frames:
-                    if self._closed:
+                    if self._closed or generation != self._generation:
                         return
                     await self._queue.put(frame)
 
@@ -130,11 +159,8 @@ class AiortcCallMedia:
 
             def close(self) -> None:
                 self._closed = True
-                while not self._queue.empty():
-                    try:
-                        self._queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
+                self._generation += 1
+                self._drop_queued()
                 super().stop()
 
         return TtsTrack
@@ -185,7 +211,7 @@ class AiortcCallMedia:
             await peer.setLocalDescription(await peer.createAnswer())
             with self._lock:
                 self._calls[call_id] = call
-            self.voice_service.set_call_audio_sink(lambda samples, rate: self._push(call_id, samples, rate))
+            self.voice_service.set_call_audio_sink(_CallAudioSink(self, call_id))
             description = peer.localDescription
             return {"sdp": description.sdp, "type": description.type}
         except Exception:
@@ -252,6 +278,23 @@ class AiortcCallMedia:
             self._loop.call_soon_threadsafe(self._start_feed, call, samples, sample_rate)
         except RuntimeError:
             return
+
+    def _clear_outgoing(self, call_id: str) -> None:
+        if self._loop is None:
+            return
+        try:
+            self._loop.call_soon_threadsafe(self._clear_outgoing_now, call_id)
+        except RuntimeError:
+            return
+
+    def _clear_outgoing_now(self, call_id: str) -> None:
+        with self._lock:
+            call = self._calls.get(call_id)
+        if call is None:
+            return
+        clear = getattr(call.track, "clear", None)
+        if callable(clear):
+            clear()
 
     @staticmethod
     def _start_feed(call: _Call, samples: Any, sample_rate: int) -> None:

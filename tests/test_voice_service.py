@@ -188,6 +188,44 @@ class VoiceServiceTests(unittest.TestCase):
         finally:
             service.stop()
 
+    def test_wake_preroll_reaches_vad_before_later_audio(self):
+        class Engine(FakeEngine):
+            def __init__(self):
+                super().__init__()
+                self.vad_audio = []
+                self._seen = 0
+
+            def accept_wake(self, _samples, _sample_rate):
+                self._seen += 1
+                return "索拉" if self._seen == 3 else None
+
+            def accept_vad(self, samples):
+                self.vad_audio.append(samples)
+                return False
+
+            def accept_asr(self, _samples, _sample_rate):
+                return AsrResult("", False)
+
+        capture = FakeCapture(available=True)
+        engine = Engine()
+        service = VoiceService(
+            capture=capture,
+            engine=engine,
+            run_text=lambda text: text,
+            idle_probe_seconds=100,
+        )
+        try:
+            self.assertEqual(service.start(), CaptureState.PASSIVE)
+            capture.callback((0.1,), 16000)
+            capture.callback((0.2,), 16000)
+            capture.callback((0.3,), 16000)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and engine.vad_audio != [(0.1,), (0.2,), (0.3,)]:
+                time.sleep(0.01)
+            self.assertEqual(engine.vad_audio, [(0.1,), (0.2,), (0.3,)])
+        finally:
+            service.stop()
+
     def test_partial_recognition_is_recorded_before_endpoint(self):
         capture = FakeCapture(available=True)
         engine = FakeEngine()
@@ -355,6 +393,229 @@ class VoiceServiceTests(unittest.TestCase):
         finally:
             service.stop()
 
+    def test_replaced_playback_does_not_clear_the_next_sentence(self):
+        from concurrent.futures import Future
+
+        from robotsoul.voice.audio import InterruptibleOutput
+
+        class Backend:
+            def __init__(self):
+                self.started = threading.Event()
+                self.count = 0
+
+            def play(self, _samples, _rate, cancel=None):
+                self.count += 1
+                if self.count == 1:
+                    self.started.set()
+                    while cancel is not None and not cancel.is_set():
+                        time.sleep(0.005)
+
+            def stop(self):
+                return
+
+        class Task:
+            task_id = "task-1"
+            error = None
+
+            class status:
+                value = "succeeded"
+
+        class Result:
+            def __init__(self, text):
+                self.task = Task()
+                self.evaluation = type("Evaluation", (), {"success": True, "conclusion": text})()
+
+        capture = FakeCapture(available=False)
+        engine = FakeEngine()
+        backend = Backend()
+        clears = []
+        service = VoiceService(
+            capture=capture,
+            engine=engine,
+            run_text=lambda text: text,
+            speaker=InterruptibleOutput(backend),
+            idle_probe_seconds=100,
+        )
+        service._clear_audio = lambda **_kwargs: clears.append("clear")
+        try:
+            first = Future()
+            first.set_result(Result("第一句还没说完。"))
+            second = Future()
+            second.set_result(Result("第二句开始说。"))
+            generation = service.arbiter.generation
+            first_thread = threading.Thread(
+                target=service._handle_runtime_result, args=(first, generation)
+            )
+            first_thread.start()
+            self.assertTrue(backend.started.wait(2))
+            resets_before_second = engine.resets
+            second_thread = threading.Thread(
+                target=service._handle_runtime_result, args=(second, generation)
+            )
+            second_thread.start()
+            first_thread.join(2)
+            second_thread.join(2)
+            self.assertFalse(first_thread.is_alive())
+            self.assertFalse(second_thread.is_alive())
+            self.assertEqual(clears, ["clear"])
+            self.assertEqual(engine.resets, resets_before_second + 1)
+        finally:
+            service.stop()
+
+    def test_new_transcript_stops_playback_before_the_runtime_submit(self):
+        from robotsoul.voice.engine import AsrResult
+
+        order = []
+
+        class Speaker:
+            def stop(self):
+                order.append("stop")
+
+            def play(self, _samples, _rate):
+                order.append("play")
+                return False
+
+        class Result:
+            task = None
+            evaluation = None
+
+        capture = FakeCapture(available=False)
+        service = VoiceService(
+            capture=capture,
+            engine=FakeEngine(),
+            run_text=lambda text: order.append("run") or Result(),
+            speaker=Speaker(),
+            idle_probe_seconds=100,
+        )
+        try:
+            service._handle_asr_result(AsrResult("索拉", True))
+            self.assertEqual(order, [])
+            service._handle_asr_result(AsrResult("向前走", True))
+            self.assertEqual(order[0], "stop")
+            deadline = time.monotonic() + 2
+            while "run" not in order and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertLess(order.index("stop"), order.index("run"))
+        finally:
+            service.stop()
+
+    def test_network_transcription_does_not_block_the_audio_thread(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class Engine(FakeEngine):
+            def __init__(self):
+                super().__init__()
+                self.vad_calls = 0
+
+            def accept_asr(self, _samples, _sample_rate):
+                self.asr_called.set()
+                return AsrResult("", False)
+
+            def accept_vad(self, _samples):
+                self.vad_calls += 1
+                return self.vad_calls == 1
+
+            def transcribe_segments(self, _segments):
+                started.set()
+                release.wait(2)
+                return AsrResult("向前走", True)
+
+        capture = FakeCapture(available=True)
+        engine = Engine()
+        engine.wake_text = "索拉"
+        engine.wake_once = True
+        service = VoiceService(
+            capture=capture,
+            engine=engine,
+            run_text=lambda text: text,
+            idle_probe_seconds=100,
+        )
+        try:
+            self.assertEqual(service.start(), CaptureState.PASSIVE)
+            capture.callback((0.2, 0.1), 16000)
+            capture.callback((0.2, 0.1), 16000)
+            self.assertTrue(started.wait(2))
+            capture.callback((0.2, 0.1), 16000)
+            deadline = time.monotonic() + 1
+            while engine.vad_calls < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertGreaterEqual(engine.vad_calls, 2)
+            release.set()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if any("识别：向前走（本地麦克风）" in line for line in current().recent(20)):
+                    break
+                time.sleep(0.01)
+            self.assertTrue(any("识别：向前走（本地麦克风）" in line for line in current().recent(20)))
+            self.assertFalse(any("识别中：" in line for line in current().recent(20)))
+        finally:
+            release.set()
+            service.stop()
+
+    def test_second_transcript_drops_the_queued_command(self):
+        started = threading.Event()
+        release = threading.Event()
+        seen = []
+
+        class Engine(FakeEngine):
+            def __init__(self):
+                super().__init__()
+                self._calls = 0
+                self._endpoint = 0
+
+            def accept_asr(self, _samples, _sample_rate):
+                return AsrResult("", False)
+
+            def accept_vad(self, _samples):
+                # The wake frame replays into VAD and is still the same utterance.
+                self._calls += 1
+                if self._calls == 1:
+                    return False
+                self._endpoint += 1
+                return True
+
+            def drain_speech_segments(self):
+                return [self._endpoint]
+
+            def transcribe_segments(self, segments):
+                if segments == [1]:
+                    return AsrResult("先走", True)
+                return AsrResult("后走", True)
+
+        def run_text(text):
+            seen.append(text)
+            if text == "先走":
+                started.set()
+                release.wait(2)
+            return text
+
+        capture = FakeCapture(available=True)
+        engine = Engine()
+        engine.wake_text = "索拉"
+        engine.wake_once = True
+        service = VoiceService(capture=capture, engine=engine, run_text=run_text, idle_probe_seconds=100)
+        try:
+            service.start()
+            capture.callback((0.2,), 16000)
+            capture.callback((0.2,), 16000)
+            self.assertTrue(started.wait(2))
+            capture.callback((0.2,), 16000)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if any("识别：后走（本地麦克风）" in line for line in current().recent(30)):
+                    break
+                time.sleep(0.01)
+            self.assertTrue(any("识别：后走（本地麦克风）" in line for line in current().recent(30)))
+            self.assertEqual(seen, ["先走"])
+            release.set()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and seen != ["先走", "后走"]:
+                time.sleep(0.01)
+            self.assertEqual(seen, ["先走", "后走"])
+        finally:
+            release.set()
+            service.stop()
 
 
 if __name__ == "__main__":
