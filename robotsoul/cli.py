@@ -42,7 +42,23 @@ def _json_value(value: Any) -> Any:
     return value
 
 
+def _load_local_env() -> None:
+    """Fill unset variables from the machine env file used by start-dashboard.sh."""
+    path = Path.home() / ".openrobotsoul-go2.env"
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if not text or text.startswith("#") or "=" not in text:
+            continue
+        key, value = text.split("=", 1)
+        key = key.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value.strip().strip("\"'")
+
+
 def main() -> None:
+    _load_local_env()
     parser = argparse.ArgumentParser(prog="robotsoul", description="OpenRobotSoul Python MVP")
     parser.add_argument("--profile", help="Override the profile selected in config/robot.json")
     parser.add_argument("--robot-module", help="Override the robot_module selected in config/robot.json")
@@ -201,14 +217,19 @@ def main() -> None:
         from robotsoul.settings import default_llm_path
 
         llm_path = Path(args.llm_config) if getattr(args, "llm_config", None) else default_llm_path()
+        from robotsoul.robot_config import default_robot_config_path
+
+        robot_config_path = (
+            Path(args.robot_config) if getattr(args, "robot_config", None) else default_robot_config_path()
+        )
         try:
-            language_session = LanguageSession.start_resident(llm_path)
+            language_session = LanguageSession.start_resident(llm_path, robot_config_path)
         except LanguageGatewayError as exc:
             report_startup_failure(coding_dispatcher, str(exc))
             runtime_log("Runtime", "Error", f"语言进程启动失败：{exc}")
             parser.error(str(exc))
-        agent = LanguageAgent(language_session, coding_dispatcher)
-        reviewer = LanguageSafetyReviewer(language_session)
+        agent = LanguageAgent(language_session, coding_dispatcher, robot_config_path=robot_config_path)
+        reviewer = LanguageSafetyReviewer(language_session, robot_config_path=robot_config_path)
     try:
         profile = load_selected_profile(args.profile, args.robot_config, args.robot_module)
         runtime = RobotRuntime.from_profile(

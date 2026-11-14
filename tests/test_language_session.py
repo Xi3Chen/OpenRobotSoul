@@ -8,12 +8,14 @@ from robotsoul import RobotRuntime, load_profile
 from robotsoul.models import CapabilitySpec, ParameterSpec, RiskLevel
 from robotsoul.language_gateway import handle_request
 from robotsoul.language_session import (
+    AgentRejected,
     CodingDispatcher,
     LanguageAgent,
     LanguageSafetyReviewer,
     LanguageSession,
     report_startup_failure,
 )
+from robotsoul.models import Observation, utc_now
 
 
 FAKE_GATEWAY = r"""
@@ -201,6 +203,61 @@ class LanguageGatewayTests(unittest.TestCase):
 
         self.assertIn("description", seen["system"])
         self.assertIn("切换到站立锁定", seen["user"])
+
+    def test_decide_prompt_includes_sensor_readings(self):
+        seen = {}
+
+        def complete(messages):
+            seen["system"] = messages[0]["content"]
+            seen["user"] = messages[1]["content"]
+            return json.dumps({"rejected": True, "reason": "只检查传感器"})
+
+        handle_request(
+            {
+                "id": "sensors",
+                "type": "decide",
+                "text": "现在电量够吗",
+                "skills": [{"name": "sport.stand_up", "parameters": {}}],
+                "sensors": [{
+                    "event_type": "robot.low_state",
+                    "observed_at": "2026-11-14T00:00:00+00:00",
+                    "reading": {"bms_soc": 80},
+                }],
+            },
+            complete,
+        )
+
+        self.assertIn("传感器摘要", seen["system"])
+        self.assertIn("bms_soc", seen["user"])
+
+    def test_language_agent_forwards_compact_sensor_readings(self):
+        captured = {}
+
+        class Session:
+            def request(self, payload):
+                captured["payload"] = payload
+                return {"rejected": True, "reason": "只检查传感器"}
+
+        now = utc_now()
+        observation = Observation(
+            event_id="event-low",
+            robot_id="go2",
+            device_id="unitree-go2-low-state",
+            event_type="robot.low_state",
+            observed_at=now,
+            received_at=now,
+            payload={"bms_soc": 80, "imu_rpy": [0.0, 0.0, 0.0]},
+            source="unitree_sdk2",
+            ttl_ms=2000,
+        )
+        agent = LanguageAgent(Session(), CodingDispatcher(lambda prompt: prompt))
+
+        with self.assertRaises(AgentRejected):
+            agent.plan("向前走", {}, (observation,))
+
+        reading = captured["payload"]["sensors"][0]["reading"]
+        self.assertEqual(reading["bms_soc"], 80)
+        self.assertNotIn("motors", json.dumps(captured["payload"]["sensors"]))
 
     def test_unknown_skill_is_rejected_with_a_reason(self):
         response = handle_request(

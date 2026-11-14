@@ -13,7 +13,15 @@ from pathlib import Path
 from threading import Lock
 from urllib.parse import urlsplit
 
-from robotsoul.voice.config import DEVICE_IDS, MODEL_IDS, VoiceConfig, load_voice_config
+from robotsoul.robot_config import (
+    RobotDeploymentConfig,
+    load_robot_deployment_config,
+    robot_settings_view,
+    save_robot_deployment_config,
+)
+from robotsoul.voice.config import (
+    INPUT_DEVICE_IDS, MODEL_IDS, OUTPUT_DEVICE_IDS, VoiceConfig, load_voice_config, speech_document,
+)
 
 
 PASSWORD_KDF = "pbkdf2-hmac-sha256"
@@ -21,8 +29,8 @@ PASSWORD_ITERATIONS = 200_000
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PACKAGED_DATA = Path(__file__).resolve().parent / "data"
 
+_ROBOT_FIELDS = ("robot_name", "soul")
 _AUDIO_FIELDS = (
-    "robot_name",
     "wake_phrase",
     "language",
     "input_device",
@@ -46,6 +54,12 @@ def default_operators_path() -> Path:
 
 def default_llm_path() -> Path:
     return PROJECT_ROOT / "config" / "llm.json"
+
+
+def default_robot_config_path() -> Path:
+    from robotsoul.robot_config import default_robot_config_path as _default_robot_config_path
+
+    return _default_robot_config_path()
 
 
 def default_voice_config_path() -> Path:
@@ -326,9 +340,19 @@ def _validate_api_key(value: object) -> str:
     return value
 
 
+def robot_settings_document(path: Path) -> dict:
+    return robot_settings_view(load_robot_deployment_config(path))
+
+
+def save_robot_settings(path: Path, updates: dict) -> RobotDeploymentConfig:
+    if not isinstance(updates, dict):
+        raise ValueError("robot settings must be an object")
+    _reject_unknown(updates, _ROBOT_FIELDS, "robot")
+    return save_robot_deployment_config(path, updates)
+
+
 def audio_settings_view(config: VoiceConfig) -> dict:
     return {
-        "robot_name": config.robot_name,
         "wake_phrase": config.wake_phrase,
         "language": config.language,
         "input_device": config.input_device,
@@ -337,7 +361,17 @@ def audio_settings_view(config: VoiceConfig) -> dict:
         "session_max_seconds": config.session_max_seconds,
         "call_reconnect_grace_seconds": config.call_reconnect_grace_seconds,
         "models": dict(config.models),
-        "devices": sorted(DEVICE_IDS),
+        "speech": {
+            "asr": {"base_url": config.speech.asr.base_url, "model": config.speech.asr.model},
+            "tts": {
+                "base_url": config.speech.tts.base_url,
+                "model": config.speech.tts.model,
+                "voice": config.speech.tts.voice,
+            },
+        },
+        "devices": sorted(OUTPUT_DEVICE_IDS),
+        "input_devices": sorted(INPUT_DEVICE_IDS),
+        "output_devices": sorted(OUTPUT_DEVICE_IDS),
     }
 
 
@@ -353,10 +387,10 @@ def save_audio_settings(path: Path, updates: dict) -> VoiceConfig:
         current = load_voice_config(path)
         payload = {
             "schema_version": 1,
-            "robot_name": current.robot_name,
             "wake_phrase": current.wake_phrase,
             "language": current.language,
-            "models": {name: MODEL_IDS[name] for name in ("kws", "asr", "vad", "tts")},
+            "models": {name: MODEL_IDS[name] for name in ("kws", "vad")},
+            "speech": speech_document(current.speech),
             "input_device": current.input_device,
             "output_device": current.output_device,
             "follow_up_seconds": current.follow_up_seconds,
