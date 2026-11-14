@@ -189,15 +189,27 @@
             </form>
           </section>
 
+          <section class="control-section" aria-labelledby="robot-settings-title">
+            <div class="section-heading">
+              <h2 id="robot-settings-title">机器人个性</h2>
+              <span class="subtle">名称和灵魂会注入语言模型系统提示；语言进程无需重启即可生效</span>
+            </div>
+            <form id="robot-settings-form" class="settings-form">
+              <label>机器人名称<input id="robot-name" name="robot_name" type="text" maxlength="64" required></label>
+              <label>机器人灵魂<textarea id="robot-soul" name="soul_personality" rows="4" maxlength="4000" placeholder="例如：活泼俏皮、回答简短；或稳重克制、先说明风险再动作。"></textarea></label>
+              <div class="settings-actions"><button class="primary-button" type="submit">保存机器人个性</button></div>
+              <p id="robot-settings-status" class="form-status" role="status"></p>
+            </form>
+          </section>
+
           <section class="control-section" aria-labelledby="audio-settings-title">
             <div class="section-heading">
               <h2 id="audio-settings-title">音频</h2>
-              <span class="subtle">唤醒短语、语言和设备在下次启动语音服务后生效</span>
+              <span class="subtle">唤醒短语可用英文逗号分隔多个；留空则默认使用机器人名称。语言和设备在下次启动语音服务后生效</span>
             </div>
             <form id="audio-settings-form" class="settings-form">
               <div class="settings-grid">
-                <label>机器人名称<input id="audio-robot-name" name="robot_name" type="text" maxlength="64" required></label>
-                <label>唤醒短语<input id="audio-wake-phrase" name="wake_phrase" type="text" maxlength="64" required></label>
+                <label>唤醒短语<input id="audio-wake-phrase" name="wake_phrase" type="text" maxlength="192"></label>
                 <label>语言<input id="audio-language" name="language" type="text" maxlength="32" required></label>
                 <label>输入设备
                   <select id="audio-input-device" name="input_device">
@@ -211,13 +223,14 @@
                     <option value="default">default</option>
                     <option value="usb-microphone">usb-microphone</option>
                     <option value="usb-speaker">usb-speaker</option>
+                    <option value="unitree-go2">unitree-go2</option>
                   </select>
                 </label>
                 <label>跟进窗口（秒）<input id="audio-follow-up" name="follow_up_seconds" type="number" min="1" step="1" required></label>
                 <label>会话上限（秒）<input id="audio-session-max" name="session_max_seconds" type="number" min="1" step="1" required></label>
                 <label>通话重连宽限（秒）<input id="audio-reconnect" name="call_reconnect_grace_seconds" type="number" min="1" step="1" required></label>
               </div>
-              <label>语音模型<input id="audio-models" type="text" readonly></label>
+              <label>本地模型与语音接口<input id="audio-models" type="text" readonly></label>
               <div class="settings-actions"><button class="primary-button" type="submit">保存音频设置</button></div>
               <p id="audio-settings-status" class="form-status" role="status"></p>
             </form>

@@ -106,6 +106,47 @@ class DashboardHTTPTests(unittest.TestCase):
     def mutation_headers(self, cookie, csrf):
         return {"Cookie": cookie, "X-CSRF-Token": csrf}
 
+    def test_sensor_catalog_requires_login_and_can_be_subscribed(self):
+        status, _headers, _data = self.request("GET", "/api/sensors")
+        self.assertEqual(status, 401)
+        self.connection.close()
+        self.connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+        cookie, _csrf = self.login()
+        self.runtime.adapter.sensor_snapshot = lambda: {
+            "streams": [
+                {
+                    "id": "low",
+                    "topic": "rt/lowstate",
+                    "event_type": "robot.low_state",
+                    "available": True,
+                    "payload": {"bms_soc": 77, "motors": [{"temperature": 40}]},
+                },
+                {
+                    "id": "cloud",
+                    "topic": "rt/utlidar/cloud",
+                    "event_type": "robot.lidar_cloud",
+                    "available": False,
+                    "payload": None,
+                },
+            ]
+        }
+
+        status, _headers, data = self.request("GET", "/api/sensors?streams=low", headers={"Cookie": cookie})
+
+        self.assertEqual(status, 200)
+        self.assertEqual([item["id"] for item in data["streams"]], ["low"])
+        self.assertIn("motors", data["streams"][0]["payload"])
+        self.connection.close()
+        self.connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+        status, headers, raw = self.request(
+            "GET", "/api/sensors/stream?once=1&streams=cloud", headers={"Cookie": cookie}
+        )
+        content_type = next(value for name, value in headers if name.lower() == "content-type")
+        self.assertEqual(status, 200)
+        self.assertIn("text/event-stream", content_type)
+        self.assertIn(b"robot.lidar_cloud", raw)
+        self.assertNotIn(b"robot.low_state", raw)
+
     def test_call_control_requires_authentication_and_csrf(self):
         status, _headers, data = self.request("POST", "/api/voice/calls/start", {})
         self.assertEqual(status, 401)
@@ -303,6 +344,8 @@ class DashboardHTTPTests(unittest.TestCase):
                 "profile_id": "simulator-basic",
                 "adapter_id": "fake-simulator",
                 "profile_version": "1.0.0",
+                "robot_name": "索拉",
+                "soul_personality": "活泼、热情，喜欢用清晰简短的中文和用户交流；执行动作时保持稳重可靠。",
             },
         )
         self.assertIsNone(data["robot"]["battery"])
@@ -691,7 +734,9 @@ class DashboardHTTPTests(unittest.TestCase):
             self.assertEqual(settings["current_username"], "operator")
             self.assertEqual(settings["accounts"], [{"username": "operator"}])
             self.assertFalse(settings["llm"]["api_key_configured"])
-            self.assertEqual(settings["audio"]["robot_name"], "索拉")
+            self.assertEqual(settings["robot"]["robot_name"], "索拉")
+            self.assertIn("unitree-go2", settings["audio"]["output_devices"])
+            self.assertNotIn("unitree-go2", settings["audio"]["input_devices"])
             self.assertNotIn("digest", json.dumps(settings))
 
             secret = "sk-test-secret-value"
@@ -713,11 +758,24 @@ class DashboardHTTPTests(unittest.TestCase):
             self.assertEqual(json.loads(llm.read_text(encoding="utf-8"))["api_key"], secret)
             self.assertEqual(llm.stat().st_mode & 0o777, 0o600)
 
+            robot = root / "robot.json"
+            robot.write_text(
+                (Path(__file__).parents[1] / "config" / "robot.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            self.server.service._robot_config_path = robot
+            status, _headers, robot_saved = self.request(
+                "POST",
+                "/api/settings/robot",
+                {"robot_name": "小拉", "soul": {"personality": "更活泼一点"}},
+                headers,
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(robot_saved["robot"]["robot_name"], "小拉")
             status, _headers, audio = self.request(
                 "POST",
                 "/api/settings/audio",
                 {
-                    "robot_name": "小拉",
                     "wake_phrase": "小拉",
                     "language": "zh-CN",
                     "input_device": "usb-microphone",
@@ -729,10 +787,10 @@ class DashboardHTTPTests(unittest.TestCase):
                 headers,
             )
             self.assertEqual(status, 200)
-            self.assertEqual(audio["audio"]["robot_name"], "小拉")
             self.assertEqual(audio["restart_required"], ["wake_phrase", "language", "input_device", "output_device"])
             rewritten = json.loads(voice.read_text(encoding="utf-8"))
-            self.assertEqual(rewritten["robot_name"], "小拉")
+            self.assertEqual(rewritten["wake_phrase"], "小拉")
+            self.assertEqual(json.loads(robot.read_text(encoding="utf-8"))["robot_name"], "小拉")
             self.assertEqual(rewritten["models"]["kws"], "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20")
             status, _headers, rejected = self.request(
                 "POST", "/api/settings/audio", {"input_device": "microphone"}, headers

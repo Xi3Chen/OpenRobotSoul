@@ -227,6 +227,8 @@
   function renderRobotInformation(configuration) {
     const root = $("#robot-info-list");
     const fields = [
+      ["名称", configuration.robot_name],
+      ["灵魂", configuration.soul_personality],
       ["厂商", configuration.manufacturer],
       ["型号", configuration.model],
       ["机器人 ID", configuration.robot_id],
@@ -719,6 +721,31 @@
     }
   }
 
+  function fillSelect(select, devices, selected) {
+    if (!select || !Array.isArray(devices) || devices.length === 0) return;
+    const current = selected || "default";
+    select.replaceChildren();
+    for (const device of devices) {
+      const option = document.createElement("option");
+      option.value = device;
+      option.textContent = device;
+      select.append(option);
+    }
+    select.value = devices.includes(current) ? current : devices[0];
+  }
+
+  function endpointLabel(endpoint) {
+    if (!endpoint || !endpoint.base_url || !endpoint.model) return "未配置";
+    const voice = endpoint.voice ? ` / ${endpoint.voice}` : "";
+    return `${endpoint.model}${voice} @ ${endpoint.base_url}`;
+  }
+
+  function speechSummary(models, speech) {
+    const local = models || {};
+    const api = speech || {};
+    return `KWS ${text(local.kws)}；VAD ${text(local.vad)}；识别 ${endpointLabel(api.asr)}；合成 ${endpointLabel(api.tts)}`;
+  }
+
   function applySettings(data) {
     state.settings = data;
     const llm = data.llm || {};
@@ -729,17 +756,19 @@
     $("#llm-api-key").value = "";
     $("#llm-api-key").placeholder = llm.api_key_configured ? "已保存，留空则保持不变" : "未设置";
     $("#llm-clear-key").checked = false;
+    const robot = data.robot || {};
+    $("#robot-name").value = robot.robot_name || "";
+    $("#robot-soul").value = robot.soul?.personality || "";
     const audio = data.audio || {};
-    $("#audio-robot-name").value = audio.robot_name || "";
     $("#audio-wake-phrase").value = audio.wake_phrase || "";
     $("#audio-language").value = audio.language || "";
-    $("#audio-input-device").value = audio.input_device || "default";
-    $("#audio-output-device").value = audio.output_device || "default";
+    fillSelect($("#audio-input-device"), audio.input_devices, audio.input_device);
+    fillSelect($("#audio-output-device"), audio.output_devices || audio.devices, audio.output_device);
     $("#audio-follow-up").value = audio.follow_up_seconds ?? "";
     $("#audio-session-max").value = audio.session_max_seconds ?? "";
     $("#audio-reconnect").value = audio.call_reconnect_grace_seconds ?? "";
     const models = audio.models || {};
-    $("#audio-models").value = `KWS ${text(models.kws)}；ASR ${text(models.asr)}；VAD ${text(models.vad)}；TTS ${text(models.tts)}`;
+    $("#audio-models").value = speechSummary(models, audio.speech);
     renderAccounts(data.accounts || [], data.current_username);
   }
 
@@ -787,6 +816,29 @@
     }
   });
 
+  $("#robot-settings-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const submit = $("#robot-settings-form button[type=submit]");
+    submit.disabled = true;
+    setFormStatus("#robot-settings-status", "");
+    try {
+      const data = await request("/api/settings/robot", {
+        method: "POST",
+        body: JSON.stringify({
+          robot_name: $("#robot-name").value,
+          soul: { personality: $("#robot-soul").value },
+        }),
+      });
+      state.settings = { ...(state.settings || {}), robot: data.robot };
+      setFormStatus("#robot-settings-status", "机器人个性已保存", false);
+      await refresh();
+    } catch (error) {
+      setFormStatus("#robot-settings-status", error.message, true);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
   $("#llm-settings-form").addEventListener("submit", async event => {
     event.preventDefault();
     const submit = $("#llm-settings-form button[type=submit]");
@@ -824,7 +876,6 @@
       const data = await request("/api/settings/audio", {
         method: "POST",
         body: JSON.stringify({
-          robot_name: $("#audio-robot-name").value,
           wake_phrase: $("#audio-wake-phrase").value,
           language: $("#audio-language").value,
           input_device: $("#audio-input-device").value,
@@ -836,7 +887,7 @@
       });
       state.settings = { ...(state.settings || {}), audio: data.audio };
       const models = data.audio?.models || {};
-      $("#audio-models").value = `KWS ${text(models.kws)}；ASR ${text(models.asr)}；VAD ${text(models.vad)}；TTS ${text(models.tts)}`;
+      $("#audio-models").value = speechSummary(models, data.audio?.speech);
       setFormStatus("#audio-settings-status", "音频设置已保存。唤醒短语、语言和设备将在下次启动语音服务后生效", false);
     } catch (error) {
       setFormStatus("#audio-settings-status", error.message, true);

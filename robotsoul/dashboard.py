@@ -19,15 +19,19 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from robotsoul.models import InvocationContext, InvocationSource, TaskResult
 from robotsoul.runtime import RobotRuntime
+from robotsoul.robot_config import RobotDeploymentConfig, load_robot_deployment_config, robot_settings_view
 from robotsoul.settings import (
     LlmConfigStore,
     OperatorDirectory,
     audio_settings_view,
     default_llm_path,
     default_operators_path,
+    default_robot_config_path,
     default_voice_config_path,
     load_audio_settings,
+    robot_settings_document,
     save_audio_settings,
+    save_robot_settings,
     validate_username,
 )
 from robotsoul.voice.config import VoiceConfig
@@ -134,6 +138,7 @@ class DashboardService:
         operators: OperatorDirectory,
         llm_store: LlmConfigStore | None = None,
         voice_config_path: str | Path | None = None,
+        robot_config_path: str | Path | None = None,
         session_ttl_seconds: int = SESSION_TTL_SECONDS,
         action_ttl_seconds: int = ACTION_TTL_SECONDS,
         capture_arbiter: CaptureArbiter | None = None,
@@ -146,6 +151,7 @@ class DashboardService:
         self._operators = operators
         self._llm = llm_store or LlmConfigStore(None)
         self._voice_config_path = Path(voice_config_path or default_voice_config_path())
+        self._robot_config_path = Path(robot_config_path or default_robot_config_path())
         self.session_ttl_seconds = session_ttl_seconds
         self.action_ttl_seconds = action_ttl_seconds
         self._clock = clock
@@ -329,6 +335,7 @@ class DashboardService:
     def settings_view(self, session: _Session) -> dict[str, Any]:
         return {
             "llm": self._llm.public(),
+            "robot": robot_settings_document(self._robot_config_path),
             "audio": load_audio_settings(self._voice_config_path),
             "accounts": [{"username": name} for name in self._operators.usernames()],
             "current_username": session.principal_id,
@@ -344,6 +351,11 @@ class DashboardService:
             "audio": audio_settings_view(config),
             "restart_required": ["wake_phrase", "language", "input_device", "output_device"],
         }
+
+    def update_robot(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = save_robot_settings(self._robot_config_path, payload)
+        self._apply_robot(config)
+        return {"robot": robot_settings_view(config)}
 
     def upsert_account(self, session: _Session, payload: dict[str, Any]) -> dict[str, Any]:
         self._require_account_payload(payload, ("username", "password", "current_password"))
@@ -386,13 +398,17 @@ class DashboardService:
         voice = self.capture_arbiter
         if voice is None or not hasattr(voice, "gate"):
             return
-        voice.robot_name = config.robot_name
         voice.gate.follow_up_seconds = config.follow_up_seconds
         voice.gate.session_max_seconds = config.session_max_seconds
         if hasattr(voice, "call_reconnect_grace_seconds"):
             voice.call_reconnect_grace_seconds = config.call_reconnect_grace_seconds
         if hasattr(voice, "_call_reconnect_grace_seconds"):
             voice._call_reconnect_grace_seconds = config.call_reconnect_grace_seconds
+
+    def _apply_robot(self, config: RobotDeploymentConfig) -> None:
+        voice = self.capture_arbiter
+        if voice is not None and hasattr(voice, "robot_name"):
+            voice.robot_name = config.robot_name
 
     def _expire_session_challenges(self, session_id: str) -> None:
         for challenge_id in [
@@ -417,6 +433,12 @@ class DashboardService:
         voice_state = getattr(self.capture_arbiter, "state", None)
         voice_state = getattr(voice_state, "value", voice_state)
         voice_health = self.capture_arbiter.health() if hasattr(self.capture_arbiter, "health") else None
+        robot_identity = None
+        try:
+            robot_identity = load_robot_deployment_config(self._robot_config_path)
+            display_name = robot_identity.robot_name
+        except ValueError:
+            display_name = getattr(self.capture_arbiter, "robot_name", None)
         payload = {
             "robot": {
                 "robot_id": self.runtime.profile.robot_id,
@@ -426,20 +448,12 @@ class DashboardService:
                 "healthy": connected,
                 "battery": self._battery_view(robot),
             },
-            "robot_configuration": {
-                "robot_id": self.runtime.profile.robot_id,
-                "manufacturer": self.runtime.profile.manufacturer,
-                "model": self.runtime.profile.model,
-                "robot_module": self.runtime.profile.robot_module,
-                "profile_id": self.runtime.profile.profile_id,
-                "adapter_id": self.runtime.profile.adapter_id,
-                "profile_version": self.runtime.profile.profile_version,
-            },
+            "robot_configuration": self._robot_configuration_view(robot_identity),
             "active_task": None,
             "voice": {
                 "state": voice_state or "SLEEP",
                 "available": getattr(voice_health, "available", self.capture_arbiter is not None),
-                "robot_name": getattr(self.capture_arbiter, "robot_name", None),
+                "robot_name": display_name,
                 "error": getattr(voice_health, "error", None),
             },
             "latest_feedback": self._actions[-1]["message"] if self._actions else None,
@@ -448,6 +462,21 @@ class DashboardService:
             "actions": list(reversed(self._actions[-100:])),
         }
         return payload
+
+    def _robot_configuration_view(self, identity: RobotDeploymentConfig | None) -> dict[str, Any]:
+        profile = self.runtime.profile
+        view = {
+            "robot_id": profile.robot_id,
+            "manufacturer": profile.manufacturer,
+            "model": profile.model,
+            "robot_module": profile.robot_module,
+            "profile_id": profile.profile_id,
+            "adapter_id": profile.adapter_id,
+            "profile_version": profile.profile_version,
+            "robot_name": identity.robot_name if identity is not None else None,
+            "soul_personality": identity.soul.personality if identity is not None else "",
+        }
+        return view
 
     def _battery_view(self, robot: Any) -> dict[str, Any] | None:
         reader = getattr(robot, "battery", None)
@@ -466,6 +495,38 @@ class DashboardService:
         if charging is not None and not isinstance(charging, bool):
             return None
         return {"level_percent": level, "charging": charging}
+
+    def sensor_snapshot(self, selected: set[str] | None = None) -> dict[str, Any]:
+        raw = self._robot_sensor_snapshot()
+        streams: list[dict[str, Any]] = []
+        for item in raw.get("streams", []):
+            if not isinstance(item, dict):
+                continue
+            stream_id = item.get("id")
+            event_type = item.get("event_type")
+            if not isinstance(stream_id, str) or not stream_id or not isinstance(event_type, str) or not event_type:
+                continue
+            if selected is not None and stream_id not in selected and event_type not in selected:
+                continue
+            streams.append(item)
+        payload: dict[str, Any] = {"streams": streams}
+        error = raw.get("error")
+        if isinstance(error, str) and error:
+            payload["error"] = error
+        return payload
+
+    def _robot_sensor_snapshot(self) -> dict[str, Any]:
+        robot = self.runtime.adapter
+        reader = getattr(robot, "sensor_snapshot", None)
+        if not callable(reader):
+            return {"streams": []}
+        try:
+            snapshot = reader()
+        except Exception as exc:
+            return {"streams": [], "error": str(exc)}
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("streams"), list):
+            return {"streams": [], "error": "sensor snapshot is invalid"}
+        return snapshot
 
     def runtime_logs(self, limit: int = 100, level: str | None = None) -> list[str]:
         from robotsoul.runlog import current
@@ -816,6 +877,40 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     selected.add(name)
         return selected
 
+    def _sensor_query(self) -> tuple[set[str] | None, bool]:
+        query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+        once = query.get("once", ["0"])[0] == "1"
+        if "streams" not in query:
+            return None, once
+        selected: set[str] = set()
+        for raw in query["streams"]:
+            for part in raw.split(","):
+                name = part.strip()
+                if name:
+                    selected.add(name)
+        return selected, once
+
+    def _sensor_stream(self) -> None:
+        selected, once = self._sensor_query()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.close_connection = True
+        loops = 1 if once else 60
+        try:
+            for index in range(loops):
+                payload = self.server.service.sensor_snapshot(selected)
+                data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                self.wfile.write(b"data: " + data + b"\n\n")
+                self.wfile.flush()
+                if index + 1 < loops:
+                    time.sleep(0.5)
+        except (BrokenPipeError, ConnectionError, OSError):
+            return
+
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
         if path == "/" or path == "/index.html":
@@ -864,6 +959,13 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/voice/monitor":
             self._json(HTTPStatus.OK, self.server.service.audio_monitor(self._monitor_channels()))
+            return
+        if path == "/api/sensors":
+            selected, _once = self._sensor_query()
+            self._json(HTTPStatus.OK, self.server.service.sensor_snapshot(selected))
+            return
+        if path == "/api/sensors/stream":
+            self._sensor_stream()
             return
         if path == "/api/settings":
             try:
@@ -934,6 +1036,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/settings/audio":
                 self._json(HTTPStatus.OK, self.server.service.update_audio(body))
+                return
+            if path == "/api/settings/robot":
+                self._json(HTTPStatus.OK, self.server.service.update_robot(body))
                 return
             if path == "/api/settings/accounts":
                 self._json(HTTPStatus.OK, self.server.service.upsert_account(session, body))
@@ -1113,6 +1218,7 @@ def create_dashboard_server(
     operators_path: str | Path | None = None,
     llm_path: str | Path | None = None,
     voice_config_path: str | Path | None = None,
+    robot_config_path: str | Path | None = None,
     host: str = "127.0.0.1",
     port: int = 8765,
     tls_cert: str | Path | None = None,
@@ -1143,6 +1249,7 @@ def create_dashboard_server(
         operators=operators,
         llm_store=LlmConfigStore(Path(llm_path) if llm_path else None),
         voice_config_path=voice_config_path,
+        robot_config_path=robot_config_path,
         capture_arbiter=capture_arbiter,
         call_media=call_media,
     )
@@ -1165,6 +1272,7 @@ def run_dashboard(
     operators_path: str | Path | None = None,
     llm_path: str | Path | None = None,
     voice_config_path: str | Path | None = None,
+    robot_config_path: str | Path | None = None,
     host: str = "127.0.0.1",
     port: int = 8765,
     tls_cert: str | Path | None = None,
@@ -1183,6 +1291,7 @@ def run_dashboard(
         operators_path=operators_path,
         llm_path=llm_path if llm_path is not None else default_llm_path(),
         voice_config_path=voice_config_path,
+        robot_config_path=robot_config_path,
         host=host,
         port=port,
         tls_cert=tls_cert,
