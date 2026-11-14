@@ -19,17 +19,26 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
+from robotsoul.robot_config import default_robot_config_path, identity_document, load_robot_deployment_config
 from robotsoul.settings import LlmConfigStore, LlmSettings
 
 
 Completer = Callable[[list[dict[str, str]]], str]
+_IDENTITY: dict[str, str] | None = None
 
 
 def main() -> None:
+    global _IDENTITY
     path_value = os.environ.get("OPENROBOTSOUL_LLM_CONFIG", "")
     path = Path(path_value) if path_value else None
+    robot_path = os.environ.get("OPENROBOTSOUL_ROBOT_CONFIG", "").strip()
     config_error = ""
     settings = LlmSettings()
+    try:
+        deployment = load_robot_deployment_config(Path(robot_path) if robot_path else None)
+        _IDENTITY = identity_document(deployment)
+    except ValueError:
+        _IDENTITY = {"robot_name": "机器人", "soul": ""}
     try:
         if path is not None:
             settings = LlmConfigStore(path if path.is_file() else None).snapshot()
@@ -113,13 +122,17 @@ def _decide(request: dict[str, Any], complete: Completer) -> dict[str, Any]:
     }
     if not allowed:
         return {"rejected": True, "reason": "当前没有可选择的技能"}
+    identity = _resolve_identity(request)
     content = complete(
         [
             {
                 "role": "system",
                 "content": (
-                    "你是机器人技能选择器。只能从给定技能里选择一个，拒绝，或把纯编程请求转出。"
+                    _identity_preamble(identity)
+                    + "你是这台机器人的技能选择器。只能从给定技能里选择一个，拒绝，或把纯编程请求转出。"
+                    "在符合安全边界的前提下，让 rationale、拒绝理由和转出理由体现你的灵魂设定。"
                     "每个技能的 description 是 SDK 给出的动作含义，用它判断用户指的是哪一个动作。"
+                    "sensors 是当前传感器摘要，用来理解机体状态。它不表示动作已经完成，单位和坐标系未换算。"
                     "不要编造技能，不要输出解释性正文。只输出一个 JSON 对象，格式是以下之一："
                     '{"skill":"技能名","parameters":{},"rationale":"简短理由"}；'
                     '{"rejected":true,"reason":"拒绝理由"}；'
@@ -134,6 +147,7 @@ def _decide(request: dict[str, Any], complete: Completer) -> dict[str, Any]:
                         "text": request.get("text"),
                         "skills": list(allowed.values()),
                         "observations": request.get("observations") or [],
+                        "sensors": _sensor_context(request.get("sensors")),
                     },
                     ensure_ascii=False,
                 ),
@@ -164,15 +178,17 @@ def _decide(request: dict[str, Any], complete: Completer) -> dict[str, Any]:
 
 
 def _review(request: dict[str, Any], complete: Completer) -> dict[str, Any]:
+    identity = _resolve_identity(request)
     content = complete(
         [
             {
                 "role": "system",
                 "content": (
-                    "你是无工具安全复核。不能修改技能或参数，也不能调用工具。"
+                    _identity_preamble(identity)
+                    + "你是无工具安全复核。不能修改技能或参数，也不能调用工具。"
                     "只判断这次提案现在能否执行。只输出一个 JSON 对象："
                     '{"verdict":"allow"|"deny"|"uncertain","rationale":"理由"}。'
-                    "拒绝或不确定时必须写明理由。"
+                    "拒绝或不确定时必须写明理由；语气可与灵魂设定一致，但 verdict 必须严格客观。"
                 ),
             },
             {
@@ -214,6 +230,37 @@ def _parse_json_object(content: str) -> dict[str, Any]:
 
 def _text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _resolve_identity(request: dict[str, Any]) -> dict[str, str]:
+    payload = request.get("identity")
+    if isinstance(payload, dict):
+        robot_name = payload.get("robot_name")
+        soul = payload.get("soul")
+        if isinstance(robot_name, str) and robot_name.strip():
+            return {
+                "robot_name": robot_name.strip()[:64],
+                "soul": soul.strip()[:4000] if isinstance(soul, str) else "",
+            }
+    if isinstance(_IDENTITY, dict):
+        return dict(_IDENTITY)
+    return {"robot_name": "机器人", "soul": ""}
+
+
+def _identity_preamble(identity: dict[str, str]) -> str:
+    robot_name = identity.get("robot_name") or "机器人"
+    soul = identity.get("soul") or ""
+    text = f"你的名字是{robot_name}，你是一台实体机器人。"
+    if soul:
+        text += f"你的灵魂设定是：{soul}。"
+    return text
+
+
+def _sensor_context(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    readings = [item for item in value if isinstance(item, dict)]
+    return readings[:12]
 
 
 def _write(payload: dict[str, Any]) -> None:

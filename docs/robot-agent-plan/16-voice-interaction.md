@@ -4,7 +4,7 @@
 
 Voice Service 为单台机器人提供本地待机唤醒、连续会话识别和 Dashboard 通话入口。它是机器人侧受监督的独立服务；下列职责是服务内逻辑组件，不要求各自拆成进程。音频采集、唤醒和实时识别不依赖云端 Agent。通过置信度和轮次检查的最终转写是自然语言任务，与 Dashboard 文本框进入同一条运行时入口，由 `robotsoul.language_gateway` 对照已注册技能规划。中间识别结果和音频帧不提交。唤醒或通话本身不授予动作权限；最终文本仍须经 RobotRuntime、caller policy、能力 schema 和本地安全检查。
 
-部署时在 `config/voice.json` 设置 `robot_name`（例如“索拉”）和 `wake_phrase`。两者可以相同，但显示名不是识别器配置的隐式来源。名称、唤醒短语、静态模型 ID、语言、设备偏好和会话超时保存在独立配置中；当前 `config/robot.json` 仍只负责选择 `robot_module` / `profile_id`。模型和设备均通过静态 registry 选择，不允许配置路径动态加载可执行代码。运行时代码和默认配置也随 Python wheel 打包。
+部署时在 `config/robot.json` 设置 `robot_name` 与 `soul.personality`（机器人灵魂）；语言进程会把它们拼进系统提示词。`config/voice.json` 只保存唤醒短语、ASR 语言和设备偏好；`wake_phrase` 可用英文逗号分隔多个唤醒词，留空时默认使用 `robot_name`。名称与唤醒词可以相同，但显示名不是识别器配置的隐式来源。`config/robot.json` 仍负责选择 `robot_module` / `profile_id`。模型和设备均通过静态 registry 选择，不允许配置路径动态加载可执行代码。运行时代码和默认配置也随 Python wheel 打包。
 
 建议先以 sherpa-onnx 的中文关键词检测、流式 ASR 和 VAD 作为原型候选，再在最终机器人计算板、麦克风和扬声器上选定模型。完整 ASR 只在唤醒或通话期间消费音频；为了缩短唤醒延迟，可在 PASSIVE 时预加载模型和解码器，但不运行完整语音解码。没有音源时模型卸载或保持休眠，按部署的启动时间/内存预算决定，不运行静默推理。
 
@@ -92,16 +92,17 @@ VAD 只回答“此刻有语音”，不回答“这句话是对机器人说的�
 ~~~json
 {
   "schema_version": 1,
-  "robot_name": "索拉",
   "wake_phrase": "索拉",
   "language": "zh-CN",
   "models": {
     "kws": "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20",
-    "asr": "sherpa-onnx-streaming-zipformer-zh-xlarge-int8-2025-06-30",
-    "vad": "silero-vad-int8",
-    "tts": "vits-piper-zh_CN-xiao_ya-medium-int8"
+    "vad": "silero-vad-int8"
   },
-  "input_device": "default",
+  "speech": {
+    "asr": {"base_url": "http://192.168.99.74:9000/v1", "model": "qwen3-asr", "timeout_seconds": 30, "api_key_env": "ROBOTSOUL_ASR_API_KEY"},
+    "tts": {"base_url": "", "model": "", "voice": "", "timeout_seconds": 30, "api_key_env": "ROBOTSOUL_TTS_API_KEY"}
+  },
+  "input_device": "usb-microphone",
   "output_device": "default",
   "follow_up_seconds": 8,
   "session_max_seconds": 120,
@@ -109,13 +110,13 @@ VAD 只回答“此刻有语音”，不回答“这句话是对机器人说的�
 }
 ~~~
 
-流式识别使用 Zipformer-xlarge int8，资源 ID 仍是 `asr-zh-streaming-int8`。唤醒继续使用 3M 关键词模型。`input_device` / `output_device` 只允许 `default`、`usb-microphone` 和 `usb-speaker`；实际设备可由对应的 `ROBOTSOUL_VOICE_INPUT_DEVICE` / `ROBOTSOUL_VOICE_OUTPUT_DEVICE` 环境变量覆盖。`follow_up_seconds`、静音端点和 call grace 均须在目标环境调参。唤醒短语的声学门槛是 `0.1`，关键词加权是 `3.0`。这是为两个字的短语放宽后的值；模型默认门槛是 `0.25`。喊完唤醒词后如果 `follow_up_seconds` 内没有识别到指令，会话结束并重新监听唤醒词，不会把这次会话一直留到 `session_max_seconds`。识别器会把唤醒后的音频攒成一句，一句最长 20 秒，尾部静音后才结束；空白端点不会立刻结束这次会话。配置项不能绕过控制策略、扩大技能或允许任意模型代码。
+唤醒和静音检测仍用本地 ONNX 模型。一句结束后，整段语音交给 `speech.asr` 的 OpenAI 兼容接口 `POST {base_url}/audio/transcriptions`；回复交给 `speech.tts` 的 `POST {base_url}/audio/speech`。`base_url` 可以是云端，也可以是本机部署的同一套接口。环境变量 `ROBOTSOUL_ASR_BASE_URL`、`ROBOTSOUL_ASR_MODEL`、`ROBOTSOUL_ASR_API_KEY`、`ROBOTSOUL_TTS_BASE_URL`、`ROBOTSOUL_TTS_MODEL`、`ROBOTSOUL_TTS_VOICE`、`ROBOTSOUL_TTS_API_KEY` 覆盖文件里的对应项。密钥不写入配置文件。ONNX 运行库保留给后续视觉识别。唤醒继续使用 3M 关键词模型。`input_device` 只允许 `default`、`usb-microphone` 和 `usb-speaker`。`output_device` 在这三项之外还可以是 `unitree-go2`，表示把回复送到 Go2 连接后登记的项目内虚拟出口；没有登记这个出口时语音服务启动失败。实际本机设备可由 `ROBOTSOUL_VOICE_INPUT_DEVICE` / `ROBOTSOUL_VOICE_OUTPUT_DEVICE` 覆盖。新的一句开始播放时会停掉还没播完的上一句，被替换的那次播报不会再清麦克风缓冲。Go2 喇叭使用 `OPENROBOTSOUL_GO2_WEBRTC_IP`（可选 `OPENROBOTSOUL_GO2_AES_KEY`）。官方 App 同时占用 WebRTC 时喇叭连接会失败，运动连接不受影响。`follow_up_seconds`、静音端点和 call grace 均须在目标环境调参。唤醒短语的声学门槛是 `0.1`，关键词加权是 `3.0`。这是为两个字的短语放宽后的值；模型默认门槛是 `0.25`。喊完唤醒词后如果 `follow_up_seconds` 内没有识别到指令，会话结束并重新监听唤醒词，不会把这次会话一直留到 `session_max_seconds`。识别、技能执行或播报还没结束时，这段倒计时不开始；它们都空了才开始，并写下「回复结束，等待后续指令」。新的一句会停掉还没播完的回复，丢掉还没开始的排队文本，并取消正在执行且可打断的技能。闭集说法（例如「站起来」「向前走两步」）在整句识别返回后直接提交已注册技能，不再等待语言决策。识别器会把唤醒后的音频攒成一句，一句最长 20 秒，尾部静音后才结束；空白识别会重新开始这段等待，不会把会话留到 `session_max_seconds`。配置项不能绕过控制策略、扩大技能或允许任意模型代码。
 
-Dashboard 设置页的「音频」可以修改机器人名称、唤醒短语、语言、输入/输出设备和三段会话时间，并写回这份 `config/voice.json`。名称和会话时间会作用于当前正在运行的语音服务；唤醒短语、语言和设备在下次启动语音服务后生效。模型 ID 不能从设置页改成静态 registry 之外的值。
+Dashboard 设置页的「机器人个性」修改 `config/robot.json` 中的名称和灵魂；「音频」修改唤醒短语、语言、输入/输出设备和三段会话时间，并写回 `config/voice.json`。名称、灵魂和会话时间会作用于当前运行中的语音/语言路径（语言进程每次请求会重读机器人配置）；唤醒短语、语言和设备在下次启动语音服务后生效。模型 ID 不能从设置页改成静态 registry 之外的值。
 
 ## 运行日志中的语音记录
 
-唤醒命中，以及唤醒后、通话中的识别文本，写入当天的运行日志，模块名为 `Voice`。文本还在增长时记为「识别中：…」；一句结束记为「识别：…」，随后记「提交运行时：…」。运行时模块接着记录收到的文本、语言决策、选中的技能、安全复核、开始执行，以及执行完成或未执行的原因。语音侧在运行时返回后记录结论或失败原因。同一句里没有变化的文本不重复记录。不再写 `logs/voice_events.jsonl`，总览页也不再提供语音日志。记录格式、隐私边界，以及它和工具调用审计的分工见[运行日志](17-runtime-log.md)。原始音频、每个音频帧和技能参数原文不写入日志。中间结果只进日志，不提交运行时。
+唤醒命中，以及唤醒后、通话中的识别文本，写入当天的运行日志，模块名为 `Voice`。流式中间结果还在增长时记为「识别中：…」；网络识别没有中间结果，一句结束记为「识别：…」。闭集命中再记「闭集技能：…」，随后记「提交运行时：…」。运行时模块接着记录收到的文本、语言决策、选中的技能、安全复核、开始执行，以及执行完成或未执行的原因。语音侧在运行时返回后记录结论或失败原因。同一句里没有变化的文本不重复记录。不再写 `logs/voice_events.jsonl`，总览页也不再提供语音日志。记录格式、隐私边界，以及它和工具调用审计的分工见[运行日志](17-runtime-log.md)。原始音频、每个音频帧和技能参数原文不写入日志。中间结果只进日志，不提交运行时。
 
 资源 manifest 记录每个下载项的版本、官方 URL、大小、SHA-256、架构和许可证来源。Xiao-Ya TTS 归档内的 `MODEL_CARD` 标明其 BZNSYP/Data-Baker 数据许可仅限非商业用途；商业部署必须先替换为具备适用商业许可的语音模型并重新锁定哈希，不能把 sherpa-onnx 的 Apache-2.0 许可视为覆盖该语音权重。
 

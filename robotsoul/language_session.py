@@ -13,8 +13,10 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from robotsoul.agent import AgentIntent, AgentRejected
+from robotsoul.robot_config import default_robot_config_path, identity_document, load_robot_deployment_config
 from robotsoul.models import CapabilitySpec, Observation, ReviewProposal, ReviewVerdict, SafetyReviewResult
 from robotsoul.picoclaw import PicoClawCodingAgent
+from robotsoul.sensor_context import language_sensor_context
 
 
 class LanguageGatewayError(RuntimeError):
@@ -52,6 +54,14 @@ def launch_coding_task(prompt: str) -> str:
 
 def report_startup_failure(dispatcher: CodingDispatcher, message: str) -> str:
     return dispatcher.dispatch(f"模块启动失败：{message}")
+
+
+def identity_payload(robot_config_path: Path | None = None) -> dict[str, str]:
+    try:
+        deployment = load_robot_deployment_config(robot_config_path or default_robot_config_path())
+        return identity_document(deployment)
+    except ValueError:
+        return {"robot_name": "机器人", "soul": ""}
 
 
 class LanguageSession:
@@ -94,11 +104,12 @@ class LanguageSession:
         return cls(process, timeout_seconds)
 
     @classmethod
-    def start_resident(cls, llm_path: Path) -> "LanguageSession":
+    def start_resident(cls, llm_path: Path, robot_path: Path | None = None) -> "LanguageSession":
         timeout = _llm_timeout(llm_path)
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["OPENROBOTSOUL_LLM_CONFIG"] = str(llm_path)
+        env["OPENROBOTSOUL_ROBOT_CONFIG"] = str(robot_path or default_robot_config_path())
         return cls.start(
             [sys.executable, "-m", "robotsoul.language_gateway"],
             timeout_seconds=timeout + 5,
@@ -170,9 +181,16 @@ class LanguageSession:
 class LanguageAgent:
     """Forwards natural language to the resident process and returns one intent."""
 
-    def __init__(self, session: LanguageSession, coding: CodingDispatcher) -> None:
+    def __init__(
+        self,
+        session: LanguageSession,
+        coding: CodingDispatcher,
+        *,
+        robot_config_path: Path | None = None,
+    ) -> None:
         self.session = session
         self.coding = coding
+        self._robot_config_path = robot_config_path
 
     def plan(
         self,
@@ -187,6 +205,8 @@ class LanguageAgent:
                     "text": user_input,
                     "skills": [_skill_descriptor(item) for item in capabilities.values()],
                     "observations": [item.event_type for item in observations[:8]],
+                    "sensors": language_sensor_context(observations),
+                    "identity": identity_payload(self._robot_config_path),
                 }
             )
         except LanguageGatewayError as exc:
@@ -211,8 +231,9 @@ class LanguageAgent:
 class LanguageSafetyReviewer:
     """Tool-free confirm-tier review through the same resident process."""
 
-    def __init__(self, session: LanguageSession) -> None:
+    def __init__(self, session: LanguageSession, *, robot_config_path: Path | None = None) -> None:
         self.session = session
+        self._robot_config_path = robot_config_path
 
     def review(self, proposal: ReviewProposal) -> SafetyReviewResult:
         try:
@@ -223,6 +244,7 @@ class LanguageSafetyReviewer:
                     "parameters": proposal.command.parameters,
                     "user_input": proposal.user_input,
                     "risk_level": proposal.risk_level.value,
+                    "identity": identity_payload(self._robot_config_path),
                 }
             )
         except LanguageGatewayError as exc:
