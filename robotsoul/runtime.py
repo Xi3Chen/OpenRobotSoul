@@ -84,6 +84,7 @@ class RobotRuntime:
     _cancel_confirmations: dict[str, Feedback] = field(default_factory=dict, init=False, repr=False)
     _seen_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
     _used_task_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    _preempted_task_ids: set[str] = field(default_factory=set, init=False, repr=False)
     _used_review_bindings: set[str] = field(default_factory=set, init=False, repr=False)
     _runtime_lock: Lock = field(default_factory=Lock, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
@@ -309,6 +310,31 @@ class RobotRuntime:
             ),),
         )
 
+    def preempt_task(self, task_id: str) -> Feedback | None:
+        """Drop a voice task that has not started, or cancel it if it is interruptible.
+
+        A task that has not reached adapter execution is marked preempted and
+        ``run_text`` returns before the skill runs. A running interruptible
+        command uses ``cancel_task``. A running command that is not
+        interruptible is left alone.
+        """
+        with self._runtime_lock:
+            command = self._active_commands.get(task_id)
+            if command is None:
+                self._preempted_task_ids.add(task_id)
+                return None
+        capability = self.capabilities.get(command.skill)
+        if capability is not None and not capability.interruptible:
+            return None
+        return self.cancel_task(task_id)
+
+    def _consume_preempted(self, task_id: str) -> bool:
+        with self._runtime_lock:
+            if task_id not in self._preempted_task_ids:
+                return False
+            self._preempted_task_ids.discard(task_id)
+            return True
+
     def cancel_task(self, task_id: str) -> Feedback | None:
         """Request local cancellation of the task's active command.
 
@@ -427,6 +453,8 @@ class RobotRuntime:
 
         record("task.received", {"input_chars": len(text)})
         _trace("Info", task.task_id, f"收到指令：{text.strip()}")
+        if self._consume_preempted(resolved_task_id):
+            return self._failed_result(task, history, "Voice command was replaced", transition, record)
         if not text.strip():
             return self._failed_result(task, history, "Task input is empty", transition, record)
         transition(TaskStatus.CONTEXTUALIZING)
@@ -598,6 +626,8 @@ class RobotRuntime:
                 if command.review_digest in self._used_review_bindings:
                     return self._failed_result(task, history, "Reviewed proposal was already consumed", transition, record)
                 self._used_review_bindings.add(command.review_digest)
+        if self._consume_preempted(task.task_id):
+            return self._failed_result(task, history, "Voice command was replaced", transition, record)
         record("command.created", {"command_id": command.command_id, "skill": command.skill})
         transition(TaskStatus.EXECUTING)
         _trace("Info", task.task_id, f"开始执行 技能={command.skill}")

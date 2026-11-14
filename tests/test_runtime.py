@@ -70,6 +70,21 @@ class RuntimeContractTests(unittest.TestCase):
 
         runtime.adapter.close.assert_called_once_with()
 
+    def test_preempted_voice_task_does_not_execute(self):
+        runtime = RobotRuntime.from_profile(load_profile("simulator-basic"))
+        calls = []
+        execute = runtime.adapter.execute
+        runtime.adapter.execute = lambda command: calls.append(command.skill) or execute(command)
+        runtime.preempt_task("voice-task")
+        result = runtime.run_text(
+            "看一下",
+            task_id="voice-task",
+            _intent=AgentIntent("head.look", {"yaw_deg": 0, "pitch_deg": 10}),
+        )
+        self.assertEqual(calls, [])
+        self.assertEqual(result.task.status, "failed")
+        self.assertEqual(result.task.error, "Voice command was replaced")
+
     def test_basic_profile_runs_registered_skill_to_completion(self):
         result = RobotRuntime.from_profile(load_profile("simulator-basic")).run_text("/head.look yaw_deg=0 pitch_deg=10")
 
