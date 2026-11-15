@@ -24,6 +24,8 @@
 - [语音交互子系统](16-voice-interaction.md)
 - [运行日志](17-runtime-log.md)
 - [对话上下文与 PicoClaw AgentLoop](18-picoclaw-dialogue-context.md)
+- [对话方案与 Agent 运行底座可行性评估](19-agent-foundation-feasibility.md)
+- [Agent 底座首阶段实施验收](20-agent-foundation-implementation.md)
 
 ## 核心决策
 
