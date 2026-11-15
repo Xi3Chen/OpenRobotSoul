@@ -947,7 +947,9 @@ class VoiceService:
         self._note("Info", f"提交运行时：{cleaned}")
         self._reset_utterance()
         try:
-            future = self.runtime_executor.submit_final(text, intent=intent)
+            context_provider = getattr(self, "runtime_conversation", None)
+            conversation = context_provider() if callable(context_provider) else None
+            future = self.runtime_executor.submit_final(text, intent=intent, conversation=conversation)
         except Exception:
             self._release_turn("runtime")
             raise
@@ -1077,7 +1079,12 @@ class VoiceService:
                 self._release_turn("runtime")
                 self._note("Warning", f"运行时结果已过期，未播报 id={task_id} 状态={status}")
                 return
-            if evaluation is not None and evaluation.success:
+            reply = getattr(result, "reply", "")
+            if isinstance(reply, str) and reply.strip():
+                response = reply.strip()
+                success = status not in {"failed", "interrupted"}
+                self._note("Info", f"运行时答复 id={task_id} 状态={status} 内容={response}")
+            elif evaluation is not None and evaluation.success:
                 response = evaluation.conclusion
                 success = True
                 self._note("Info", f"运行时完成 id={task_id} 状态={status} 结论={response}")

@@ -472,7 +472,7 @@ class RuntimeTextExecutor:
         with self._lock:
             return self._epoch
 
-    def submit_final(self, text: str, *, intent: Any = None) -> Future[R]:
+    def submit_final(self, text: str, *, intent: Any = None, conversation: Any = None) -> Future[R]:
         if not text.strip():
             raise ValueError("final text must not be empty")
         future: Future[R] = Future()
@@ -486,6 +486,7 @@ class RuntimeTextExecutor:
             except Full as exc:
                 raise RuntimeError("voice runtime queue is full") from exc
             future.voice_epoch = epoch  # type: ignore[attr-defined]
+            future.voice_conversation = conversation  # type: ignore[attr-defined]
             self._pool.submit(self._work_one)
         return future
 
@@ -523,7 +524,7 @@ class RuntimeTextExecutor:
                 future.set_result(None)
                 return
             try:
-                future.set_result(self._invoke(text, task_id, intent))
+                future.set_result(self._invoke(text, task_id, intent, getattr(future, "voice_conversation", None)))
             except BaseException as exc:
                 future.set_exception(exc)
             finally:
@@ -533,7 +534,7 @@ class RuntimeTextExecutor:
         finally:
             self._queue.task_done()
 
-    def _invoke(self, text: str, task_id: str, intent: Any) -> R:
+    def _invoke(self, text: str, task_id: str, intent: Any, conversation: Any = None) -> R:
         try:
             parameters = inspect.signature(self._run_text).parameters
         except (TypeError, ValueError):
@@ -543,6 +544,8 @@ class RuntimeTextExecutor:
             kwargs["task_id"] = task_id
         if intent is not None and "intent" in parameters:
             kwargs["intent"] = intent
+        if conversation is not None and "conversation" in parameters:
+            kwargs["conversation"] = conversation
         if kwargs:
             return self._run_text(text, **kwargs)
         return self._run_text(text)

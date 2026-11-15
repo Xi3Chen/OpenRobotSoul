@@ -100,6 +100,8 @@
             <section class="control-section conversation-panel" aria-labelledby="task-title">
               <div class="section-heading"><h2 id="task-title">对话</h2><span class="subtle">普通句子交给模型；只有 /技能名 会本地直接调用</span></div>
               <div id="conversation-log" class="conversation-log" aria-live="polite"></div>
+              <p id="task-progress" class="subtle" role="status"></p>
+              <button id="task-cancel" class="quiet-button" type="button" hidden>取消当前任务</button>
               <form id="task-form" class="task-form">
                 <label class="visually-hidden" for="task-text">任务内容</label>
                 <textarea id="task-text" name="text" rows="2" maxlength="1000" placeholder="输入一句话，或 /stand_up" required></textarea>

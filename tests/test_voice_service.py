@@ -174,7 +174,7 @@ class VoiceServiceTests(unittest.TestCase):
             lines = []
             while time.monotonic() < deadline:
                 lines = current().recent(20)
-                if any("唤醒：索拉" in line for line in lines) and any("识别：向前" in line for line in lines):
+                if any("唤醒：索拉" in line for line in lines) and any("提交运行时：向前" in line for line in lines):
                     break
                 time.sleep(0.01)
             self.assertTrue(any("-Voice-Info] 唤醒：索拉" in line for line in lines))
@@ -289,7 +289,7 @@ class VoiceServiceTests(unittest.TestCase):
             lines = []
             while time.monotonic() < deadline:
                 lines = current().recent(30)
-                if any("识别：请站起来（本地麦克风）" in line for line in lines):
+                if submitted == ["请站起来"]:
                     break
                 time.sleep(0.01)
             self.assertTrue(any("识别：请站起来（本地麦克风）" in line for line in lines))

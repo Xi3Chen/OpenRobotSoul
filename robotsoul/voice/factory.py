@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from robotsoul.resources import default_root
@@ -86,8 +87,36 @@ def create_voice_service(
     engine = SherpaVoiceEngine(
         root, wake_phrases, speech=SpeechClient(config.speech), language=config.language,
     )
-    def run_voice_text(text: str, task_id: str | None = None, intent: Any = None):
-        return runtime.run_text(text, task_id=task_id, _intent=intent)
+    aliases: dict[str, str] = {}
+    alias_lock = Lock()
+
+    def run_voice_text(text: str, task_id: str | None = None, intent: Any = None, conversation: Any = None):
+        conversation = conversation or service.runtime_conversation()
+        pending = runtime.pending_input(conversation)
+        actual = pending or task_id
+        if task_id is not None and actual is not None:
+            with alias_lock:
+                aliases[task_id] = actual
+        try:
+            if pending is not None:
+                runtime.resume_task(pending, text=text, conversation=conversation)
+                return runtime.wait_task(pending)
+            return runtime.run_text(text, task_id=task_id, _intent=intent, conversation=conversation)
+        finally:
+            if task_id is not None:
+                with alias_lock:
+                    aliases.pop(task_id, None)
+
+    def cancel_voice_task(task_id: str):
+        with alias_lock:
+            actual = aliases.get(task_id, task_id)
+        return runtime.preempt_task(actual)
+
+    def conversation_for_voice():
+        state = getattr(service.arbiter.state, "value", service.arbiter.state)
+        if state in {"CALL", "CALL_PENDING", "CALL_RECONNECTING"}:
+            return runtime.conversation("call", "local-call", str(service.arbiter.generation))
+        return runtime.conversation("voice", "local-microphone", "local")
 
     service = VoiceService(
         capture=capture,
@@ -103,6 +132,7 @@ def create_voice_service(
         command_matcher=lambda text: match_closed_command(
             text, runtime.capabilities, wake_phrase=wake_phrases
         ),
-        cancel_task=runtime.preempt_task,
+        cancel_task=cancel_voice_task,
     )
+    service.runtime_conversation = conversation_for_voice
     return service, config
