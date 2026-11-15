@@ -266,4 +266,5 @@ def _intersect_capabilities(
         description=profile.description,
         estimate_ms=device.estimate_ms or profile.estimate_ms,
         completion=device.completion if device.estimate_ms or device.completion != "accepted" else profile.completion,
+        retry_safe=profile.retry_safe and device.retry_safe,
     )

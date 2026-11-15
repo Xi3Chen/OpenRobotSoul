@@ -65,6 +65,8 @@ class SportAction:
     required: bool = False
     estimate_ms: int = 1500
     completion: str = "accepted"
+    retry_safe: bool = False
+    target_radians: float | None = None
 
     def capability(self) -> CapabilitySpec:
         high = self.risk_level == RiskLevel.HIGH
@@ -80,6 +82,7 @@ class SportAction:
             description=self.description,
             estimate_ms=self.estimate_ms,
             completion=self.completion,
+            retry_safe=self.retry_safe,
         )
 
 
@@ -131,6 +134,8 @@ def _action(
     completion: str | None = None,
     estimate_ms: int | None = None,
     timeout_ms: int | None = None,
+    retry_safe: bool = False,
+    target_radians: float | None = None,
 ) -> SportAction:
     default_completion, default_estimate, default_timeout = _timing(bridge_name)
     return SportAction(
@@ -144,6 +149,8 @@ def _action(
         required=required,
         estimate_ms=default_estimate if estimate_ms is None else estimate_ms,
         completion=default_completion if completion is None else completion,
+        retry_safe=retry_safe,
+        target_radians=target_radians,
     )
 
 
@@ -244,6 +251,51 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
         estimate_ms=20000,
         timeout_ms=90000,
     ),
+    _action(
+        "move", "turn", RiskLevel.CONFIRM,
+        skill="motion.turn_left",
+        description="向左闭环转向 90 度。需要新鲜 IMU yaw；转向不可逆，不可安全重试。",
+        completion="measured", estimate_ms=5000, timeout_ms=10000,
+        target_radians=pi / 2,
+    ),
+    _action(
+        "move", "turn", RiskLevel.CONFIRM,
+        skill="motion.turn_right",
+        description="向右闭环转向 90 度。需要新鲜 IMU yaw；转向不可逆，不可安全重试。",
+        completion="measured", estimate_ms=5000, timeout_ms=10000,
+        target_radians=-pi / 2,
+    ),
+    _action(
+        "move", "turn", RiskLevel.CONFIRM,
+        skill="motion.turn_around",
+        description="向左闭环转向 180 度。需要新鲜 IMU yaw；转向不可逆，不可安全重试。",
+        completion="measured", estimate_ms=10000, timeout_ms=15000,
+        target_radians=pi,
+    ),
+    _action(
+        "euler", "expression", RiskLevel.NORMAL,
+        {"direction": ParameterSpec("string", max_length=5)},
+        prefix="expression", skill="expression.tilt_head",
+        description="向指定方向轻微歪头，保持后恢复中立。方向为 left 或 right；重复执行安全。",
+        completion="nominal", estimate_ms=2000, timeout_ms=7000,
+        retry_safe=True,
+    ),
+    _action(
+        "euler", "expression", RiskLevel.NORMAL,
+        {"count": _number(1, 5)},
+        prefix="expression", skill="expression.nod",
+        description="点头 1 到 5 次，每次向下再向上，完成后恢复中立；重复执行安全。",
+        completion="nominal", estimate_ms=6000, timeout_ms=11000,
+        retry_safe=True,
+    ),
+    _action(
+        "euler", "expression", RiskLevel.NORMAL,
+        {"count": _number(1, 5)},
+        prefix="expression", skill="expression.shake_head",
+        description="左右摇头 1 到 5 次，每次左摆再右摆，完成后恢复中立；重复执行安全。",
+        completion="nominal", estimate_ms=6000, timeout_ms=11000,
+        retry_safe=True,
+    ),
     _action("speed_level", "level", RiskLevel.NORMAL, _LEVEL),
     _action("auto_recover_get", "query", RiskLevel.NORMAL),
     _action("set_volume", "volume", RiskLevel.NORMAL, _VOLUME, prefix="vui"),
@@ -286,6 +338,7 @@ def capability_documents() -> list[dict[str, Any]]:
                 "description": spec.description,
                 "estimate_ms": spec.estimate_ms,
                 "completion": spec.completion,
+                "retry_safe": spec.retry_safe,
             }
         )
     return documents
@@ -301,13 +354,21 @@ def validate_parameters(action: SportAction, parameters: dict[str, Any]) -> str 
             if not isinstance(value, bool):
                 return f"Parameter {name} must be boolean"
             continue
+        if parameter.value_type == "string":
+            if not isinstance(value, str):
+                return f"Parameter {name} must be text"
+            if parameter.max_length is not None and len(value) > parameter.max_length:
+                return f"Parameter {name} is too long"
+            if name == "direction" and value not in {"left", "right"}:
+                return "Parameter direction must be 'left' or 'right'"
+            continue
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
             return f"Parameter {name} must be a finite number"
         if parameter.minimum is not None and value < parameter.minimum:
             return f"Parameter {name} is below its verified minimum"
         if parameter.maximum is not None and value > parameter.maximum:
             return f"Parameter {name} exceeds its verified maximum"
-        if name in {"level", "duration_ms", "volume"} and float(value) != trunc(float(value)):
+        if name in {"level", "duration_ms", "volume", "count"} and float(value) != trunc(float(value)):
             return f"Parameter {name} must be an integer"
     if action.kind == "move_distance" and abs(float(parameters["vx"])) < 0.2:
         return "Parameter vx must be at least 0.2 in magnitude for a distance move"
@@ -316,6 +377,8 @@ def validate_parameters(action: SportAction, parameters: dict[str, Any]) -> str 
 
 def native_arguments(action: SportAction, parameters: dict[str, Any]) -> tuple[list[float], bool | None]:
     if action.kind in {"none", "query"}:
+        return [], None
+    if action.kind in {"turn", "expression"}:
         return [], None
     if action.kind == "euler":
         return [float(parameters[name]) for name in ("roll", "pitch", "yaw")], None

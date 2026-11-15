@@ -747,6 +747,93 @@
       "description": "VuiClient::SetVolume(level)，设置机身音量。volume 为整数，官方文档取值范围 0~10，0 为静音，10 为最大。",
       "estimate_ms": 1500,
       "completion": "accepted"
+    },
+    {
+      "name": "motion.turn_left",
+      "risk_level": "confirm",
+      "allowed_callers": ["agent", "dashboard"],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 10000,
+      "required": false,
+      "description": "向左闭环转向 90 度。需要新鲜 IMU yaw；转向不可逆，不可安全重试。",
+      "estimate_ms": 5000,
+      "completion": "measured"
+    },
+    {
+      "name": "motion.turn_right",
+      "risk_level": "confirm",
+      "allowed_callers": ["agent", "dashboard"],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 10000,
+      "required": false,
+      "description": "向右闭环转向 90 度。需要新鲜 IMU yaw；转向不可逆，不可安全重试。",
+      "estimate_ms": 5000,
+      "completion": "measured"
+    },
+    {
+      "name": "motion.turn_around",
+      "risk_level": "confirm",
+      "allowed_callers": ["agent", "dashboard"],
+      "requires_operator_confirmation": false,
+      "parameters": {},
+      "interruptible": true,
+      "timeout_ms": 15000,
+      "required": false,
+      "description": "向左闭环转向 180 度。需要新鲜 IMU yaw；转向不可逆，不可安全重试。",
+      "estimate_ms": 10000,
+      "completion": "measured"
+    },
+    {
+      "name": "expression.tilt_head",
+      "risk_level": "normal",
+      "allowed_callers": ["agent", "dashboard"],
+      "requires_operator_confirmation": false,
+      "parameters": {
+        "direction": {"type": "string", "max_length": 5}
+      },
+      "interruptible": true,
+      "timeout_ms": 7000,
+      "required": false,
+      "description": "向指定方向轻微歪头，保持后恢复中立。方向为 left 或 right；重复执行安全。",
+      "estimate_ms": 2000,
+      "completion": "nominal",
+      "retry_safe": true
+    },
+    {
+      "name": "expression.nod",
+      "risk_level": "normal",
+      "allowed_callers": ["agent", "dashboard"],
+      "requires_operator_confirmation": false,
+      "parameters": {
+        "count": {"type": "number", "min": 1.0, "max": 5.0}
+      },
+      "interruptible": true,
+      "timeout_ms": 11000,
+      "required": false,
+      "description": "点头 1 到 5 次，每次向下再向上，完成后恢复中立；重复执行安全。",
+      "estimate_ms": 6000,
+      "completion": "nominal",
+      "retry_safe": true
+    },
+    {
+      "name": "expression.shake_head",
+      "risk_level": "normal",
+      "allowed_callers": ["agent", "dashboard"],
+      "requires_operator_confirmation": false,
+      "parameters": {
+        "count": {"type": "number", "min": 1.0, "max": 5.0}
+      },
+      "interruptible": true,
+      "timeout_ms": 11000,
+      "required": false,
+      "description": "左右摇头 1 到 5 次，每次左摆再右摆，完成后恢复中立；重复执行安全。",
+      "estimate_ms": 6000,
+      "completion": "nominal",
+      "retry_safe": true
     }
   ]
 }
