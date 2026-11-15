@@ -14,6 +14,8 @@ from robotsoul.models import (
     InvocationContext,
     InvocationSource,
     Observation,
+    EvidenceRequirement,
+    ExecutionCondition,
     ReviewProposal,
     ReviewVerdict,
     RiskLevel,
@@ -31,6 +33,25 @@ from robotsoul.audit import (
 from robotsoul.profiles import RobotProfile, list_profiles, load_profile, load_selected_profile
 from robotsoul.picoclaw import CodingTaskResult, PicoClawCodingAgent, PicoClawError
 from robotsoul.runtime import RobotRuntime, SafetyReviewer
+from robotsoul.safety import (
+    DirectionalEvidence,
+    DirectionalEvidenceTable,
+    DirectionalClearanceTable,
+    EvidenceCheck,
+    LocalSafetySupervisor,
+    SafetyCheck,
+    SafetyReviewMetrics,
+    SafetySupervisor,
+)
+from robotsoul.confirmation import (
+    ConfirmationDecision,
+    ConfirmationManager,
+    ConfirmationRequest,
+    ConfirmationResult,
+    ConfirmationStatus,
+    GestureSample,
+    VoiceConfirmationManager,
+)
 from robotsoul.task_runner import TaskRunner, TaskLimits
 
 __all__ = [
@@ -53,6 +74,8 @@ __all__ = [
     "JsonlToolCallAuditSink",
     "NullToolCallAuditSink",
     "Observation",
+    "EvidenceRequirement",
+    "ExecutionCondition",
     "ReviewProposal",
     "ReviewVerdict",
     "RiskLevel",
@@ -60,6 +83,21 @@ __all__ = [
     "RobotRuntime",
     "SafetyReviewer",
     "SafetyReviewResult",
+    "DirectionalEvidence",
+    "DirectionalEvidenceTable",
+    "DirectionalClearanceTable",
+    "EvidenceCheck",
+    "LocalSafetySupervisor",
+    "SafetyCheck",
+    "SafetyReviewMetrics",
+    "SafetySupervisor",
+    "ConfirmationDecision",
+    "ConfirmationManager",
+    "ConfirmationRequest",
+    "ConfirmationResult",
+    "ConfirmationStatus",
+    "GestureSample",
+    "VoiceConfirmationManager",
     "PicoClawCodingAgent",
     "PicoClawError",
     "Task",

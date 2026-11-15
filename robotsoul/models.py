@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
 from hashlib import sha256
+from math import isfinite
 import json
 from typing import Any
 
@@ -51,9 +52,93 @@ class InvocationSource(StrEnum):
 
 
 class ReviewVerdict(StrEnum):
+    PASS = "pass"
+    NEEDS_EVIDENCE = "needs_evidence"
     ALLOW = "allow"
     DENY = "deny"
     UNCERTAIN = "uncertain"
+
+    @property
+    def is_pass(self) -> bool:
+        return self in {ReviewVerdict.PASS, ReviewVerdict.ALLOW}
+
+    @property
+    def is_needs_evidence(self) -> bool:
+        return self in {ReviewVerdict.NEEDS_EVIDENCE, ReviewVerdict.UNCERTAIN}
+
+
+@dataclass(frozen=True)
+class EvidenceRequirement:
+    """A bounded fact that must be true before a reviewed action can start.
+
+    Requirements are deliberately geometric only at the boundary: the model
+    names a direction and range, while the local evidence table decides whether
+    the current sensor/human evidence satisfies it.
+    """
+
+    direction: str
+    quantity: int = 0
+    range_m: float = 1.0
+    valid_for_seconds: float = 10.0
+    evidence_type: str = "clearance"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.direction, str) or not self.direction.strip():
+            raise ValueError("evidence direction must be non-empty text")
+        if isinstance(self.quantity, bool) or not isinstance(self.quantity, int) or self.quantity < 0:
+            raise ValueError("evidence quantity must be a non-negative integer")
+        if isinstance(self.range_m, bool) or not isinstance(self.range_m, (int, float)) or not isfinite(float(self.range_m)) or self.range_m <= 0:
+            raise ValueError("evidence range_m must be a positive finite number")
+        if isinstance(self.valid_for_seconds, bool) or not isinstance(self.valid_for_seconds, (int, float)) or not isfinite(float(self.valid_for_seconds)) or self.valid_for_seconds <= 0:
+            raise ValueError("evidence valid_for_seconds must be a positive finite number")
+        if not isinstance(self.evidence_type, str) or not self.evidence_type.strip():
+            raise ValueError("evidence_type must be non-empty text")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "direction": self.direction,
+            "quantity": self.quantity,
+            "range_m": float(self.range_m),
+            "valid_for_seconds": float(self.valid_for_seconds),
+            "evidence_type": self.evidence_type,
+        }
+
+
+@dataclass(frozen=True)
+class ExecutionCondition:
+    """A deterministic condition attached to an otherwise approved command."""
+
+    name: str
+    evidence: EvidenceRequirement | None = None
+    minimum_battery_percent: int | None = None
+    max_speed_mps: float | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("execution condition name must be non-empty text")
+        if self.minimum_battery_percent is not None and (
+            isinstance(self.minimum_battery_percent, bool)
+            or not isinstance(self.minimum_battery_percent, int)
+            or not 0 <= self.minimum_battery_percent <= 100
+        ):
+            raise ValueError("minimum_battery_percent must be an integer percent")
+        if self.max_speed_mps is not None and (
+            isinstance(self.max_speed_mps, bool)
+            or not isinstance(self.max_speed_mps, (int, float))
+            or not isfinite(float(self.max_speed_mps))
+            or self.max_speed_mps <= 0
+        ):
+            raise ValueError("max_speed_mps must be a positive finite number")
+
+    def to_dict(self) -> dict[str, Any]:
+        value: dict[str, Any] = {"name": self.name}
+        if self.evidence is not None:
+            value["evidence"] = self.evidence.to_dict()
+        if self.minimum_battery_percent is not None:
+            value["minimum_battery_percent"] = self.minimum_battery_percent
+        if self.max_speed_mps is not None:
+            value["max_speed_mps"] = float(self.max_speed_mps)
+        return value
 
 
 @dataclass(frozen=True)
@@ -146,6 +231,27 @@ class SafetyReviewResult:
     verdict: ReviewVerdict
     arguments_digest: str
     rationale: str
+    evidence_requirements: tuple[EvidenceRequirement, ...] = ()
+    conditions: tuple[ExecutionCondition, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.verdict, ReviewVerdict):
+            raise ValueError("review verdict must be a ReviewVerdict")
+        if not isinstance(self.arguments_digest, str) or not self.arguments_digest:
+            raise ValueError("review arguments_digest must be non-empty text")
+        if not isinstance(self.rationale, str) or not self.rationale.strip():
+            raise ValueError("review rationale must be non-empty text")
+        for item in (*self.evidence_requirements, *self.conditions):
+            if not isinstance(item, (EvidenceRequirement, ExecutionCondition)):
+                raise ValueError("review conditions contain an invalid item")
+
+    @property
+    def passed(self) -> bool:
+        return self.verdict.is_pass
+
+    @property
+    def needs_evidence(self) -> bool:
+        return self.verdict.is_needs_evidence
 
 
 @dataclass(frozen=True)

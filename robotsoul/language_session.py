@@ -20,8 +20,18 @@ from uuid import uuid4
 
 from robotsoul.agent import AgentIntent, AgentPlan, AgentRejected
 from robotsoul.robot_config import default_robot_config_path, identity_document, load_robot_deployment_config
-from robotsoul.models import (AgentDecision, CapabilitySpec, ConversationContext, Observation,
-                             ReviewProposal, ReviewVerdict, SafetyReviewResult, TaskContext)
+from robotsoul.models import (
+    AgentDecision,
+    CapabilitySpec,
+    ConversationContext,
+    EvidenceRequirement,
+    ExecutionCondition,
+    Observation,
+    ReviewProposal,
+    ReviewVerdict,
+    SafetyReviewResult,
+    TaskContext,
+)
 from robotsoul.picoclaw import PicoClawCodingAgent
 from robotsoul.sensor_context import language_sensor_context
 
@@ -446,17 +456,84 @@ class LanguageSafetyReviewer:
             return SafetyReviewResult(ReviewVerdict.DENY, proposal.arguments_digest, str(exc))
         verdict_name = decision.get("verdict")
         verdict = {
+            "pass": ReviewVerdict.PASS,
             "allow": ReviewVerdict.ALLOW,
             "deny": ReviewVerdict.DENY,
+            "needs_evidence": ReviewVerdict.NEEDS_EVIDENCE,
             "uncertain": ReviewVerdict.UNCERTAIN,
-        }.get(verdict_name if isinstance(verdict_name, str) else "", ReviewVerdict.UNCERTAIN)
+        }.get(verdict_name if isinstance(verdict_name, str) else "", ReviewVerdict.DENY)
         rationale = decision.get("rationale")
         reason = rationale.strip() if isinstance(rationale, str) else ""
-        if verdict != ReviewVerdict.ALLOW and not reason:
-            reason = "复核没有给出拒绝理由，已拒绝执行"
-        if verdict == ReviewVerdict.ALLOW and not reason:
-            reason = "复核允许执行"
-        return SafetyReviewResult(verdict, proposal.arguments_digest, reason)
+        if not reason:
+            reason = "复核允许执行" if verdict.is_pass else "复核没有给出可执行的理由，已拒绝执行"
+        evidence_requirements = _review_evidence_requirements(
+            decision.get("evidence_requirements", decision.get("evidence"))
+        )
+        conditions = _review_conditions(decision.get("conditions"))
+        if verdict.is_needs_evidence and not evidence_requirements:
+            verdict = ReviewVerdict.DENY
+            reason = "需要证据的复核必须明确方向、数量、范围和有效期"
+        return SafetyReviewResult(
+            verdict,
+            proposal.arguments_digest,
+            reason,
+            evidence_requirements=evidence_requirements,
+            conditions=conditions,
+        )
+
+
+def _review_evidence_requirements(value: Any) -> tuple[EvidenceRequirement, ...]:
+    if value is None or not isinstance(value, list):
+        return ()
+    requirements: list[EvidenceRequirement] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        direction = item.get("direction")
+        quantity = item.get("quantity", item.get("count", 0))
+        range_m = item.get("range_m", item.get("range"))
+        valid_for = item.get("valid_for_seconds", item.get("expires_in_seconds"))
+        if not isinstance(direction, str) or not isinstance(quantity, int) or isinstance(quantity, bool):
+            continue
+        if not isinstance(range_m, (int, float)) or isinstance(range_m, bool):
+            continue
+        if not isinstance(valid_for, (int, float)) or isinstance(valid_for, bool):
+            continue
+        try:
+            requirements.append(
+                EvidenceRequirement(
+                    direction,
+                    quantity,
+                    float(range_m),
+                    float(valid_for),
+                    str(item.get("evidence_type", "clearance")),
+                )
+            )
+        except ValueError:
+            continue
+    return tuple(requirements)
+
+
+def _review_conditions(value: Any) -> tuple[ExecutionCondition, ...]:
+    if value is None or not isinstance(value, list):
+        return ()
+    conditions: list[ExecutionCondition] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        evidence = _review_evidence_requirements([item.get("evidence")])
+        try:
+            conditions.append(
+                ExecutionCondition(
+                    str(item.get("name") or f"condition_{index + 1}"),
+                    evidence=evidence[0] if evidence else None,
+                    minimum_battery_percent=item.get("minimum_battery_percent"),
+                    max_speed_mps=item.get("max_speed_mps"),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return tuple(conditions)
 
 
 def _skill_descriptor(capability: CapabilitySpec) -> dict[str, Any]:

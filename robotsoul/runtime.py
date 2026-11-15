@@ -32,7 +32,9 @@ from robotsoul.models import (
     CapabilitySpec,
     ConversationContext,
     Command,
+    ExecutionCondition,
     Evaluation,
+    EvidenceRequirement,
     Feedback,
     FeedbackStatus,
     InvocationContext,
@@ -51,6 +53,8 @@ from robotsoul.models import (
 )
 from robotsoul.motion_plan import combined_amount, motion_amount_key, same_velocity
 from robotsoul.profiles import RobotProfile
+from robotsoul.safety import LocalSafetySupervisor, SafetyCheck, SafetyReviewMetrics
+from robotsoul.confirmation import ConfirmationManager, ConfirmationRequest, ConfirmationResult, GestureSample
 
 
 _REVIEW_WINDOW = timedelta(seconds=120)
@@ -165,6 +169,9 @@ class RobotRuntime:
     audit_sink: ToolCallAuditSink = field(default_factory=JsonlToolCallAuditSink, repr=False)
     safety_reviewer: SafetyReviewer | None = field(default=None, repr=False)
     task_store_path: str | Path = field(default=":memory:", repr=False)
+    safety_supervisor: LocalSafetySupervisor | None = field(default=None, repr=False)
+    confirmation_manager: ConfirmationManager | None = field(default=None, repr=False)
+    review_metrics: SafetyReviewMetrics = field(default_factory=SafetyReviewMetrics, repr=False)
     _task_runner: Any = field(default=None, init=False, repr=False)
     _runner_lock: Lock = field(default_factory=Lock, init=False, repr=False)
     _observation_lock: Lock = field(default_factory=Lock, init=False, repr=False)
@@ -190,6 +197,9 @@ class RobotRuntime:
         audit_sink: ToolCallAuditSink | None = None,
         safety_reviewer: SafetyReviewer | None = None,
         task_store_path: str | Path = ":memory:",
+        safety_supervisor: LocalSafetySupervisor | None = None,
+        confirmation_manager: ConfirmationManager | None = None,
+        review_metrics: SafetyReviewMetrics | None = None,
     ) -> "RobotRuntime":
         active_adapter = adapter if adapter is not None else create_adapter(profile)
         if adapter is not None and agent is None:
@@ -236,6 +246,9 @@ class RobotRuntime:
             audit_sink if audit_sink is not None else JsonlToolCallAuditSink(DEFAULT_TOOL_CALL_LOG_PATH),
             safety_reviewer,
             task_store_path,
+            safety_supervisor if safety_supervisor is not None else getattr(active_adapter, "safety_supervisor", None),
+            confirmation_manager,
+            review_metrics if review_metrics is not None else SafetyReviewMetrics(),
         )
 
     @staticmethod
@@ -337,6 +350,42 @@ class RobotRuntime:
         if self._task_runner is not None:
             self._task_runner.close()
         self.adapter.close()
+
+    def safety_status(self) -> dict[str, Any]:
+        supervisor = self.safety_supervisor
+        if supervisor is None:
+            status: dict[str, Any] = {"enabled": False, "metrics": {}, "review": self.review_metrics.snapshot()}
+            if self.confirmation_manager is not None:
+                status["confirmation"] = self.confirmation_manager.status()
+            return status
+        status = supervisor.status()
+        status["enabled"] = True
+        status["review"] = self.review_metrics.snapshot()
+        manager = self.confirmation_manager
+        if manager is not None:
+            status["confirmation"] = manager.status()
+        return status
+
+    def trigger_emergency_stop(self, reason: str = "local emergency stop") -> SafetyCheck:
+        supervisor = self.safety_supervisor
+        if supervisor is None:
+            return SafetyCheck(False, "local safety supervisor is unavailable", "supervisor_unavailable")
+        return supervisor.trigger_emergency_stop(reason)
+
+    def open_confirmation(self, request: ConfirmationRequest) -> ConfirmationRequest:
+        if self.confirmation_manager is None:
+            raise RuntimeError("confirmation channel is unavailable")
+        return self.confirmation_manager.open(request)
+
+    def accept_voice_confirmation(self, transcript: str, **kwargs: Any) -> ConfirmationResult:
+        if self.confirmation_manager is None:
+            raise RuntimeError("confirmation channel is unavailable")
+        return self.confirmation_manager.accept_voice(transcript, **kwargs)
+
+    def accept_gesture_confirmation(self, sample: GestureSample, **kwargs: Any) -> ConfirmationResult:
+        if self.confirmation_manager is None:
+            raise RuntimeError("confirmation channel is unavailable")
+        return self.confirmation_manager.accept_gesture(sample, **kwargs)
 
     def conversation(self, channel: str = "cli", principal_id: str = "local", conversation_id: str | None = None) -> ConversationContext:
         return ConversationContext(self.profile.robot_id, channel, principal_id, conversation_id or self._default_conversation_id)
@@ -783,6 +832,7 @@ class RobotRuntime:
         ):
             return self._finish_failure(prior_feedback, task, history, "Capability requires authenticated operator confirmation", transition, record)
         proposal_command: Command | None = None
+        review_conditions: tuple[ExecutionCondition, ...] = ()
         operator_confirmation_id = None
         if capability.risk_level == RiskLevel.HIGH or capability.requires_operator_confirmation:
             operator_confirmation_id = str(uuid4())
@@ -810,6 +860,7 @@ class RobotRuntime:
                 **{**proposal_command.__dict__, "review_digest": digest}
             )
             if self.safety_reviewer is None:
+                self.review_metrics.record_review(ReviewVerdict.ALLOW, "Dashboard operator supplied the review")
                 record(
                     "safety.review.completed",
                     {"verdict": "allow", "reviewer": "dashboard_operator", "arguments_digest": digest},
@@ -827,27 +878,50 @@ class RobotRuntime:
                 except Exception as exc:
                     record("safety.review.failed", {"proposal_id": proposal.proposal_id, "error_type": type(exc).__name__})
                     return self._finish_failure(prior_feedback, task, history, "Safety review failed closed", transition, record)
-                record("safety.review.completed", {"proposal_id": proposal.proposal_id, "verdict": getattr(getattr(review, "verdict", None), "value", "invalid"), "arguments_digest": digest})
+                record("safety.review.completed", {
+                    "proposal_id": proposal.proposal_id,
+                    "verdict": getattr(getattr(review, "verdict", None), "value", "invalid"),
+                    "arguments_digest": digest,
+                    "conditions": [condition.to_dict() for condition in getattr(review, "conditions", ())],
+                    "evidence_requirements": [item.to_dict() for item in getattr(review, "evidence_requirements", ())],
+                })
                 reviewed_digest = command_proposal_digest(proposal.command, self.profile.profile_version)
                 expired = utc_now() >= proposal.expires_at
                 verdict = review.verdict if isinstance(review, SafetyReviewResult) else None
+                self.review_metrics.record_review(
+                    verdict.value if isinstance(verdict, ReviewVerdict) else "deny",
+                    review.rationale if isinstance(review, SafetyReviewResult) else "invalid review result",
+                )
                 digest_matches = (
                     isinstance(review, SafetyReviewResult)
                     and review.arguments_digest == digest
                     and reviewed_digest == digest
                 )
-                if verdict == ReviewVerdict.ALLOW and digest_matches and not expired:
+                if verdict is not None and verdict.is_pass and digest_matches and not expired:
+                    review_conditions = tuple(getattr(review, "conditions", ()))
+                    evidence_requirements = tuple(getattr(review, "evidence_requirements", ()))
+                    if any(not isinstance(item, EvidenceRequirement) for item in evidence_requirements):
+                        return self._finish_failure(prior_feedback, task, history, "安全复核包含无效证据要求，没有执行", transition, record)
+                    if any(not isinstance(item, ExecutionCondition) for item in review_conditions):
+                        return self._finish_failure(prior_feedback, task, history, "安全复核包含无效执行条件，没有执行", transition, record)
+                    if evidence_requirements:
+                        review_conditions = review_conditions + tuple(
+                            ExecutionCondition(f"review_evidence_{index + 1}", evidence=item)
+                            for index, item in enumerate(evidence_requirements)
+                        )
                     _trace("Info", task.task_id, f"安全复核通过 技能={intent.skill}")
-                if verdict != ReviewVerdict.ALLOW or not digest_matches or expired:
+                if verdict is None or not verdict.is_pass or not digest_matches or expired:
                     reason = f"安全复核没有通过，没有执行 {intent.skill}"
                     if (
                         isinstance(review, SafetyReviewResult)
-                        and verdict != ReviewVerdict.ALLOW
+                        and not verdict.is_pass
                         and digest_matches
                         and not expired
                         and review.rationale.strip()
                     ):
                         reason = review.rationale.strip()
+                    if isinstance(review, SafetyReviewResult) and verdict is not None and verdict.is_needs_evidence and digest_matches and not expired:
+                        reason = review.rationale.strip() or "安全复核需要明确的方向、数量、范围和有效期证据，没有执行"
                     elif expired:
                         reason = f"{intent.skill} 的安全复核超时，没有执行"
                     elif not digest_matches:
@@ -928,6 +1002,50 @@ class RobotRuntime:
                 on_dispatch(command)
             except Exception as exc:
                 return self._finish_failure(prior_feedback, task, history, f"Command could not be persisted: {exc}", transition, record)
+        supervisor = self.safety_supervisor
+        if supervisor is not None:
+            supervisor.bind_conditions(command.command_id, review_conditions)
+            safety_check = supervisor.check_command(command, phase="before")
+            if not safety_check.allowed:
+                self.review_metrics.record_condition_failure(
+                    safety_check.reason or "local safety supervisor rejected the command",
+                    safety_check.error_code,
+                )
+                record("safety.execution_condition_failed", {
+                    "command_id": command.command_id,
+                    "error_code": safety_check.error_code,
+                    "reason": safety_check.reason,
+                    "evidence": safety_check.evidence or {},
+                })
+                rejected = self._local_feedback(
+                    command,
+                    FeedbackStatus.FAILED,
+                    safety_check.reason or "Local safety supervisor rejected the command",
+                    safety_check.error_code or "safety_rejected",
+                )
+                tool_completed = tool_call_event(
+                    "completed",
+                    command,
+                    capability,
+                    tool_arguments,
+                    utc_now(),
+                    call_id=tool_call_id,
+                    duration_ms=0,
+                    outcome="returned",
+                    response=summarize_feedback((rejected,), private_values),
+                )
+                record("tool.call.completed", tool_completed)
+                self._write_tool_audit(tool_completed)
+                supervisor.clear_conditions(command.command_id)
+                return self._finish_failure(
+                    prior_feedback,
+                    task,
+                    history,
+                    rejected.message,
+                    transition,
+                    record,
+                    (rejected,),
+                )
         with self._runtime_lock:
             cancelled_before_dispatch = task.task_id in self._cancel_requested_ids or task.task_id in self._preempted_task_ids
             if not cancelled_before_dispatch:
@@ -992,6 +1110,36 @@ class RobotRuntime:
         with self._runtime_lock:
             self._active_commands.pop(task.task_id, None)
             confirmation = self._cancel_confirmations.pop(task.task_id, None)
+        if supervisor is not None:
+            landing_check = supervisor.after_feedback(command, feedback)
+            if not landing_check.allowed and any(item.status == FeedbackStatus.SUCCEEDED for item in feedback):
+                self.review_metrics.record_condition_failure(
+                    landing_check.reason or "local safety supervisor rejected the completed state",
+                    landing_check.error_code,
+                )
+                record("safety.landing_condition_failed", {
+                    "command_id": command.command_id,
+                    "error_code": landing_check.error_code,
+                    "reason": landing_check.reason,
+                    "evidence": landing_check.evidence or {},
+                })
+                safety_failure = self._local_feedback(
+                    command,
+                    FeedbackStatus.FAILED,
+                    landing_check.reason or "Local safety supervisor rejected the completed state",
+                    landing_check.error_code or "safety_landing_failed",
+                )
+                supervisor.clear_conditions(command.command_id)
+                return self._finish_failure(
+                    prior_feedback,
+                    task,
+                    history,
+                    safety_failure.message,
+                    transition,
+                    record,
+                    tuple(feedback) + (safety_failure,),
+                )
+            supervisor.clear_conditions(command.command_id)
         if confirmation is not None:
             record(
                 "command.cancel_confirmation",

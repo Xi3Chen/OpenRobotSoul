@@ -74,16 +74,17 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         self.assertEqual(declared, catalog)
         self.assertEqual(self.profile.required_capabilities, ("sport.stop_move",))
         self.assertNotIn("sport.damp", declared)
-        high = {item.name for item in self.profile.capabilities if item.risk_level == RiskLevel.HIGH}
         self.assertEqual(
-            high,
+            {item.name for item in self.profile.capabilities if item.risk_level == RiskLevel.HIGH},
+            set(),
+        )
+        confirm = {item.name for item in self.profile.capabilities if item.risk_level == RiskLevel.CONFIRM}
+        self.assertEqual(
+            confirm,
             {
-                "sport.recovery_stand",
                 "sport.front_flip",
                 "sport.front_jump",
                 "sport.front_pounce",
-                "sport.dance1",
-                "sport.dance2",
                 "sport.left_flip",
                 "sport.back_flip",
                 "sport.handstand",
@@ -91,8 +92,18 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
                 "sport.free_jump",
                 "sport.switch_joystick",
                 "sport.auto_recover_set",
+                "sport.switch_avoid_mode",
+                "motion.turn_left",
+                "motion.turn_right",
+                "motion.turn_around",
             },
         )
+        for name in confirm:
+            self.assertIn("agent", declared[name].allowed_callers)
+            self.assertFalse(declared[name].requires_operator_confirmation)
+        for name in ("sport.recovery_stand", "sport.dance1", "sport.dance2"):
+            self.assertEqual(declared[name].risk_level, RiskLevel.NORMAL)
+            self.assertIn("agent", declared[name].allowed_callers)
         self.assertEqual(declared["sport.stand_up"].description, catalog["sport.stand_up"].description)
         self.assertIn("站立锁定", declared["sport.stand_up"].description)
         self.assertIn("速度控制", declared["sport.move"].description)
@@ -493,8 +504,9 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         self.assertIn("sport.stand_up", runtime.available_tools())
         self.assertIn("sport.move", runtime.available_tools())
         self.assertIn("vui.set_volume", runtime.available_tools())
-        self.assertNotIn("sport.front_flip", runtime.available_tools())
+        self.assertIn("sport.front_flip", runtime.available_tools())
         self.assertIn("sport.front_flip", runtime.dashboard_tools())
+        self.assertIn("sport.dance1", runtime.available_tools())
         self.assertIn("motion.turn_left", runtime.available_tools())
         self.assertIn("expression.nod", runtime.available_tools())
 

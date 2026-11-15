@@ -253,11 +253,12 @@
     },
     {
       "name": "sport.recovery_stand",
-      "risk_level": "high",
+      "risk_level": "normal",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 9000,
@@ -268,11 +269,12 @@
     },
     {
       "name": "sport.front_flip",
-      "risk_level": "high",
+      "risk_level": "confirm",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 8000,
@@ -283,11 +285,12 @@
     },
     {
       "name": "sport.front_jump",
-      "risk_level": "high",
+      "risk_level": "confirm",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 8000,
@@ -298,11 +301,12 @@
     },
     {
       "name": "sport.front_pounce",
-      "risk_level": "high",
+      "risk_level": "confirm",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 8000,
@@ -313,11 +317,12 @@
     },
     {
       "name": "sport.dance1",
-      "risk_level": "high",
+      "risk_level": "normal",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 13000,
@@ -328,11 +333,12 @@
     },
     {
       "name": "sport.dance2",
-      "risk_level": "high",
+      "risk_level": "normal",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 13000,
@@ -343,11 +349,12 @@
     },
     {
       "name": "sport.left_flip",
-      "risk_level": "high",
+      "risk_level": "confirm",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 8000,
@@ -358,11 +365,12 @@
     },
     {
       "name": "sport.back_flip",
-      "risk_level": "high",
+      "risk_level": "confirm",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {},
       "interruptible": true,
       "timeout_ms": 8000,
@@ -429,11 +437,12 @@
     },
     {
       "name": "sport.switch_joystick",
-      "risk_level": "high",
+      "risk_level": "confirm",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {
         "enabled": {
           "type": "boolean"
@@ -448,11 +457,12 @@
     },
     {
       "name": "sport.handstand",
-      "risk_level": "high",
+      "risk_level": "confirm",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {
         "enabled": {
           "type": "boolean"
@@ -467,11 +477,12 @@
     },
     {
       "name": "sport.free_bound",
-      "risk_level": "high",
+      "risk_level": "confirm",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {
         "enabled": {
           "type": "boolean"
@@ -486,11 +497,12 @@
     },
     {
       "name": "sport.free_jump",
-      "risk_level": "high",
+      "risk_level": "confirm",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {
         "enabled": {
           "type": "boolean"
@@ -565,11 +577,12 @@
     },
     {
       "name": "sport.auto_recover_set",
-      "risk_level": "high",
+      "risk_level": "confirm",
       "allowed_callers": [
+        "agent",
         "dashboard"
       ],
-      "requires_operator_confirmation": true,
+      "requires_operator_confirmation": false,
       "parameters": {
         "enabled": {
           "type": "boolean"

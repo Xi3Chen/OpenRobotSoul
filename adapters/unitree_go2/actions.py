@@ -12,16 +12,19 @@ on the robot when the firmware changes.
 
 ``Damp`` is intentionally absent. That call removes motor torque.
 
-Confirm-tier is only the obstacle-avoidance mode switch. Ordinary posture,
-gait changes, and timed motion execute after schema checks. High-tier is
-limited to flips, jumps, handstands, dances, recovery stand, joystick source
-changes, and the auto-recover switch.
+Ordinary posture, gait changes, dances, recovery stand, and timed motion
+execute after schema checks. Confirm-tier covers motions that need a large
+clear area and that obstacle avoidance cannot make safe (flips, jumps, pounce,
+handstand, free bound), plus the obstacle-avoidance mode switch, the joystick
+source switch, and the auto-recover switch. No Go2 action is high-tier. High is
+reserved for switches that disable the robot's own protection, which are not
+exposed.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isfinite, trunc
+from math import isfinite, pi, trunc
 from typing import Any
 
 from robotsoul.models import CapabilitySpec, ParameterSpec, RiskLevel
@@ -219,25 +222,25 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
     _action("static_walk", "none", RiskLevel.NORMAL),
     _action("trot_run", "none", RiskLevel.NORMAL),
     _action("economic_gait", "none", RiskLevel.NORMAL),
-    _action("recovery_stand", "none", RiskLevel.HIGH),
-    _action("front_flip", "none", RiskLevel.HIGH),
-    _action("front_jump", "none", RiskLevel.HIGH),
-    _action("front_pounce", "none", RiskLevel.HIGH),
-    _action("dance1", "none", RiskLevel.HIGH),
-    _action("dance2", "none", RiskLevel.HIGH),
-    _action("left_flip", "none", RiskLevel.HIGH),
-    _action("back_flip", "none", RiskLevel.HIGH),
+    _action("recovery_stand", "none", RiskLevel.NORMAL),
+    _action("front_flip", "none", RiskLevel.CONFIRM),
+    _action("front_jump", "none", RiskLevel.CONFIRM),
+    _action("front_pounce", "none", RiskLevel.CONFIRM),
+    _action("dance1", "none", RiskLevel.NORMAL),
+    _action("dance2", "none", RiskLevel.NORMAL),
+    _action("left_flip", "none", RiskLevel.CONFIRM),
+    _action("back_flip", "none", RiskLevel.CONFIRM),
     _action("switch_avoid_mode", "none", RiskLevel.CONFIRM),
     _action("pose", "flag", RiskLevel.NORMAL, _FLAG),
     _action("classic_walk", "flag", RiskLevel.NORMAL, _FLAG),
-    _action("switch_joystick", "flag", RiskLevel.HIGH, _FLAG),
-    _action("handstand", "flag", RiskLevel.HIGH, _FLAG),
-    _action("free_bound", "flag", RiskLevel.HIGH, _FLAG),
-    _action("free_jump", "flag", RiskLevel.HIGH, _FLAG),
+    _action("switch_joystick", "flag", RiskLevel.CONFIRM, _FLAG),
+    _action("handstand", "flag", RiskLevel.CONFIRM, _FLAG),
+    _action("free_bound", "flag", RiskLevel.CONFIRM, _FLAG),
+    _action("free_jump", "flag", RiskLevel.CONFIRM, _FLAG),
     _action("free_avoid", "flag", RiskLevel.NORMAL, _FLAG),
     _action("walk_upright", "flag", RiskLevel.NORMAL, _FLAG),
     _action("cross_step", "flag", RiskLevel.NORMAL, _FLAG),
-    _action("auto_recover_set", "flag", RiskLevel.HIGH, _FLAG),
+    _action("auto_recover_set", "flag", RiskLevel.CONFIRM, _FLAG),
     _action("euler", "euler", RiskLevel.NORMAL, _EULER),
     _action("move", "move", RiskLevel.NORMAL, _MOVE),
     _action(

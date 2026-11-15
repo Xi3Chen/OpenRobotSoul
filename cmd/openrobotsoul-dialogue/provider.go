@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -201,14 +202,31 @@ func parseReview(content string) (map[string]any, error) {
 		return nil, err
 	}
 	switch r["verdict"] {
-	case "allow", "deny", "uncertain":
+	case "pass", "needs_evidence", "allow", "deny", "uncertain":
 	default:
-		return nil, &codedError{"invalid_response", "review verdict must be allow, deny or uncertain"}
+		return nil, &codedError{"invalid_response", "review verdict must be pass, needs_evidence or deny"}
 	}
 	if !nonemptyString(r["rationale"]) {
 		return nil, &codedError{"invalid_response", "review rationale is required"}
 	}
+	if r["verdict"] == "needs_evidence" {
+		requirements, ok := r["evidence_requirements"].([]any)
+		if !ok || len(requirements) == 0 {
+			return nil, &codedError{"invalid_response", "needs_evidence requires explicit evidence_requirements"}
+		}
+		for _, raw := range requirements {
+			item, ok := raw.(map[string]any)
+			if !ok || !nonemptyString(item["direction"]) || !finiteNumber(item["quantity"]) || !finiteNumber(item["range_m"]) || !finiteNumber(item["valid_for_seconds"]) {
+				return nil, &codedError{"invalid_response", "evidence requirements need direction, quantity, range_m and valid_for_seconds"}
+			}
+		}
+	}
 	return r, nil
+}
+
+func finiteNumber(value any) bool {
+	number, ok := value.(float64)
+	return ok && !math.IsNaN(number) && !math.IsInf(number, 0)
 }
 
 // This explicit opt-in provider is for local protocol and recovery tests.

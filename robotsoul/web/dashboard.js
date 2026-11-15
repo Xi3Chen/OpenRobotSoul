@@ -212,6 +212,12 @@
     $("#active-task").textContent = text(data.active_task, "无");
     $("#latest-feedback").textContent = text(data.latest_feedback, "暂无");
     $("#policy-version").textContent = text(data.policy_version);
+    const safety = data.safety || {};
+    const reviewCounts = safety.review?.counts || {};
+    const rejected = Number(reviewCounts.review_deny || 0) + Number(reviewCounts.review_needs_evidence || 0) + Number(reviewCounts.condition_failures || 0);
+    $("#safety-status").textContent = safety.enabled === true
+      ? (safety.emergency_stop === true ? "急停中" : rejected ? `已启用 · ${rejected} 次拒绝` : "已启用")
+      : "未启用";
     if (!state.voiceBusy && !state.voice) {
       const details = {
         PASSIVE: ["good", "唤醒待机", `${text(voice.robot_name, "机器人")}正在监听唤醒词`],
@@ -996,6 +1002,15 @@
       const data = await request(`/api/tasks/${encodeURIComponent(state.task.task_id)}/cancel`, { method: "POST", body: "{}" });
       showTask(data.task);
     } catch (error) { showError(error.message); }
+  });
+
+  $("#safety-stop").addEventListener("click", async () => {
+    try {
+      await request("/api/safety/stop", { method: "POST", body: JSON.stringify({ reason: "Dashboard emergency stop" }) });
+      await refresh();
+    } catch (error) {
+      showError(error.message);
+    }
   });
 
   function appendConversation(role, message, action) {

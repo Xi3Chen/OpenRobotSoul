@@ -43,6 +43,7 @@ SESSION_TTL_SECONDS = 30 * 60
 ACTION_TTL_SECONDS = 30
 MAX_REQUEST_BYTES = 64 * 1024
 ASSET_ROOT = Path(__file__).with_name("web")
+DASHBOARD_STEP_UP_SKILLS = frozenset({"sport.switch_avoid_mode", "sport.auto_recover_set"})
 
 CAPABILITY_LABELS = {
     "speech.say": "语音播报",
@@ -477,8 +478,12 @@ class DashboardService:
             "policy_version": getattr(self.runtime.profile, "profile_version", "unknown"),
             "capabilities": [self._capability_view(name, spec) for name, spec in capabilities.items()],
             "actions": list(reversed(self._actions[-100:])),
+            "safety": self.runtime.safety_status(),
         }
         return payload
+
+    def safety_metrics(self) -> dict[str, Any]:
+        return self.runtime.safety_status()
 
     def _robot_configuration_view(self, identity: RobotDeploymentConfig | None) -> dict[str, Any]:
         profile = self.runtime.profile
@@ -590,6 +595,10 @@ class DashboardService:
         reason = None
         if risk == "high" and not dashboard_allowed:
             enabled, reason = False, "Dashboard caller is not authorized by policy"
+        operator_required = (
+            getattr(capability, "requires_operator_confirmation", risk == "high")
+            or name in DASHBOARD_STEP_UP_SKILLS
+        )
         return {
             "name": name,
             "label": CAPABILITY_LABELS.get(name, name),
@@ -597,7 +606,7 @@ class DashboardService:
             "risk_level": risk,
             "allowed_callers": callers,
             "dashboard_allowed": dashboard_allowed,
-            "operator_confirmation_required": getattr(capability, "requires_operator_confirmation", risk == "high"),
+            "operator_confirmation_required": operator_required,
             "ai_review_required": risk == "confirm" and self.runtime.safety_reviewer is not None,
             "enabled": enabled,
             "disabled_reason": reason,
@@ -651,7 +660,11 @@ class DashboardService:
             json.dumps(binding, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         risk = getattr(capability, "risk_level", "normal")
-        requires_operator = risk == "high" or getattr(capability, "requires_operator_confirmation", False)
+        requires_operator = (
+            risk == "high"
+            or getattr(capability, "requires_operator_confirmation", False)
+            or skill in DASHBOARD_STEP_UP_SKILLS
+        )
         ai_review_required = risk == "confirm" and self.runtime.safety_reviewer is not None
         challenge = _ActionChallenge(
             challenge_id=challenge_id,
@@ -706,8 +719,10 @@ class DashboardService:
             if not hmac.compare_digest(digest, challenge.digest):
                 raise PermissionError("Action confirmation does not match its parameters")
             risk = getattr(capability, "risk_level", "normal")
-            requires_operator = risk == "high" or getattr(
-                capability, "requires_operator_confirmation", False
+            requires_operator = (
+                risk == "high"
+                or getattr(capability, "requires_operator_confirmation", False)
+                or challenge.skill in DASHBOARD_STEP_UP_SKILLS
             )
             if requires_operator != challenge.requires_operator:
                 raise PermissionError("Confirmation policy changed; prepare a new action")
@@ -719,8 +734,10 @@ class DashboardService:
                 )
                 if password_error:
                     raise PermissionError(password_error)
-            operator_confirmed = risk == "high" or getattr(
-                capability, "requires_operator_confirmation", False
+            operator_confirmed = (
+                risk == "high"
+                or getattr(capability, "requires_operator_confirmation", False)
+                or challenge.skill in DASHBOARD_STEP_UP_SKILLS
             )
             context = InvocationContext(
                 source=InvocationSource.DASHBOARD,
@@ -794,7 +811,11 @@ class DashboardService:
         return {
             "risk_level": getattr(capability, "risk_level", "normal"),
             "allowed_callers": sorted(getattr(capability, "allowed_callers", ("agent", "dashboard"))),
-            "operator_confirmation_required": getattr(capability, "requires_operator_confirmation", False),
+            "operator_confirmation_required": (
+                getattr(capability, "requires_operator_confirmation", False)
+                or getattr(capability, "risk_level", "normal") == "high"
+                or capability.name in DASHBOARD_STEP_UP_SKILLS
+            ),
             "parameters_schema": {
                 name: {
                     "type": spec.value_type,
@@ -964,6 +985,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/dashboard/overview":
             self._json(HTTPStatus.OK, self.server.service.overview())
             return
+        if path == "/api/safety/metrics":
+            self._json(HTTPStatus.OK, self.server.service.safety_metrics())
+            return
         if path == "/api/capabilities":
             data = self.server.service.overview()
             self._json(HTTPStatus.OK, {"capabilities": data["capabilities"]})
@@ -1101,6 +1125,14 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 if not isinstance(skill, str) or not isinstance(parameters, dict):
                     raise ValueError("skill and parameters are required")
                 self._json(HTTPStatus.CREATED, self.server.service.prepare_action(session, skill, parameters))
+                return
+            if path == "/api/safety/stop":
+                reason = body.get("reason", "Dashboard emergency stop")
+                if not isinstance(reason, str) or not reason.strip() or len(reason) > 256:
+                    raise ValueError("reason must contain 1 to 256 characters")
+                check = self.server.service.runtime.trigger_emergency_stop(reason.strip())
+                status = HTTPStatus.CONFLICT if check.error_code in {"supervisor_unavailable", "stop_failed"} else HTTPStatus.OK
+                self._json(status, {"safety": self.server.service.safety_metrics(), "result": check.to_dict()})
                 return
             if path == "/api/settings/llm":
                 self._json(HTTPStatus.OK, self.server.service.update_llm(body))

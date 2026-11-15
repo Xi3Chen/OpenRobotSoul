@@ -54,7 +54,7 @@ Python MVP 已启动，当前包含确定性模拟适配器、两个能力不同
 
 `dashboard` 和 `run` 默认启动常驻语言进程 `robotsoul.language_gateway`。这个进程不是 Go 版 PicoClaw。Dashboard 文本、本地语音最终转写和通话最终转写都进入这个进程，由它按 `config/llm.json` 选择已注册技能。以 `/技能名` 开头的文本不经过模型，直接调用已注册技能。`--demo-agent` 和 `demo` 不启动语言进程，也不会对自由文本做关键词匹配。编码进程只在语言进程给出编程任务，或适配器、语音、语言进程启动失败时拉起，并且需要仓库外的 `OPENROBOTSOUL_CODING_WORKSPACE`。集成约束见 [Agent 选型与 PicoClaw 集成决策](docs/robot-agent-plan/11-agent-tooling-decision.md)。
 
-Go2 已接入 SportClient 高层动作：普通姿态、步态和限时移动直接执行。只有 `sport.switch_avoid_mode` 需要模型复核。翻滚、跳跃、舞蹈、倒立、摔倒恢复、手柄控制源和自动恢复开关只允许 Dashboard 操作员确认后调用。`Damp` 与低级电机控制没有接入。速度指令到时或取消时会发送 `StopMove`。语音 Voice Service、中文唤醒/流式识别、TTS 路由和 Dashboard 局域网通话代码已接入主仓库；模型、ARM64 运行包和 Python wheel 仍需按资源清单下载并在目标板安装。Go2 机身麦克风/扬声器路由、真实 WebRTC/PyAV 兼容性和 10 小时长跑尚未验证。这些动作的单位、完成姿态、断连后的机身行为仍没有在目标固件上完成验收；API 接受请求不等于身体动作已经完成。
+Go2 已接入 SportClient 高层动作：普通姿态、步态和限时移动直接执行。舞蹈和摔倒恢复属于常规动作。前空翻、后空翻、侧翻、向前跳、向前扑、倒立、自由弹跳、自由跳跃、避障模式切换、手柄控制源和自动恢复开关为确认级：Agent 经无工具 AI 复核后执行，Dashboard 经操作员确认后执行；避障和自动恢复开关还要重新输入当前账户密码。当前没有高风险动作。`Damp` 与低级电机控制没有接入。速度指令到时或取消时会发送 `StopMove`。Go2 adapter 还接入了本地安全监督：连接 watchdog、急停、速度上限、区域约束和动作落地复核均在硬件调用前后执行。语音 Voice Service、中文唤醒/流式识别、TTS 路由和 Dashboard 局域网通话代码已接入主仓库；模型、ARM64 运行包和 Python wheel 仍需按资源清单下载并在目标板安装。Go2 机身麦克风/扬声器路由、真实 WebRTC/PyAV 兼容性和 10 小时长跑尚未验证，实机动作和急停响应仍需在目标设备冒烟。
 
 ## 运行 MVP
 
@@ -94,7 +94,7 @@ python -m robotsoul --robot-module simulator dashboard
 python -m robotsoul --robot-module simulator dashboard --host 192.168.1.20 --tls-cert cert.pem --tls-key key.pem
 ```
 
-Agent 调用 `confirm` 技能需通过 `RobotRuntime.from_profile(..., safety_reviewer=...)` 配置无工具 SafetyReviewer；未配置或复核失败时会拒绝 Agent 调用。已登录的 Dashboard 操作员可以确认并执行这些技能。`high` 技能只允许 Dashboard 操作员调用，并要求重新输入当前账户密码。设置页可以修改这一条云端模型路径、音频配置和登录账户。当前默认配置仍指向 Go2，但 profile 没有动作能力；示例显式选择 simulator。Dashboard 已接入 WebRTC 局域网通话 API 与网页通话界面；模型资源、目标板设备路由、ARM64 PyAV/WebRTC 兼容性和实机长跑尚待验收。安全边界、API 和风险等级定义见[Dashboard 与接口风险门禁](docs/robot-agent-plan/15-dashboard.md)。
+Agent 调用 `confirm` 技能需通过 `RobotRuntime.from_profile(..., safety_reviewer=...)` 配置无工具 SafetyReviewer；复核三态、方向证据和执行条件由本地安全层再次校验。未配置或复核失败时会拒绝 Agent 调用。已登录的 Dashboard 操作员可以确认并执行这些技能；避障和自动恢复开关的挑战还要求重新输入当前账户密码，并受一次性/限时绑定保护。无屏确认协议在 `robotsoul/confirmation.py` 提供 10 秒语音/手势窗口、唤醒词前缀、多人歧义拒绝和全局停止手势。Dashboard 总览显示复核拒绝与本地条件失败指标。`high` 技能只允许 Dashboard 操作员调用，并要求重新输入当前账户密码。设置页可以修改这一条云端模型路径、音频配置和登录账户。当前默认配置仍指向 Go2，但 profile 没有动作能力；示例显式选择 simulator。Dashboard 已接入 WebRTC 局域网通话 API 与网页通话界面；模型资源、目标板设备路由、ARM64 PyAV/WebRTC 兼容性和实机长跑尚待验收。安全边界、API 和风险等级定义见[Dashboard 与接口风险门禁](docs/robot-agent-plan/15-dashboard.md)。
 
 ## PicoClaw
 
