@@ -191,7 +191,10 @@ class TaskStore:
         }), None)
         uncertain = terminal is not None and terminal.status == FeedbackStatus.FAILED and (
             terminal.evidence.get("outcome_known") is False
-            or terminal.error_code in {"timeout", "deadline_expired", "device_error", "cancel_failed", "malformed_cancel_feedback"}
+            or terminal.error_code in {
+                "timeout", "deadline_expired", "device_error", "cancel_failed",
+                "malformed_cancel_feedback", "stop_failed", "not_interruptible",
+            }
         )
         with self._lock, self._db:
             self._db.execute("UPDATE commands SET status=?,feedback=? WHERE id=?", (

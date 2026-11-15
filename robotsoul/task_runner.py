@@ -77,6 +77,11 @@ class _Entry:
     request_intent: str | None = None
     user_recorded: bool = False
     deadline_expired: Event = field(default_factory=Event)
+    # Cancellation is a request, not a result: the adapter's stop confirmation
+    # (or the command's actual terminal feedback) decides the final state.
+    cancel_confirmation: Feedback | None = None
+    cancel_stop_reason: str = ""
+    cancel_completed_feedback: Feedback | None = None
 
 
 class TaskRunner:
@@ -287,9 +292,31 @@ class TaskRunner:
             if callable(interrupt):
                 interrupt(task_id)
         if stop_command:
+            capability = None
+            active_capability = getattr(self.runtime, "active_capability", None)
+            if callable(active_capability):
+                capability = active_capability(task_id)
+            if capability is not None and not capability.interruptible:
+                # Leave the action alone; it reports its own terminal result and
+                # the task must not claim it was cancelled.
+                with self._changed:
+                    entry.cancel_stop_reason = "not_interruptible"
+                return self.get_task(task_id)
             cancel = getattr(self.runtime, "cancel_active_command", None)
-            if callable(cancel):
-                cancel(task_id)
+            confirmation = cancel(task_id) if callable(cancel) else None
+            with self._changed:
+                if isinstance(confirmation, Feedback):
+                    entry.cancel_confirmation = confirmation
+                    if confirmation.status == FeedbackStatus.CANCELLED:
+                        entry.cancel_stop_reason = ""
+                    else:
+                        entry.cancel_stop_reason = confirmation.error_code or "stop_not_confirmed"
+                else:
+                    entry.cancel_stop_reason = "no_active_command"
+                # Nothing was running: the cancelled flag stops the next step and
+                # the task can close immediately.
+                if confirmation is None and entry.task.status not in TERMINAL:
+                    self._finish(entry, TaskStatus.CANCELLED, "任务已取消。")
         return self.get_task(task_id)
 
     def _enqueue(self, entry: _Entry) -> None:
@@ -404,14 +431,39 @@ class TaskRunner:
             if entry.deadline_expired.is_set():
                 status, reply = self._deadline_result(entry, unknown_commands)
             elif entry.cancelled.is_set():
-                status = TaskStatus.INTERRUPTED if unknown_commands else TaskStatus.CANCELLED
-                reply = "取消已请求；动作结果未知，需要检查设备状态。" if unknown_commands else "任务已取消。"
+                status, reply = self._cancelled_result(entry, unknown_commands)
             elif status == TaskStatus.FAILED and unknown_commands:
                 status = TaskStatus.INTERRUPTED
                 reply = f"Command outcome is unknown; no further actions were dispatched. {reply}"
             self._finish(entry, status, reply)
         except Exception as exc:
             self._storage_failure(entry, exc)
+
+    def _cancelled_result(self, entry: _Entry, unknown_commands: frozenset[str]) -> tuple[TaskStatus, str]:
+        """Derive the final state from feedback, not from the mere cancel request."""
+        if unknown_commands:
+            return TaskStatus.INTERRUPTED, "取消已请求；动作结果未知，需要检查设备状态。"
+        completed = entry.cancel_completed_feedback
+        if completed is not None:
+            return (
+                TaskStatus.COMPLETED,
+                "动作已执行完成；取消请求未能阻止本次动作。",
+            )
+        last = entry.last_step_feedback[-1] if entry.last_step_feedback else None
+        if last is None and entry.feedback:
+            last = entry.feedback[-1]
+        if last is not None:
+            if last.status == FeedbackStatus.CANCELLED:
+                return TaskStatus.CANCELLED, "任务已取消。"
+            if last.status == FeedbackStatus.FAILED:
+                detail = f"（停止未确认：{entry.cancel_stop_reason}）" if entry.cancel_stop_reason else ""
+                return TaskStatus.FAILED, f"{last.message or '任务执行失败。'}{detail}"
+        if entry.cancel_stop_reason and entry.cancel_stop_reason != "not_interruptible":
+            return (
+                TaskStatus.INTERRUPTED,
+                f"取消未获确认（{entry.cancel_stop_reason}）；动作结果需要检查设备状态。",
+            )
+        return TaskStatus.CANCELLED, "任务已取消。"
 
     def _storage_failure(self, entry: _Entry, error: Exception) -> None:
         self._storage_failed = True
@@ -508,6 +560,8 @@ class TaskRunner:
                 self._complete(entry, decision)
                 return
             elif decision.kind == "coding_task":
+                if entry.goal_kind == "physical" or entry.expected_evaluator is not None:
+                    raise AgentRejected("A coding handoff cannot complete a physical goal")
                 if not isinstance(decision.coding_task, str) or not decision.coding_task.strip():
                     raise ValueError("Coding handoff requires a task description")
                 dispatch = getattr(self.runtime, "dispatch_coding_task", None)
@@ -592,6 +646,13 @@ class TaskRunner:
         else:
             if decision.evidence_refs:
                 raise ValueError("Answer references evidence this task never produced")
+            if entry.failed_actions or entry.task.error:
+                # A rejected or failed action must not be papered over by a later
+                # free-text "complete" decision; the model must reject/clarify or
+                # provide verified evidence through a registered evaluator.
+                raise AgentRejected(
+                    "A previous failed or rejected action must be resolved before the task can complete"
+                )
             reply = decision.reply.strip()
             if not reply:
                 raise ValueError("A conversational completion needs a reply")
@@ -697,6 +758,12 @@ class TaskRunner:
             entry.history.append(AuditRecord(utc_now(), "task.status", entry.task.task_id, entry.task.trace_id,
                                              {"status": status.value}))
             self._persist(entry, note=self._note_payload(entry, f"{entry.task.task_id}:result:{status.value}", reply))
+        discard = getattr(self.runtime, "discard_cancel_state", None)
+        if callable(discard):
+            try:
+                discard(entry.task.task_id)
+            except Exception:
+                pass
 
     def _note_payload(self, entry: _Entry, event_id: str, text: str) -> tuple[str, dict[str, Any]] | None:
         if not callable(getattr(self.runtime.agent, "record_note", None)):
@@ -757,6 +824,12 @@ class _RuleHost:
             raise TaskCancelled()
         if self.runner._storage_failed:
             raise RuntimeError("Task storage is unavailable; action dispatch is disabled")
+        if self.runner.store.unknown_command_ids(self.entry.task.task_id):
+            # An unknown outcome means the device state must be checked before
+            # any further action (including rule/timeline cleanup) is dispatched.
+            raise TaskOutcomeUnknown(
+                "A previous command outcome is unknown; no further action may be dispatched"
+            )
         if self.now() - self.entry.started >= self.runner.limits.duration_seconds:
             self.runner._deadline_reached(self.entry, interrupt=False)
             raise TaskBudgetExceeded("Task deadline expired")
@@ -859,9 +932,14 @@ class _RuleHost:
         if terminal is not None and terminal.status == FeedbackStatus.CANCELLED:
             entry.cancelled.set()
             raise TaskCancelled()
-        if self.runner.store.unknown_command_ids(entry.task.task_id) and not entry.cancelled.is_set():
+        if self.runner.store.unknown_command_ids(entry.task.task_id):
             detail = f": {entry.task.error}" if entry.task.error else ""
             raise TaskOutcomeUnknown("Command outcome is unknown; check device state before submitting another action" + detail)
+        if terminal is not None and terminal.status == FeedbackStatus.SUCCEEDED and entry.cancelled.is_set():
+            # A stop request arrived too late: the action already succeeded.
+            # Report the actual result instead of a fabricated cancellation.
+            entry.cancel_completed_feedback = terminal
+            raise TaskCancelled()
         self.check_running()
         if terminal is None:
             return False

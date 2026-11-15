@@ -1049,9 +1049,20 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 task_id = body.get("request_id")
                 if task_id is not None and (not isinstance(task_id, str) or not 1 <= len(task_id) <= 128):
                     raise ValueError("request_id must contain 1 to 128 characters")
+                goal_kind = body.get("goal_kind", "general")
+                if goal_kind not in {"general", "physical"}:
+                    raise ValueError("goal_kind must be general or physical")
+                expected_evaluator = body.get("expected_evaluator")
+                if expected_evaluator is not None and (
+                    not isinstance(expected_evaluator, str) or not expected_evaluator.strip()
+                ):
+                    raise ValueError("expected_evaluator must be a non-empty string")
                 runtime = self.server.service.runtime
                 conversation = self.server.service.task_conversation(session)
-                task_id = runtime.submit_task(task_text, conversation=conversation, task_id=task_id)
+                task_id = runtime.submit_task(
+                    task_text, conversation=conversation, task_id=task_id,
+                    goal_kind=goal_kind, expected_evaluator=expected_evaluator,
+                )
                 result = runtime.get_task(task_id, conversation=conversation) if asynchronous else runtime.wait_task(task_id)
                 task = _task_result_view(result)
                 action = {

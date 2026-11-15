@@ -22,6 +22,14 @@ Environment=PYTHONPATH=/home/user/mimax2-voice/runtime/sherpa-musl:/home/user/mi
 Environment=ROBOTSOUL_VOICE_RESOURCE_ROOT=/home/user/mimax2-data/voice-resources
 Environment=ROBOTSOUL_ROBOT_CONFIG=/home/user/mimax2-voice/release/config/robot-mimax2.json
 Environment=ROBOTSOUL_VOICE_RUNTIME_DIR=/run/mimax2-voice
+# Persistent task database shared with the dashboard; without it the runtime
+# falls back to an in-memory store and every task is lost on restart.
+Environment=OPENROBOTSOUL_TASK_STORE=/home/user/mimax2-data/tasks.sqlite3
+# Resident dialogue process (built with `python -m robotsoul.build --dialogue-only
+# --platform linux --arch arm64` and copied with the release) and its durable
+# context journal.
+Environment=OPENROBOTSOUL_DIALOGUE_BINARY=/home/user/mimax2-voice/release/build/linux-aarch64/bin/openrobotsoul-dialogue
+Environment=OPENROBOTSOUL_DIALOGUE_HOME=/home/user/mimax2-data/dialogue
 # Resident language gateway (OpenAI-compatible) settings; without this file the
 # service falls back to the rule-based DemoAgent.
 Environment=ROBOTSOUL_LLM_CONFIG=/home/user/mimax2-voice/release/config/llm.json

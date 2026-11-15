@@ -255,5 +255,22 @@ class TaskRuleTests(unittest.TestCase):
         self.assertFalse(runtime.commands)
 
 
+    def test_unknown_timeline_event_blocks_cleanup_dispatch(self):
+        rule = {
+            "template": "timeline",
+            "events": [{"at_ms": 0, **action("light", enabled=True)}],
+            "cleanup": [action("light", enabled=False)],
+        }
+        runtime = self.rule_runtime(rule, clock=FakeClock())
+        runtime.responses["light"].append({"status": FeedbackStatus.FAILED,
+                                           "evidence": {"outcome_known": False}})
+        runner = self.runner(runtime)
+        result = runner.wait_task(runner.submit_task("unknown beat"), 2)
+        self.assertEqual(result.task.status, TaskStatus.INTERRUPTED)
+        # The cleanup action must not be dispatched after an unknown outcome.
+        self.assertEqual([command.skill for command, _ in runtime.commands], ["light"])
+        self.assertEqual(runtime.commands[0][0].parameters, {"enabled": True})
+
+
 if __name__ == "__main__":
     unittest.main()

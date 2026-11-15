@@ -195,5 +195,24 @@ class Go2PrecancelTests(unittest.TestCase):
             self.assertIn("stop_move", self.calls)
 
 
+    def test_stop_failure_is_reported_with_unknown_outcome(self):
+        command = self.command()
+
+        def failing_stop(_handle, action, _numbers, _count, _has_flag, _flag,
+                         output, _capacity, _error, _error_capacity):
+            self.calls.append(action.decode("utf-8"))
+            payload = b'{"api_code":7}\0'
+            ctypes.memmove(output, payload, len(payload))
+            return 1
+
+        self.driver._library.go2_bridge_call.side_effect = failing_stop
+        feedback = self.driver._stop_failure(command)
+        self.assertIsNotNone(feedback)
+        self.assertEqual(feedback[0].status, FeedbackStatus.FAILED)
+        self.assertEqual(feedback[0].error_code, "stop_failed")
+        self.assertIs(feedback[0].evidence["outcome_known"], False)
+        self.assertIs(feedback[0].evidence["cancellation_confirmed"], False)
+
+
 if __name__ == "__main__":
     unittest.main()

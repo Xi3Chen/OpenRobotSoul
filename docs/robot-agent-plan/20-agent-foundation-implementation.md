@@ -19,7 +19,7 @@ PicoClaw 固定到 `bbf6893ca7afad27f1d00a0f5a45982a549c6ed6`，只更新主仓�
 | 本地停止 | 任务运行器、`robotsoul/picoclaw.py`、`adapters/unitree_go2/sdk_driver.py` | 独立取消标记、模型与编码中断、截止计时器、适配器停止确认、派发前取消竞态修复 |
 | Dashboard | `robotsoul/dashboard.py`、`robotsoul/web/` | 异步提交、查询、继续、取消；显示进度、答复及待补充问题；账户和登录对话隔离 |
 | 语音 | `robotsoul/voice/` | 优先播报 reply、同一对话续接澄清、保持新目标替换语义、提交时固定通话身份 |
-| 构建与运行 | `robotsoul/build.py`、`cli.py`、`profiles.py` | 独立 Go 构建、三平台产物、生产任务库路径和配置、retry_safe 登记 |
+| 构建与运行 | `robotsoul/build.py`、`cli.py`、`profiles.py` | 独立 Go 构建、三平台产物、生产任务库路径和配置；`retry_safe` 能力字段已解析，但当前 4 个 profile 均未登记该字段，因此实际运行中 `retry_limited` 重试会被拒绝 |
 
 ## 两个模拟场景
 
@@ -97,8 +97,20 @@ go vet -mod=readonly ./...
 - CLI 默认持久任务库为 `~/.openrobotsoul/tasks.sqlite3`，可用 `--task-store` 或 `OPENROBOTSOUL_TASK_STORE` 覆盖。库 API 省略存储路径时使用内存，部署时需明确传入 `task_store_path`。
 - 对话日志默认在 `~/.openrobotsoul/dialogue`；可用 `OPENROBOTSOUL_DIALOGUE_HOME` 覆盖。缺失对话二进制会明确报错，不切换到旧无状态 gateway。
 - 未确定动作终态改为 `interrupted`；不能将其当作普通失败后自动重试。仍有效观测进入后续快照，事件去重不会把有效事实清空。
-- Linux 两个产物完成交叉构建，尚未在 Linux 主机执行。当前 Windows 无 C 编译器，未运行 Go race detector；普通并发回归已执行。
+- Linux 两个产物完成交叉构建；评审时在 WSL2 x86_64 对 linux/amd64 产物做过 hello/note/shutdown 冒烟，arm64 产物尚未在 Linux 主机执行。当前 Windows 无 C 编译器，未运行 Go race detector；普通并发回归已执行。
 - 模型验证使用显式测试 provider 和本地 HTTP 服务夹具，未连接外部模型账户验收。`--fake-provider` 仅用于测试，生产配置仍需有效 provider。
 - 首阶段不包含真实手机播放同步、机器人导航、摄像头和窗户识别，也不包含长期自动任务。实机同步精度、导航成功率、视觉识别与设备停止能力需在对应设备接入时分别验收。
 
 可行性研究与原缺陷证据继续保留在 [19 号报告](19-agent-foundation-feasibility.md)、[原始 18 号文档](evidence/18-original-dialogue-context-plan.md) 和 `evidence/18-dialogue-feasibility/`。
+
+## 评审后修正（2026-11-15）
+
+独立评审发现并已在后续提交修正的安全语义问题：
+
+- 取消请求不再直接改写任务终态：不可中断动作、停止未确认、动作在取消到达前已完成时，按适配器实际终态报告（`COMPLETED`/`FAILED`），只有结果未知才是 `INTERRUPTED`。
+- 未知动作结果会阻止规则/时间线 cleanup 与后续派发；Go2 `stop_failed` 现在标记 `outcome_known=false`，任务进入 `INTERRUPTED`。
+- `coding_task` 不得完成 `physical` 目标；发生过失败/拒绝步骤后，零命令 `complete` 会被拒绝。
+- Dashboard `POST /api/tasks` 可传 `goal_kind`/`expected_evaluator`；生产 headless 语音 runner 使用持久任务库并转发对话身份，缺失对话二进制时启动失败而不是静默降级。
+- 低延迟语音对 `awaiting_input` 的澄清问题不做长度压缩。
+
+仍未解决、需在后续阶段处理：Go 宿主尚未使用稳定 request id；`retry_safe` 未在真实 profile 登记；任务/动作历史与 WAL 无保留策略；多进程共用同一任务库时缺少单写者保护；密节拍时间线持久化 O(n²) 与全量测试的 dashboard flaky。

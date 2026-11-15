@@ -151,5 +151,18 @@ class TaskStoreTests(unittest.TestCase):
                 TaskStore(path)
 
 
+    def test_stop_failed_command_is_recorded_as_unknown_outcome(self):
+        store = TaskStore()
+        self.addCleanup(store.close)
+        result, conversation, invocation = self.request()
+        store.create(result, conversation, invocation, {})
+        command = Command("command-1", "task-1", "trace-1", "robot-1", "sport.stop_move", {}, utc_now())
+        store.dispatch(command)
+        failed = Feedback("terminal-1", command.command_id, command.task_id, command.trace_id,
+                          FeedbackStatus.FAILED, utc_now(), "StopMove failed", "stop_failed", {})
+        store.finish_command(command.command_id, (failed,))
+        self.assertEqual(store.unknown_command_ids("task-1"), {"command-1"})
+
+
 if __name__ == "__main__":
     unittest.main()

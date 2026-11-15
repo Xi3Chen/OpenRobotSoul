@@ -445,8 +445,13 @@ class UnitreeGo2SdkDriver:
             error_code = "vui_call_failed" if action.kind == "volume" else "sport_call_failed"
             return self._failed(command, str(exc), error_code)
         if self._cancel_event.is_set():
-            if action.kind != "volume":
-                self._best_effort_stop()
+            if action.kind != "volume" and not self._stop_confirmed():
+                return self._failed(
+                    command,
+                    "StopMove could not be confirmed after cancellation",
+                    "stop_failed",
+                    {"robot_id": command.robot_id, "outcome_known": False, "cancellation_confirmed": False},
+                )
             return self._cancelled(command)
         if code != 0:
             if action.kind == "volume":
@@ -467,7 +472,13 @@ class UnitreeGo2SdkDriver:
         if action.completion == "nominal" and action.estimate_ms > 0:
             reason = self._wait_for_duration(command, action.estimate_ms)
             if reason == "cancelled":
-                self._best_effort_stop()
+                if not self._stop_confirmed():
+                    return self._failed(
+                        command,
+                        "StopMove could not be confirmed after cancellation",
+                        "stop_failed",
+                        {"robot_id": command.robot_id, "outcome_known": False, "cancellation_confirmed": False},
+                    )
                 return self._cancelled(command)
             if reason == "deadline":
                 return self._failed(command, "Nominal duration exceeded the command deadline", "deadline_expired")
@@ -502,9 +513,15 @@ class UnitreeGo2SdkDriver:
                 if reason != "done":
                     break
         except Exception as exc:
+            evidence: dict[str, Any] | None = None
             if sends:
-                self._best_effort_stop()
-            return self._failed(command, str(exc), "sport_call_failed")
+                confirmed = self._stop_confirmed()
+                evidence = {
+                    "robot_id": command.robot_id,
+                    "outcome_known": confirmed,
+                    "cancellation_confirmed": confirmed,
+                }
+            return self._failed(command, str(exc), "sport_call_failed", evidence)
         stop_error = self._stop_failure(command) if sends else None
         if stop_error is not None:
             return stop_error
@@ -545,9 +562,15 @@ class UnitreeGo2SdkDriver:
         try:
             reason, sends = self._pump_move(command, numbers, lambda: tracker.observe(self._position_samples()))
         except Exception as exc:
+            evidence: dict[str, Any] | None = None
             if sends:
-                self._best_effort_stop()
-            return self._failed(command, str(exc), "sport_call_failed")
+                confirmed = self._stop_confirmed()
+                evidence = {
+                    "robot_id": command.robot_id,
+                    "outcome_known": confirmed,
+                    "cancellation_confirmed": confirmed,
+                }
+            return self._failed(command, str(exc), "sport_call_failed", evidence)
         if sends:
             stop_error = self._stop_failure(command)
             if stop_error is not None:
@@ -691,16 +714,27 @@ class UnitreeGo2SdkDriver:
             return None
         return code
 
+    def _stop_confirmed(self) -> bool:
+        """True only when the native StopMove call returned success."""
+        return self._best_effort_stop() == 0
+
     def _stop_failure(self, command: Command) -> tuple[Feedback, ...] | None:
         stop_code = self._best_effort_stop()
         if stop_code == 0:
             return None
+        evidence = {
+            "robot_id": command.robot_id,
+            "outcome_known": False,
+            "cancellation_confirmed": False,
+            "stop_api_code": stop_code,
+        }
         if stop_code is None:
-            return self._failed(command, "StopMove failed after the Go2 motion", "stop_failed")
+            return self._failed(command, "StopMove failed after the Go2 motion", "stop_failed", evidence)
         return self._failed(
             command,
             f"Sport service rejected stop_move with code {stop_code}",
             "stop_failed",
+            evidence,
         )
 
     def _state_evidence(self) -> dict[str, Any]:

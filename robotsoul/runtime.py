@@ -497,6 +497,22 @@ class RobotRuntime:
             ),),
         )
 
+    def active_command(self, task_id: str) -> Command | None:
+        """Return the command currently executing for a task, if any."""
+        with self._runtime_lock:
+            return self._active_commands.get(task_id)
+
+    def active_capability(self, task_id: str) -> CapabilitySpec | None:
+        command = self.active_command(task_id)
+        return None if command is None else self.capabilities.get(command.skill)
+
+    def discard_cancel_state(self, task_id: str) -> None:
+        """Drop per-task cancellation bookkeeping once the task is terminal."""
+        with self._runtime_lock:
+            self._cancel_requested_ids.discard(task_id)
+            self._preempted_task_ids.discard(task_id)
+            self._cancel_confirmations.pop(task_id, None)
+
     def preempt_task(self, task_id: str) -> Feedback | None:
         """Drop a voice task that has not started, or cancel it if it is interruptible.
 
@@ -511,6 +527,11 @@ class RobotRuntime:
             except KeyError:
                 pass
             else:
+                capability = self.active_capability(task_id)
+                if capability is not None and not capability.interruptible:
+                    # Announce nothing: the action keeps running and the task
+                    # reports its actual result instead of a fake cancellation.
+                    return None
                 self._task_runner.cancel_task(task_id)
                 return None
         with self._runtime_lock:
@@ -560,6 +581,13 @@ class RobotRuntime:
         if command is None:
             return None
         capability = self.capabilities.get(command.skill)
+        if capability is not None and not capability.interruptible:
+            # A non-interruptible action keeps running; the adapter must not be
+            # asked to stop it and the caller must not report a cancellation.
+            return self._local_feedback(
+                command, FeedbackStatus.FAILED,
+                "Command is not interruptible", "not_interruptible",
+            )
         arguments = safe_tool_arguments(command, capability) if capability is not None else {}
         private_values = private_command_values(command)
         cancel_call_id = str(uuid4())

@@ -353,6 +353,9 @@ cat /run/mimax2-voice/status.json
 | `ROBOTSOUL_VOICE_RESOURCE_ROOT` | `/home/user/mimax2-data/voice-resources` |
 | `ROBOTSOUL_ROBOT_CONFIG` | `/home/user/mimax2-voice/release/config/robot-mimax2.json` |
 | `ROBOTSOUL_VOICE_RUNTIME_DIR` | `/run/mimax2-voice` |
+| `OPENROBOTSOUL_TASK_STORE` | `/home/user/mimax2-data/tasks.sqlite3`（与 Dashboard 共用的持久任务库；不设置时任务只在内存中） |
+| `OPENROBOTSOUL_DIALOGUE_BINARY` | `/home/user/mimax2-voice/release/build/linux-aarch64/bin/openrobotsoul-dialogue`（缺失时服务启动失败，不回退旧 gateway） |
+| `OPENROBOTSOUL_DIALOGUE_HOME` | `/home/user/mimax2-data/dialogue`（对话日志目录，需持久分区） |
 | `ROBOTSOUL_VOICE_KWS_THRESHOLD` | 可选，唤醒阈值，默认 `0.6`；合成音/轻声可降到 `0.3` |
 | `ROBOTSOUL_VOICE_KWS_SCORE` | 可选，唤醒加分值，默认 `2.0` |
 | `ROBOTSOUL_VOICE_KWS_THREADS` | 可选，KWS 线程数，默认 `1`（常驻省电；双线程会让空闲 CPU 升到 ~250%） |
@@ -369,9 +372,9 @@ cat /run/mimax2-voice/status.json
 | --- | --- |
 | 官方 API Base URL（OpenAI 格式） | `https://api.deepseek.com`，chat completions 路径为 `/chat/completions` |
 | 模型名 | `deepseek-flash`（旧名 `deepseek-v4-flash` 仍被接受，实际由 V4.1-Flash 服务） |
-| 代码入口 | 规划态：`openrobotsoul-dialogue`（链接 `third_party/picoclaw`）+ `robotsoul/language_session.py` 的 `LanguageAgent`；过渡期仍可能见到 `robotsoul/language_gateway.py` 无状态单轮入口 |
+| 代码入口 | `openrobotsoul-dialogue`（链接 `third_party/picoclaw` 的 Go 对话进程）+ `robotsoul/language_session.py` 的 `LanguageAgent`；旧的 `robotsoul/language_gateway.py` 无状态单轮入口不再使用 |
 | 配置 | `config/llm.json`（`provider`/`base_url`/`model`/`timeout_seconds`/`api_key`），也可用 Dashboard 的模型设置页写入 |
-| 依赖 | 仅标准库 `urllib`，不新增第三方包 |
+| 依赖 | Python 仅标准库 `urllib`；对话进程为独立 Go 模块，构建需要 Go 1.25.13+ 与已初始化的 PicoClaw 子模块 |
 
 配置方式（不要把 key 写进仓库/命令行历史；也可以先在 Dashboard → 设置里填写，再由 Dashboard 以 0600 权限写盘）：
 
@@ -391,7 +394,22 @@ sudo systemctl restart mimax2-voice.service
 cat /run/mimax2-voice/status.json   # agent 字段应为 language:deepseek-flash
 ```
 
-服务单元用 `Environment=ROBOTSOUL_LLM_CONFIG=/home/user/mimax2-voice/release/config/llm.json` 指向该文件；文件不存在时 runner 回退到 `DemoAgent`。对话进程由 `LanguageSession` 拉起 `openrobotsoul-dialogue`（链接 `third_party/picoclaw`，持有多轮 session）；过渡期部署若仍启动 `python -m robotsoul.language_gateway`，则为无状态单轮决策。手机实测：模型对 `打开手电筒`/`关闭手电筒` 分别返回 `flash.toggle{enabled:true/false}`，无关问题返回拒绝理由。轮换 key 时只改该 JSON 并重启服务即可。
+服务单元用 `Environment=ROBOTSOUL_LLM_CONFIG=/home/user/mimax2-voice/release/config/llm.json` 指向该文件；**文件存在但对话进程缺失/启动失败时服务直接启动失败**（不再静默回退 `DemoAgent`），文件不存在时 runner 才退回规则 `DemoAgent`。轮换 key 时只改该 JSON 并重启服务即可。
+
+#### 8.3.1 构建与部署对话进程
+
+```bash
+# 开发机（或手机上的构建环境）：交叉构建 aarch64 对话进程
+python -m robotsoul.build --dialogue-only --platform linux --arch arm64
+
+# 把二进制随 release 一起部署，并创建持久目录
+install -d -m 0700 /home/user/mimax2-data/dialogue
+install -d -m 0755 /home/user/mimax2-data
+install -m 0755 build/linux-aarch64/bin/openrobotsoul-dialogue \
+    /home/user/mimax2-voice/release/build/linux-aarch64/bin/openrobotsoul-dialogue
+```
+
+`mimax2-voice.service` 已设置 `OPENROBOTSOUL_DIALOGUE_BINARY`、`OPENROBOTSOUL_DIALOGUE_HOME` 与 `OPENROBOTSOUL_TASK_STORE`。对话进程与 Python 语音服务在同一个 systemd cgroup 内共享 `MemoryMax=900M`：Python 侧模型峰值约 480 MB，新增 Go 子进程会占用额外内存；上机后请用 `systemctl status`、`/run/mimax2-voice/status.json` 的 RSS 与 `journalctl -u mimax2-voice` 确认没有 OOM，必要时再上调 `MemoryMax`。`OPENROBOTSOUL_TASK_STORE` 不设置时任务库是内存库，重启会丢失任务，且 Dashboard 无法查询这些任务。
 
 MiMax2 部署注意事项：
 

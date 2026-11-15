@@ -1,4 +1,4 @@
-import sqlite3
+﻿import sqlite3
 import tempfile
 import time
 import unittest
@@ -63,6 +63,8 @@ class CheckedRuntime:
         self.release = Event()
         self.stop = Event()
         self.cancel_unknown = False
+        self.cancel_capability_uninterruptible = False
+        self.pre_dispatch_failure = set()
         self.forbidden = set()
         self.clock = clock
         self.after_step = None
@@ -80,6 +82,10 @@ class CheckedRuntime:
         return self.observations
 
     def execute_task_step(self, task, intent, _invocation, *, prior_feedback, on_dispatch):
+        if intent.skill in self.pre_dispatch_failure:
+            # A safety review can reject a step before anything is dispatched.
+            return TaskResult(replace(task, status=TaskStatus.FAILED, error="reviewer denied"),
+                              prior_feedback, None, ())
         command = Command(str(uuid4()), task.task_id, task.trace_id, task.robot_id,
                           intent.skill, dict(intent.parameters), utc_now() + timedelta(seconds=5))
         on_dispatch(command)
@@ -103,9 +109,27 @@ class CheckedRuntime:
             self.after_step(command)
         return TaskResult(task, prior_feedback + (feedback,), None, ())
 
+    def active_capability(self, task_id):
+        command = self.commands[-1][0] if self.commands else None
+        return None if command is None else self.capabilities.get(command.skill)
+
     def cancel_active_command(self, _task_id):
+        command = self.commands[-1][0] if self.commands else None
+        if command is None:
+            return None
+        if self.cancel_capability_uninterruptible:
+            # The adapter refused to stop: the action keeps running.
+            self.release.set()
+            return Feedback(str(uuid4()), command.command_id, task_id=command.task_id,
+                            trace_id=command.trace_id, status=FeedbackStatus.FAILED, timestamp=utc_now(),
+                            message="Command is not interruptible", error_code="not_interruptible",
+                            evidence={"outcome_known": True})
         self.stop.set()
         self.release.set()
+        status = FeedbackStatus.FAILED if self.cancel_unknown else FeedbackStatus.CANCELLED
+        return Feedback(str(uuid4()), command.command_id, task_id=command.task_id,
+                        trace_id=command.trace_id, status=status, timestamp=utc_now(),
+                        message="cancel acknowledged", error_code=None, evidence={"outcome_known": True})
 
 
 def completion(context):
@@ -675,6 +699,52 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(runner.wait_task(task_id, 1).reply, "resumed")
             runner._queue.join()
             self.assertEqual(timer_factory.return_value.cancel.call_count, 2)
+
+
+    def test_cancel_of_non_interruptible_action_reports_actual_completion(self):
+        runtime = CheckedRuntime(ScriptedAgent(AgentIntent("navigate", {})))
+        runtime.capabilities["navigate"] = CapabilitySpec("navigate", {}, interruptible=False)
+        runtime.block_skill = "navigate"
+        runner = self.runner(runtime)
+        task_id = runner.submit_task("move there")
+        self.assertTrue(runtime.started.wait(2))
+        self.assertEqual(runner.cancel_task(task_id).task.status, TaskStatus.CANCEL_REQUESTED)
+        runtime.release.set()
+        result = runner.wait_task(task_id, 2)
+        self.assertEqual(result.task.status, TaskStatus.COMPLETED)
+        self.assertIn("执行完成", result.reply)
+        self.assertEqual(result.feedback[-1].status, FeedbackStatus.SUCCEEDED)
+
+    def test_cancel_with_unconfirmed_stop_reports_actual_completion(self):
+        runtime = CheckedRuntime(ScriptedAgent(AgentIntent("navigate", {})))
+        runtime.block_skill = "navigate"
+        runtime.cancel_capability_uninterruptible = True
+        runner = self.runner(runtime)
+        task_id = runner.submit_task("move there")
+        self.assertTrue(runtime.started.wait(2))
+        self.assertEqual(runner.cancel_task(task_id).task.status, TaskStatus.CANCEL_REQUESTED)
+        result = runner.wait_task(task_id, 2)
+        self.assertEqual(result.task.status, TaskStatus.COMPLETED)
+        self.assertIn("执行完成", result.reply)
+
+    def test_coding_handoff_cannot_complete_a_physical_goal(self):
+        runtime = CheckedRuntime(ScriptedAgent(AgentDecision("coding_task", coding_task="write a script")))
+        runner = self.runner(runtime)
+        result = runner.wait_task(runner.submit_task("move the robot", goal_kind="physical"), 2)
+        self.assertEqual(result.task.status, TaskStatus.FAILED)
+        self.assertIn("coding handoff", result.reply)
+
+    def test_zero_command_completion_after_rejected_action_is_refused(self):
+        runtime = CheckedRuntime(ScriptedAgent(
+            AgentDecision("act", (AgentIntent("navigate", {}),)),
+            AgentDecision("complete", reply="已按您的要求移动完成"),
+        ))
+        runtime.pre_dispatch_failure.add("navigate")
+        runner = self.runner(runtime)
+        result = runner.wait_task(runner.submit_task("move the robot"), 2)
+        self.assertEqual(result.task.status, TaskStatus.FAILED)
+        self.assertIn("failed or rejected", result.reply)
+        self.assertFalse(runtime.commands)
 
 
 if __name__ == "__main__":

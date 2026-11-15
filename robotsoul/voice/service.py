@@ -1098,8 +1098,10 @@ class VoiceService:
                 self._note("Info", f"运行时返回 id={task_id} 状态={status} 结论={response}")
             response = self._spoken_reply(response, success=success)
             # Long replies cost seconds of TTS before the first audio; a short
-            # acknowledgement keeps the turn responsive.
-            response = _shorten_spoken_reply(response, success, self._max_spoken_chars)
+            # acknowledgement keeps the turn responsive. A clarification question
+            # is the whole point of the turn, so never shorten it.
+            if status not in {"awaiting_input", "waiting_event", "cancel_requested"}:
+                response = _shorten_spoken_reply(response, success, self._max_spoken_chars)
             self._turn_mark("runtime_done")
             self.gate.hold("playback")
             self._release_turn("runtime")
