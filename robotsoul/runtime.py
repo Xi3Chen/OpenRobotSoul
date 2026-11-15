@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 import json
 from hashlib import sha256
 from math import isfinite
+from pathlib import Path
 from threading import Lock
 from time import monotonic
 from typing import Any
@@ -29,6 +30,7 @@ from robotsoul.models import (
     AgentPlan,
     AuditRecord,
     CapabilitySpec,
+    ConversationContext,
     Command,
     Evaluation,
     Feedback,
@@ -162,6 +164,14 @@ class RobotRuntime:
     capabilities: dict[str, CapabilitySpec]
     audit_sink: ToolCallAuditSink = field(default_factory=JsonlToolCallAuditSink, repr=False)
     safety_reviewer: SafetyReviewer | None = field(default=None, repr=False)
+    task_store_path: str | Path = field(default=":memory:", repr=False)
+    _task_runner: Any = field(default=None, init=False, repr=False)
+    _runner_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _observation_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _observation_snapshot: dict[tuple[str, str], Observation] = field(default_factory=dict, init=False, repr=False)
+    _observation_records: list[tuple[str, dict[str, Any]]] = field(default_factory=list, init=False, repr=False)
+    _cancel_requested_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    _default_conversation_id: str = field(default_factory=lambda: str(uuid4()), init=False, repr=False)
     _active_commands: dict[str, Command] = field(default_factory=dict, init=False, repr=False)
     _cancel_confirmations: dict[str, Feedback] = field(default_factory=dict, init=False, repr=False)
     _seen_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
@@ -179,6 +189,7 @@ class RobotRuntime:
         adapter: RobotAdapter | None = None,
         audit_sink: ToolCallAuditSink | None = None,
         safety_reviewer: SafetyReviewer | None = None,
+        task_store_path: str | Path = ":memory:",
     ) -> "RobotRuntime":
         active_adapter = adapter if adapter is not None else create_adapter(profile)
         if adapter is not None and agent is None:
@@ -224,6 +235,7 @@ class RobotRuntime:
             effective,
             audit_sink if audit_sink is not None else JsonlToolCallAuditSink(DEFAULT_TOOL_CALL_LOG_PATH),
             safety_reviewer,
+            task_store_path,
         )
 
     @staticmethod
@@ -284,6 +296,7 @@ class RobotRuntime:
             description=declared.description,
             estimate_ms=discovered.estimate_ms or declared.estimate_ms,
             completion=discovered.completion if discovered.estimate_ms or discovered.completion != "accepted" else declared.completion,
+            retry_safe=declared.retry_safe and discovered.retry_safe,
         )
 
     def available_tools(self) -> dict[str, dict[str, Any]]:
@@ -321,7 +334,93 @@ class RobotRuntime:
             if self._closed:
                 return
             self._closed = True
+        if self._task_runner is not None:
+            self._task_runner.close()
         self.adapter.close()
+
+    def conversation(self, channel: str = "cli", principal_id: str = "local", conversation_id: str | None = None) -> ConversationContext:
+        return ConversationContext(self.profile.robot_id, channel, principal_id, conversation_id or self._default_conversation_id)
+
+    def _runner(self):
+        with self._runner_lock:
+            if self._closed:
+                raise RuntimeError("Robot runtime is closed")
+            if self._task_runner is None:
+                from robotsoul.task_runner import TaskRunner
+                self._task_runner = TaskRunner(self, store_path=self.task_store_path)
+            return self._task_runner
+
+    def submit_task(self, text: str, *, conversation: ConversationContext | None = None, **kwargs: Any) -> str:
+        return self._runner().submit_task(text, conversation=conversation or self.conversation(), **kwargs)
+
+    def get_task(self, task_id: str, *, conversation: ConversationContext | None = None) -> TaskResult:
+        return self._runner().get_task(task_id, conversation=conversation)
+
+    def resume_task(self, task_id: str, *, conversation: ConversationContext | None = None, **kwargs: Any) -> str:
+        return self._runner().resume_task(task_id, conversation=conversation or self.conversation(), **kwargs)
+
+    def wait_task(self, task_id: str, timeout: float | None = None) -> TaskResult:
+        return self._runner().wait_task(task_id, timeout=timeout)
+
+    def pending_input(self, conversation: ConversationContext) -> str | None:
+        return self._runner().pending_input(conversation)
+
+    def register_result_evaluator(self, name: str, evaluator: Any, *, description: str = "") -> None:
+        self._runner().register_evaluator(name, evaluator, description=description)
+
+    def dispatch_coding_task(self, task: Task, decision: Any, cancelled: Any) -> str:
+        dispatcher = getattr(self.agent, "coding", None)
+        if dispatcher is None or not callable(getattr(dispatcher, "dispatch", None)):
+            raise RuntimeError("Coding dispatcher is unavailable")
+        return dispatcher.dispatch(decision.coding_task, cancel_event=cancelled)
+
+    def interrupt_task_decision(self, task_id: str) -> None:
+        cancel = getattr(self.agent, "cancel_decision", None)
+        if callable(cancel):
+            cancel(task_id)
+        review_session = getattr(self.safety_reviewer, "session", None)
+        interrupt = getattr(review_session, "interrupt", None)
+        if callable(interrupt):
+            interrupt(task_id)
+
+    def execute_task_step(self, task: Task, intent: AgentIntent, invocation_context: InvocationContext, *,
+                          prior_feedback: tuple[Feedback, ...] = (), on_dispatch: Any = None) -> TaskResult:
+        history: list[AuditRecord] = []
+
+        def record(event_type: str, details: dict[str, Any] | None = None) -> None:
+            history.append(AuditRecord(utc_now(), event_type, task.task_id, task.trace_id, details or {}))
+
+        def transition(status: TaskStatus) -> None:
+            task.status = status
+            task.updated_at = utc_now()
+            record("task.status", {"status": status.value})
+
+        result = self._execute_step(task, history, intent, invocation_context,
+                                    invocation_context.operator_confirmed, task.user_input,
+                                    transition, record, prior_feedback=prior_feedback,
+                                    finalize=True, on_dispatch=on_dispatch)
+        assert isinstance(result, TaskResult)
+        return result
+
+    def collect_task_observations(self) -> tuple[Observation, ...]:
+        # Only this collector drains the adapter; successive decisions see live state.
+        with self._observation_lock:
+            incoming, error = self._collect_observations(lambda kind, details: self._observation_records.append((kind, details)))
+            if error:
+                raise RuntimeError(error)
+            for item in incoming:
+                key = (item.device_id, item.event_type)
+                previous = self._observation_snapshot.get(key)
+                if previous is None or item.observed_at >= previous.observed_at:
+                    self._observation_snapshot[key] = item
+            self._observation_snapshot = {key: item for key, item in self._observation_snapshot.items() if item.is_fresh}
+            return tuple(self._observation_snapshot.values())
+
+    def drain_task_observation_records(self) -> tuple[tuple[str, dict[str, Any]], ...]:
+        with self._observation_lock:
+            records = tuple(self._observation_records)
+            self._observation_records.clear()
+            return records
 
     def invoke_skill(
         self,
@@ -333,6 +432,7 @@ class RobotRuntime:
         user_input: str | None = None,
         task_id: str | None = None,
         trace_id: str | None = None,
+        conversation: ConversationContext | None = None,
     ) -> TaskResult:
         """Invoke a typed skill using a caller context created by the service.
 
@@ -352,6 +452,7 @@ class RobotRuntime:
             _intent=AgentIntent(skill, parameters),
             _invocation_context=invocation_context,
             _operator_confirmed=operator_confirmed,
+            conversation=conversation,
         )
 
     def validate_skill_request(
@@ -404,6 +505,14 @@ class RobotRuntime:
         command uses ``cancel_task``. A running command that is not
         interruptible is left alone.
         """
+        if self._task_runner is not None:
+            try:
+                self._task_runner.get_task(task_id)
+            except KeyError:
+                pass
+            else:
+                self._task_runner.cancel_task(task_id)
+                return None
         with self._runtime_lock:
             command = self._active_commands.get(task_id)
             if command is None:
@@ -412,7 +521,7 @@ class RobotRuntime:
         capability = self.capabilities.get(command.skill)
         if capability is not None and not capability.interruptible:
             return None
-        return self.cancel_task(task_id)
+        return self.cancel_active_command(task_id)
 
     def _consume_preempted(self, task_id: str) -> bool:
         with self._runtime_lock:
@@ -421,13 +530,32 @@ class RobotRuntime:
             self._preempted_task_ids.discard(task_id)
             return True
 
-    def cancel_task(self, task_id: str) -> Feedback | None:
+    def cancel_task(self, task_id: str, *, conversation: ConversationContext | None = None) -> TaskResult | Feedback | None:
+        if conversation is not None:
+            return self._runner().cancel_task(task_id, conversation=conversation)
+        if not callable(getattr(self.agent, "decide", None)):
+            with self._runtime_lock:
+                active = task_id in self._active_commands
+            if active:
+                return self.cancel_active_command(task_id)
+        if self._task_runner is not None:
+            try:
+                self._task_runner.get_task(task_id, conversation=conversation)
+            except KeyError:
+                pass
+            else:
+                return self._task_runner.cancel_task(task_id, conversation=conversation)
+        return self.cancel_active_command(task_id)
+
+    def cancel_active_command(self, task_id: str) -> Feedback | None:
         """Request local cancellation of the task's active command.
 
         A returned cancelled feedback is a stop acknowledgement from the adapter;
         None means that this runtime has no command active for the task.
         """
+        self.interrupt_task_decision(task_id)
         with self._runtime_lock:
+            self._cancel_requested_ids.add(task_id)
             command = self._active_commands.get(task_id)
         if command is None:
             return None
@@ -513,7 +641,9 @@ class RobotRuntime:
         _intent: AgentIntent | AgentPlan | None = None,
         _invocation_context: InvocationContext | None = None,
         _operator_confirmed: bool = False,
+        conversation: ConversationContext | None = None,
     ) -> TaskResult:
+        """Synchronous compatibility entry over the single durable task runner."""
         resolved_task_id = task_id if task_id is not None else str(uuid4())
         resolved_trace_id = trace_id if trace_id is not None else str(uuid4())
         if not isinstance(resolved_task_id, str) or not resolved_task_id.strip():
@@ -524,122 +654,13 @@ class RobotRuntime:
             if resolved_task_id in self._used_task_ids:
                 raise ValueError(f"task_id has already been used in this runtime: {resolved_task_id}")
             self._used_task_ids.add(resolved_task_id)
-        task = Task(resolved_task_id, resolved_trace_id, self.profile.robot_id, text)
-        history: list[AuditRecord] = []
-        feedback: tuple[Feedback, ...] = ()
-        evaluation: Evaluation | None = None
-
-        def record(event_type: str, details: dict[str, Any] | None = None) -> None:
-            history.append(AuditRecord(utc_now(), event_type, task.task_id, task.trace_id, details or {}))
-
-        def transition(status: TaskStatus) -> None:
-            task.status = status
-            task.updated_at = utc_now()
-            record("task.status", {"status": status.value})
-
-        record("task.received", {"input_chars": len(text)})
-        _trace("Info", task.task_id, f"收到指令：{text.strip()}")
-        if self._consume_preempted(resolved_task_id):
-            return self._failed_result(task, history, "Voice command was replaced", transition, record)
-        if not text.strip():
-            return self._failed_result(task, history, "Task input is empty", transition, record)
-        transition(TaskStatus.CONTEXTUALIZING)
-        observations, observation_error = self._collect_observations(record)
-        if observation_error:
-            return self._failed_result(task, history, observation_error, transition, record)
-        transition(TaskStatus.AWAITING_AGENT)
-        try:
-            if _intent is not None:
-                intent = _intent
-            else:
-                slash_intent = resolve_slash_command(text, self.capabilities)
-                if isinstance(slash_intent, str):
-                    return self._failed_result(task, history, slash_intent, transition, record)
-                if slash_intent is not None:
-                    _trace("Info", task.task_id, "使用直接指令")
-                    intent = slash_intent
-                else:
-                    _trace("Info", task.task_id, "等待语言决策")
-                    intent = self.agent.plan(text, self.capabilities, observations)
-        except TimeoutError:
-            return self._failed_result(task, history, "Agent request timed out", transition, record)
-        except AgentRejected as exc:
-            return self._failed_result(task, history, exc.reason, transition, record)
-        except Exception as exc:
-            return self._failed_result(task, history, f"Agent request failed: {exc}", transition, record)
-        if intent is None:
-            return self._failed_result(task, history, "No supported skill matched the request", transition, record)
-        steps, plan_error = _coerce_steps(intent)
-        if plan_error:
-            return self._failed_result(task, history, plan_error, transition, record)
-        requested = len(steps)
-        steps = _collapse_repeated_motion(steps, self.capabilities)
-        if len(steps) != requested:
-            record(
-                "plan.collapsed",
-                {"from": requested, "to": len(steps), "skills": [step.skill for step in steps]},
-            )
-        if len(steps) == 1:
-            record("agent.intent", {"skill": steps[0].skill, "parameter_names": sorted(steps[0].parameters) if isinstance(steps[0].parameters, dict) else []})
-            rationale = steps[0].rationale.strip() if isinstance(steps[0].rationale, str) else ""
-            _trace("Info", task.task_id, f"已选择技能 {steps[0].skill}" + (f" 理由={rationale}" if rationale else ""))
-        else:
-            record(
-                "agent.plan",
-                {
-                    "steps": [
-                        {
-                            "skill": step.skill,
-                            "parameter_names": sorted(step.parameters) if isinstance(step.parameters, dict) else [],
-                        }
-                        for step in steps
-                    ],
-                    "rationale": intent.rationale if isinstance(intent, AgentPlan) else "",
-                },
-            )
-            _trace("Info", task.task_id, f"已编排计划 步数={len(steps)}")
-        context = _invocation_context or InvocationContext(InvocationSource.AGENT)
-        if len(steps) > 1:
-            for step in steps:
-                authorization_error = self._authorize_step(step, context, _operator_confirmed)
-                if authorization_error:
-                    return self._failed_result(task, history, authorization_error, transition, record)
-        allowances = []
-        for step in steps:
-            capability = self.capabilities.get(step.skill) if isinstance(step.parameters, dict) else None
-            allowances.append(step_allowance_ms(capability, step.parameters) if capability is not None else 0)
-        plan_deadline = utc_now() + timedelta(milliseconds=sum(allowances) + _PLAN_MARGIN_MS)
-        record(
-            "plan.scheduled",
-            {"steps": [step.skill for step in steps], "allowance_ms": allowances, "margin_ms": _PLAN_MARGIN_MS},
+        if _invocation_context is not None and _invocation_context.operator_confirmed and not _operator_confirmed:
+            _invocation_context = replace(_invocation_context, operator_confirmed=False)
+        submitted = self.submit_task(
+            text, conversation=conversation, task_id=resolved_task_id, trace_id=resolved_trace_id,
+            intent=_intent, invocation_context=_invocation_context,
         )
-        executed: list[Feedback] = []
-        for index, step in enumerate(steps):
-            if utc_now() > plan_deadline:
-                return self._failed_result(
-                    task,
-                    history,
-                    "Plan deadline expired before the next step",
-                    transition,
-                    record,
-                    tuple(executed),
-                )
-            outcome = self._execute_step(
-                task,
-                history,
-                step,
-                context,
-                _operator_confirmed,
-                text,
-                transition,
-                record,
-                prior_feedback=tuple(executed),
-                finalize=index == len(steps) - 1,
-            )
-            if isinstance(outcome, TaskResult):
-                return outcome
-            executed.extend(outcome)
-        return self._failed_result(task, history, "Plan produced no result", transition, record, tuple(executed))
+        return self.wait_task(submitted)
 
     def _authorize_step(
         self,
@@ -703,6 +724,7 @@ class RobotRuntime:
         *,
         prior_feedback: tuple[Feedback, ...],
         finalize: bool,
+        on_dispatch: Any = None,
     ) -> TaskResult | tuple[Feedback, ...]:
         transition(TaskStatus.VALIDATING_INTENT)
         validation_error = self._validate_intent(intent)
@@ -873,9 +895,20 @@ class RobotRuntime:
                 record,
             )
         record("tool.call.started", tool_started)
+        if on_dispatch is not None:
+            try:
+                on_dispatch(command)
+            except Exception as exc:
+                return self._finish_failure(prior_feedback, task, history, f"Command could not be persisted: {exc}", transition, record)
         with self._runtime_lock:
-            self._active_commands[task.task_id] = command
-            self._cancel_confirmations.pop(task.task_id, None)
+            cancelled_before_dispatch = task.task_id in self._cancel_requested_ids or task.task_id in self._preempted_task_ids
+            if not cancelled_before_dispatch:
+                self._active_commands[task.task_id] = command
+                self._cancel_confirmations.pop(task.task_id, None)
+        if cancelled_before_dispatch:
+            stopped = self._local_feedback(command, FeedbackStatus.CANCELLED, "Cancelled before adapter dispatch", "not_dispatched")
+            transition(TaskStatus.CANCELLED)
+            return TaskResult(task, prior_feedback + (stopped,), None, tuple(history))
         execute_started = monotonic()
         try:
             feedback = self.adapter.execute(command)

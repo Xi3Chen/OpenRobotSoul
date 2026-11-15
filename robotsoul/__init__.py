@@ -3,6 +3,9 @@
 from robotsoul.models import (
     AgentIntent,
     AgentPlan,
+    AgentDecision,
+    ConversationContext,
+    TaskContext,
     CapabilitySpec,
     Command,
     Evaluation,
@@ -28,10 +31,16 @@ from robotsoul.audit import (
 from robotsoul.profiles import RobotProfile, list_profiles, load_profile, load_selected_profile
 from robotsoul.picoclaw import CodingTaskResult, PicoClawCodingAgent, PicoClawError
 from robotsoul.runtime import RobotRuntime, SafetyReviewer
+from robotsoul.task_runner import TaskRunner, TaskLimits
 
 __all__ = [
     "AgentIntent",
     "AgentPlan",
+    "AgentDecision",
+    "ConversationContext",
+    "TaskContext",
+    "TaskRunner",
+    "TaskLimits",
     "CapabilitySpec",
     "CodingTaskResult",
     "Command",

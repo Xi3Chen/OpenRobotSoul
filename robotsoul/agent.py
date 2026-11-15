@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Protocol
 
-from robotsoul.models import AgentIntent, AgentPlan, CapabilitySpec, Observation
+from robotsoul.models import AgentDecision, AgentIntent, AgentPlan, CapabilitySpec, Observation, TaskContext
 
 
 class AgentRejected(RuntimeError):
@@ -22,6 +22,11 @@ class AgentProvider(Protocol):
         observations: tuple[Observation, ...] = (),
     ) -> AgentIntent | AgentPlan | None:
         """Return one skill or an ordered plan; providers must enforce their own request timeout."""
+
+
+class TaskAgentProvider(Protocol):
+    def decide(self, context: TaskContext, capabilities: dict[str, CapabilitySpec]) -> AgentDecision:
+        """Return a decision from the current task's actual observations and results."""
 
 
 _SLASH_COMMAND = re.compile(r"^/(\S+)(?:\s+(.*))?$", re.DOTALL)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from copy import deepcopy
 import json
 import os
 import platform
@@ -58,6 +59,9 @@ class UnitreeGo2SdkDriver:
         self._state_lock = threading.Lock()
         self._cancel_event = threading.Event()
         self._active_command_id: str | None = None
+        self._active_command: Command | None = None
+        self._cancel_before_start: dict[str, Command] = {}
+        self._finished_command_ids: set[str] = set()
         self._closing = False
 
     def connect(self) -> None:
@@ -186,8 +190,9 @@ class UnitreeGo2SdkDriver:
         if action.completion == "nominal" and action.estimate_ms > 0:
             if utc_now() + timedelta(milliseconds=action.estimate_ms + 1500) > command.deadline:
                 return self._failed(command, "Command deadline is too soon for the nominal hold", "deadline_expired")
-        if not self._begin(command):
-            return self._failed(command, "Another Go2 sport action is active", "action_busy")
+        prevented = self._begin(command)
+        if prevented is not None:
+            return (prevented,)
         try:
             if action.kind == "move":
                 return self._execute_move(command, action)
@@ -198,24 +203,50 @@ class UnitreeGo2SdkDriver:
             self._end(command)
 
     def cancel(self, command: Command) -> Feedback:
+        action = sport_action(command.skill)
+        if command.robot_id != self.robot_id:
+            return self._feedback(command, FeedbackStatus.FAILED, "Robot ID mismatch", "robot_mismatch")
+        if action is None or command.risk_level != action.risk_level or validate_parameters(action, command.parameters):
+            return self._feedback(command, FeedbackStatus.FAILED, "Invalid Go2 cancellation command", "command_rejected")
         with self._state_lock:
             if self._active_command_id != command.command_id:
-                return self._feedback(
-                    command, FeedbackStatus.FAILED, "No Go2 motion command is active", "no_active_command"
-                )
+                if (self._closing or self._library is None or self._handle is None
+                        or command.command_id in self._finished_command_ids):
+                    return self._feedback(
+                        command, FeedbackStatus.FAILED, "No Go2 motion command is active", "no_active_command"
+                    )
+                previous = self._cancel_before_start.get(command.command_id)
+                if previous is not None and previous != command:
+                    return self._feedback(command, FeedbackStatus.FAILED,
+                                          "Command ID belongs to a different request", "idempotency_conflict")
+                # Runtime publishes its active command before entering execute.
+                # Remember this exact request under the same lock as _begin so
+                # cancellation cannot disappear in that dispatch gap.
+                self._cancel_before_start[command.command_id] = deepcopy(command)
+                return self._prevented_feedback(command)
+            if self._active_command != command:
+                return self._feedback(command, FeedbackStatus.FAILED,
+                                      "Cancellation does not match the active command", "command_identity_mismatch")
             self._cancel_event.set()
-        try:
-            code, _body = self._invoke("stop_move", [], None)
-        except Exception as exc:
-            return self._feedback(command, FeedbackStatus.FAILED, str(exc), "stop_failed")
-        if code != 0:
+            # Keep the active identity reserved until StopMove returns. Releasing
+            # this lock first would let _end/_begin switch to another command
+            # while the old cancellation still sends its native stop.
+            try:
+                code, _body = self._invoke("stop_move", [], None)
+            except Exception as exc:
+                return self._feedback(command, FeedbackStatus.FAILED, str(exc), "stop_failed")
+            if code != 0:
+                return self._feedback(
+                    command,
+                    FeedbackStatus.FAILED,
+                    f"Sport service rejected stop_move with code {code}",
+                    "stop_failed",
+                )
             return self._feedback(
-                command,
-                FeedbackStatus.FAILED,
-                f"Sport service rejected stop_move with code {code}",
-                "stop_failed",
+                command, FeedbackStatus.CANCELLED, "Go2 StopMove was accepted", "",
+                evidence={"robot_id": command.robot_id, "outcome_known": True,
+                          "cancellation_confirmed": True, "stop_api_code": code},
             )
-        return self._feedback(command, FeedbackStatus.CANCELLED, "Go2 StopMove was accepted", "")
 
     def close(self) -> None:
         should_stop = False
@@ -374,24 +405,42 @@ class UnitreeGo2SdkDriver:
         library.go2_bridge_destroy.argtypes = [ctypes.c_void_p]
         library.go2_bridge_destroy.restype = None
 
-    def _begin(self, command: Command) -> bool:
+    def _begin(self, command: Command) -> Feedback | None:
         with self._state_lock:
+            previous = self._cancel_before_start.get(command.command_id)
+            if previous is not None:
+                if previous != command:
+                    return self._feedback(command, FeedbackStatus.FAILED,
+                                          "Command ID belongs to a different request", "idempotency_conflict")
+                return self._prevented_feedback(command)
             if self._closing or self._active_command_id is not None:
-                return False
+                return self._feedback(command, FeedbackStatus.FAILED,
+                                      "Another Go2 sport action is active", "action_busy")
             self._active_command_id = command.command_id
+            self._active_command = deepcopy(command)
             self._cancel_event.clear()
-            return True
+            return None
 
     def _end(self, command: Command) -> None:
         with self._state_lock:
-            if self._active_command_id == command.command_id:
+            if self._active_command == command:
+                self._finished_command_ids.add(command.command_id)
                 self._active_command_id = None
+                self._active_command = None
+
+    def _prevented_feedback(self, command: Command) -> Feedback:
+        return self._feedback(
+            command, FeedbackStatus.CANCELLED, "Go2 command was cancelled before native dispatch", "not_dispatched",
+            evidence={"robot_id": command.robot_id, "outcome_known": True,
+                      "cancellation_confirmed": True, "native_dispatch": False},
+        )
 
     def _execute_request(self, command: Command, action: Any) -> tuple[Feedback, ...]:
-        if self._cancel_event.is_set():
-            return self._cancelled(command)
         try:
-            code, body = self._invoke(action.bridge_name, *native_arguments(action, command.parameters))
+            with self._state_lock:
+                if self._cancel_event.is_set():
+                    return self._cancelled(command)
+                code, body = self._invoke(action.bridge_name, *native_arguments(action, command.parameters))
         except Exception as exc:
             error_code = "vui_call_failed" if action.kind == "volume" else "sport_call_failed"
             return self._failed(command, str(exc), error_code)
@@ -555,7 +604,10 @@ class UnitreeGo2SdkDriver:
                 return reason, sends
             now = time.monotonic()
             if now >= next_send:
-                code, _body = self._invoke("move", numbers, None)
+                with self._state_lock:
+                    if self._cancel_event.is_set():
+                        return "cancelled", sends
+                    code, _body = self._invoke("move", numbers, None)
                 if code != 0:
                     return "rejected", sends
                 sends += 1

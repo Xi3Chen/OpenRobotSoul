@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 from time import monotonic
 from uuid import uuid4
 
@@ -52,7 +53,7 @@ class PicoClawCodingAgent:
         self.model = model
         self.allow_shell = allow_shell
 
-    def run_task(self, prompt: str, workspace: str | Path) -> CodingTaskResult:
+    def run_task(self, prompt: str, workspace: str | Path, *, cancel_event: Event | None = None) -> CodingTaskResult:
         if not prompt.strip():
             raise ValueError("Coding task prompt must not be empty")
 
@@ -78,6 +79,9 @@ class PicoClawCodingAgent:
         try:
             with tempfile.TemporaryDirectory(prefix="openrobotsoul-picoclaw-") as home_dir:
                 env = self._build_environment(workspace_path, Path(home_dir))
+                if cancel_event is not None and cancel_event.is_set():
+                    return CodingTaskResult(task_id, session_id, str(workspace_path), "", "", None,
+                                            monotonic() - started, cancelled=True)
                 process = subprocess.Popen(
                     command,
                     cwd=workspace_path,
@@ -89,7 +93,25 @@ class PicoClawCodingAgent:
                     errors="replace",
                 )
                 try:
-                    output, stderr = process.communicate(timeout=self.timeout_seconds)
+                    if cancel_event is None:
+                        output, stderr = process.communicate(timeout=self.timeout_seconds)
+                    else:
+                        deadline = monotonic() + self.timeout_seconds
+                        while True:
+                            if cancel_event.is_set():
+                                self._kill_process(process)
+                                output, stderr = process.communicate()
+                                return CodingTaskResult(task_id, session_id, str(workspace_path), output or "",
+                                                        stderr or "", process.returncode, monotonic() - started,
+                                                        cancelled=True)
+                            remaining = deadline - monotonic()
+                            if remaining <= 0:
+                                raise subprocess.TimeoutExpired(command, self.timeout_seconds)
+                            try:
+                                output, stderr = process.communicate(timeout=min(0.1, remaining))
+                                break
+                            except subprocess.TimeoutExpired:
+                                continue
                 except subprocess.TimeoutExpired:
                     self._kill_process(process)
                     output, stderr = process.communicate()

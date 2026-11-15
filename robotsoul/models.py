@@ -24,6 +24,10 @@ class TaskStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    WAITING_EVENT = "waiting_event"
+    AWAITING_INPUT = "awaiting_input"
+    CANCEL_REQUESTED = "cancel_requested"
+    INTERRUPTED = "interrupted"
 
 
 class FeedbackStatus(StrEnum):
@@ -73,6 +77,7 @@ class CapabilitySpec:
     description: str = ""
     estimate_ms: int = 0
     completion: str = "accepted"
+    retry_safe: bool = False
 
     @property
     def safety_class(self) -> str:
@@ -226,3 +231,56 @@ class TaskResult:
     feedback: tuple[Feedback, ...]
     evaluation: Evaluation | None
     history: tuple[AuditRecord, ...]
+    reply: str = ""
+
+
+@dataclass(frozen=True)
+class ConversationContext:
+    """History partition, deliberately separate from an authentication session."""
+
+    robot_id: str
+    channel: str
+    principal_id: str
+    conversation_id: str
+
+    def __post_init__(self) -> None:
+        for name in ("robot_id", "channel", "principal_id", "conversation_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip() or len(value) > 256:
+                raise ValueError(f"{name} must contain 1 to 256 characters")
+
+    @property
+    def session_key(self) -> str:
+        # Hash a canonical encoding before PicoClaw's lower-casing key helper.
+        encoded = json.dumps(self.__dict__, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return "sk_v1_" + sha256(encoded.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class TaskContext:
+    task: Task
+    conversation: ConversationContext
+    observations: tuple[Observation, ...] = ()
+    feedback: tuple[Feedback, ...] = ()
+    decision_count: int = 0
+    resume_input: str = ""
+    history: tuple[AuditRecord, ...] = ()
+    result_evaluators: tuple[dict[str, str], ...] = ()
+    goal_kind: str = "general"
+    expected_evaluator: str | None = None
+
+
+@dataclass(frozen=True)
+class AgentDecision:
+    """One bounded high-level decision; it never grants device permissions."""
+
+    kind: str
+    steps: tuple[AgentIntent, ...] = ()
+    reply: str = ""
+    rule: dict[str, Any] | None = None
+    wait: dict[str, Any] | None = None
+    evidence_refs: tuple[str, ...] = ()
+    decision_id: str = ""
+    evaluator: str = "skill_completion"
+    coding_task: str = ""
+    legacy_coding: bool = False
