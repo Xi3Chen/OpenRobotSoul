@@ -204,6 +204,8 @@ class LanguageGatewayTests(unittest.TestCase):
         self.assertIn("description", seen["system"])
         self.assertIn("顺序计划", seen["system"])
         self.assertIn("不要填写它们", seen["system"])
+        self.assertIn("左转、右转、转身、调头时用 sport.move", seen["system"])
+        self.assertIn("euler 的 yaw 不是原地转身", seen["system"])
         self.assertIn("切换到站立锁定", seen["user"])
 
     def test_decide_prompt_includes_sensor_readings(self):

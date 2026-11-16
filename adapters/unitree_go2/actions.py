@@ -154,7 +154,7 @@ def _action(
 # Methods without a comment keep the SDK name and do not add an unverified body effect.
 _SDK_DESCRIPTION = {
     "stop_move": "停止高层速度运动。SDK 示例 go2w_sport_client.cpp 注释为「停止运动」，不是卸力。",
-    "balance_stand": "进入平衡站立。SDK 示例注释为「平衡站立」；go2_sport_client.cpp 写明该姿态可由 roll、pitch、yaw 调整。",
+    "balance_stand": "进入平衡站立。SDK 示例注释为「平衡站立」；go2_sport_client.cpp 写明该姿态可由 roll、pitch、yaw 调整。做点头、摇头、歪头或抬头低头前先进入此模式，再用 sport.euler。",
     "stand_up": "切换到站立锁定。SDK 示例 go2w_sport_client.cpp 注释为「站立锁定」，go2_sport_client.cpp 注释为 position stand up，也作为默认站立。",
     "stand_down": "趴下。SDK 示例注释为「趴下」和 position stand down。",
     "sit": "请求坐下。SDK 示例 go2_sport_client.cpp 将 Sit() 列为特殊动作，头文件没有更多说明。",
@@ -187,9 +187,25 @@ _SDK_DESCRIPTION = {
     "walk_upright": "SportClient::WalkUpright(flag)，直立行走。enabled 为真时进入，为假时退出。头文件没有更多说明。",
     "cross_step": "SportClient::CrossStep(flag)，交叉步。enabled 为真时进入，为假时退出。头文件没有更多说明。",
     "auto_recover_set": "SportClient::AutoRecoverSet(flag)，设置摔倒后是否自动恢复。enabled 为真时开启，为假时关闭。",
-    "euler": "SportClient::Euler(roll, pitch, yaw)，调整机身滚转、俯仰和偏航。SDK 示例写明平衡站立可由这三个值控制，但没有标明单位。",
-    "move": "按时间移动，速度控制。duration_ms 是整段时长，最长 120 秒。原生 Move 单次最长约 2 秒，程序按这个上限计算循环次数并重复发送，到时调用 StopMove。一次移动只调用一次，不要拆成多步。SDK 没有标明速度单位。",
-    "move_distance": "按距离移动。distance_m 是相对起点的水平位移，范围 0.2 到 8 米。程序同时读取机体位置和雷达里程计，读数一致后调用 StopMove。到截止预算仍不够则失败。一次移动只调用一次，不要拆成多步。位置按米解释，坐标系未另行换算。",
+    "euler": (
+        "SportClient::Euler(roll, pitch, yaw)，在平衡站立下设定机身姿态角目标，不是原地转身。"
+        "Go2 无独立颈部：pitch 用于抬头低头/点头，yaw 用于左右扭身/摇头，roll 用于左右歪身/歪头。"
+        "单次调用只设一个姿态；完整点头或摇头需在姿态间切换（可用顺序计划）。"
+        "用户要左转、右转、转身、调头时不要用本技能，改用 sport.move 的 vyaw。"
+        "SDK 示例写明平衡站立可由这三个值控制，但没有标明单位。"
+    ),
+    "move": (
+        "按时间做速度控制移动。vx 前进/后退，vy 左右平移，vyaw 原地转向角速度；"
+        "用户要左转、右转、转身、调头时用 vyaw（vx/vy 可为 0），不要用 sport.euler。"
+        "duration_ms 是整段时长，最长 120 秒。原生 Move 单次最长约 2 秒，程序按这个上限计算循环次数并重复发送，到时调用 StopMove。"
+        "一次移动只调用一次，不要拆成多步。SDK 没有标明速度单位。"
+    ),
+    "move_distance": (
+        "按距离移动。vx/vy/vyaw 含义同 sport.move；distance_m 是相对起点的水平位移，范围 0.2 到 8 米。"
+        "转身或调头若只需改变朝向、不要求走完一段距离，优先用 sport.move 的 vyaw。"
+        "程序同时读取机体位置和雷达里程计，读数一致后调用 StopMove。到截止预算仍不够则失败。"
+        "一次移动只调用一次，不要拆成多步。位置按米解释，坐标系未另行换算。"
+    ),
     "speed_level": "SportClient::SpeedLevel(level)，速度档位。SDK 示例注释为「速度档位」，没有说明每个档位对应的速度。",
     "auto_recover_get": "SportClient::AutoRecoverGet()，查询摔倒后自动恢复开关的当前值。",
     "set_volume": "VuiClient::SetVolume(level)，设置机身音量。volume 为整数，官方文档取值范围 0~10，0 为静音，10 为最大。",

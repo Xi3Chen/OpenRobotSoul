@@ -140,6 +140,9 @@ def _decide(request: dict[str, Any], complete: Completer) -> dict[str, Any]:
                     "completion 为 nominal 时，estimate_ms 是名义保持时间，不是实测完成。"
                     "completion 为 measured 时，estimate_ms 只是截止预算；到时还没达到条件，这一步失败，后面的步骤不会开始。"
                     "用户要走多少米时用 sport.move_distance，一次调用。用户要走多久时用 sport.move，一次调用。"
+                    "用户要左转、右转、转身、调头时用 sport.move，设置 vyaw（vx/vy 可为 0），不要用 sport.euler。"
+                    "用户要点头、摇头、歪头、抬头低头时：先 sport.balance_stand（若尚未平衡站立），再用 sport.euler；"
+                    "pitch 点头/抬头低头，yaw 左右扭身摇头，roll 歪头。euler 的 yaw 不是原地转身。"
                     "一句话只对应一个动作时，输出一个技能。需要按顺序做多件事时，输出一个计划，最多 "
                     f"{_MAX_PLAN_STEPS} 步。不要编造技能，不要输出解释性正文。只输出一个 JSON 对象，格式是以下之一："
                     '{"skill":"技能名","parameters":{},"rationale":"简短理由"}；'
