@@ -24,6 +24,8 @@
 - [语音交互子系统](16-voice-interaction.md)
 - [运行日志](17-runtime-log.md)
 - [对话上下文与 PicoClaw AgentLoop](18-picoclaw-dialogue-context.md)
+- [对话方案与 Agent 运行底座可行性评估](19-agent-foundation-feasibility.md)
+- [Agent 底座首阶段实施验收](20-agent-foundation-implementation.md)
 
 ## 核心决策
 
@@ -31,7 +33,7 @@
 
 1. 机器人适配器：隐藏具体硬件差异，提供感知输入和动作能力。
 2. Agent：基于云端模型理解任务、选择工具并给出下一步高层决策。
-3. 事务处理流回环：维护任务和交互状态，路由事件与动作，融合反馈、判定主动任务资格并评估结果。
+3. 事务处理流回环：维护任务状态（交互状态归 Voice Service，见 [16](16-voice-interaction.md)），路由事件与动作，融合反馈、判定主动任务资格并评估结果。
 
 事件、状态、任务和动作的共享数据契约，以及认证、日志、追踪和配置属于横向运行治理职责，由三个模块共同遵守，不作为第四个业务模块。
 
@@ -41,6 +43,7 @@
 - MVP 先完成一个目标机器人的端到端接入，再在隔离测试中用第二个兼容 profile 验证配置切换，不要求同时部署或协调多台机器人。
 - 感知适配器可先接入一种输入；没有相机时仍可通过语音或文本任务工作。
 - 动作必须通过有参数约束的工具调用，不能将自由文本直接解释为运动命令。
+- 机器人大多没有屏幕，确认走语音二元判断和手势：可逆的 `confirm` 动作一次单字或一次手势，不可逆的要唤醒词前缀或语音加手势，关闭安全保护和系统修改才走 Dashboard 认证加密码。流程见 [15](15-dashboard.md)。
 - 高层推理使用云端 API；本地运行确定性的运动控制、安全监督及设备驱动。
 - 常驻对话进程 `openrobotsoul-dialogue` 链接 `third_party/picoclaw` 的 AgentLoop，承担全部自然语言规划（含多轮上下文与压缩），包括文本任务、本地语音最终转写和 Dashboard 通话最终转写。Go 版 PicoClaw CLI 的编码任务仍限制在隔离工作区，工具权限与自然语言会话分开。
 - VLA 模型不是 MVP 的前置条件。未来可作为某个技能或策略实现接入。
@@ -55,6 +58,6 @@
 
 ## 决策状态
 
-这是首版实施规划，不是现有实现的代码审计。机器人型号、传感器型号、云端模型供应方、运行时语言和部署拓扑仍需在技术预研后通过 ADR（架构决策记录）确定。自然语言规划已定为常驻对话进程 `openrobotsoul-dialogue`（链接 `third_party/picoclaw`）：文本与语音最终转写走同一入口并持有 session 上下文。Go 版 PicoClaw CLI 只用于隔离编码。集成、工具隔离和验收见 [Agent 选型与 PicoClaw 集成决策](11-agent-tooling-decision.md) 与 [对话上下文与 PicoClaw AgentLoop](18-picoclaw-dialogue-context.md)。OpenRobotSoul 为当前项目名。
+这是首版实施规划，不是现有实现的代码审计。运行时语言和部署拓扑已经锁定：Python 主进程、Go 对话进程 `openrobotsoul-dialogue`、C++ 驱动 bridge 和独立的 Voice Service；首发机器人定为 Unitree Go2（待实机验证）。传感器型号、云端模型供应方等仍需在技术预研后确定，决策记录集中写在 [11](11-agent-tooling-decision.md) 等文档里，目录中暂无独立 ADR 文件。自然语言规划已定为常驻对话进程 `openrobotsoul-dialogue`（链接 `third_party/picoclaw`）：文本与语音最终转写走同一入口并持有 session 上下文。Go 版 PicoClaw CLI 只用于隔离编码。集成、工具隔离和验收见 [Agent 选型与 PicoClaw 集成决策](11-agent-tooling-decision.md) 与 [对话上下文与 PicoClaw AgentLoop](18-picoclaw-dialogue-context.md)。OpenRobotSoul 为当前项目名。
 
 机器人代码、profile 和该机器人专属第三方依赖按 `adapters/<robot_code>/` 组织；部署目标通过 `config/robot.json` 选择已登记的静态模块。新增模块的目录、registry、profile 和验收规范见[机器人模块组织规范](12-robot-module-standard.md)。

@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import ctypes
+from copy import deepcopy
 import json
 import os
 import platform
 import threading
 import time
 from datetime import datetime, timedelta
-from math import isfinite
+from math import isfinite, trunc
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
 from adapters.unitree_go2.actions import native_arguments, sport_action, sport_capabilities, validate_parameters
-from adapters.unitree_go2.motion import NATIVE_MOVE_MS, DistanceTracker, horizontal, move_cycle_count
-from adapters.unitree_go2.sensors import sensor_observations, sport_language_fields
+from adapters.unitree_go2.motion import (
+    NATIVE_MOVE_MS,
+    TURN_SPEED_RAD_S,
+    DistanceTracker,
+    YawTurnTracker,
+    horizontal,
+    move_cycle_count,
+)
+from adapters.unitree_go2.sensors import SENSOR_TTL_MS, sensor_observations, sport_language_fields
 from robotsoul.adapters.base import BatteryStatus
 from robotsoul.models import CapabilitySpec, Command, Feedback, FeedbackStatus, Observation, utc_now
 from robotsoul.profiles import RobotProfile
@@ -58,6 +66,9 @@ class UnitreeGo2SdkDriver:
         self._state_lock = threading.Lock()
         self._cancel_event = threading.Event()
         self._active_command_id: str | None = None
+        self._active_command: Command | None = None
+        self._cancel_before_start: dict[str, Command] = {}
+        self._finished_command_ids: set[str] = set()
         self._closing = False
 
     def connect(self) -> None:
@@ -186,36 +197,67 @@ class UnitreeGo2SdkDriver:
         if action.completion == "nominal" and action.estimate_ms > 0:
             if utc_now() + timedelta(milliseconds=action.estimate_ms + 1500) > command.deadline:
                 return self._failed(command, "Command deadline is too soon for the nominal hold", "deadline_expired")
-        if not self._begin(command):
-            return self._failed(command, "Another Go2 sport action is active", "action_busy")
+        prevented = self._begin(command)
+        if prevented is not None:
+            return (prevented,)
         try:
             if action.kind == "move":
                 return self._execute_move(command, action)
             if action.kind == "move_distance":
                 return self._execute_distance(command, action)
+            if action.kind == "turn":
+                return self._execute_turn(command, action)
+            if action.kind == "expression":
+                return self._execute_expression(command, action)
             return self._execute_request(command, action)
         finally:
             self._end(command)
 
     def cancel(self, command: Command) -> Feedback:
+        action = sport_action(command.skill)
+        if command.robot_id != self.robot_id:
+            return self._feedback(command, FeedbackStatus.FAILED, "Robot ID mismatch", "robot_mismatch")
+        if action is None or command.risk_level != action.risk_level or validate_parameters(action, command.parameters):
+            return self._feedback(command, FeedbackStatus.FAILED, "Invalid Go2 cancellation command", "command_rejected")
         with self._state_lock:
             if self._active_command_id != command.command_id:
-                return self._feedback(
-                    command, FeedbackStatus.FAILED, "No Go2 motion command is active", "no_active_command"
-                )
+                if (self._closing or self._library is None or self._handle is None
+                        or command.command_id in self._finished_command_ids):
+                    return self._feedback(
+                        command, FeedbackStatus.FAILED, "No Go2 motion command is active", "no_active_command"
+                    )
+                previous = self._cancel_before_start.get(command.command_id)
+                if previous is not None and previous != command:
+                    return self._feedback(command, FeedbackStatus.FAILED,
+                                          "Command ID belongs to a different request", "idempotency_conflict")
+                # Runtime publishes its active command before entering execute.
+                # Remember this exact request under the same lock as _begin so
+                # cancellation cannot disappear in that dispatch gap.
+                self._cancel_before_start[command.command_id] = deepcopy(command)
+                return self._prevented_feedback(command)
+            if self._active_command != command:
+                return self._feedback(command, FeedbackStatus.FAILED,
+                                      "Cancellation does not match the active command", "command_identity_mismatch")
             self._cancel_event.set()
-        try:
-            code, _body = self._invoke("stop_move", [], None)
-        except Exception as exc:
-            return self._feedback(command, FeedbackStatus.FAILED, str(exc), "stop_failed")
-        if code != 0:
+            # Keep the active identity reserved until StopMove returns. Releasing
+            # this lock first would let _end/_begin switch to another command
+            # while the old cancellation still sends its native stop.
+            try:
+                code, _body = self._invoke("stop_move", [], None)
+            except Exception as exc:
+                return self._feedback(command, FeedbackStatus.FAILED, str(exc), "stop_failed")
+            if code != 0:
+                return self._feedback(
+                    command,
+                    FeedbackStatus.FAILED,
+                    f"Sport service rejected stop_move with code {code}",
+                    "stop_failed",
+                )
             return self._feedback(
-                command,
-                FeedbackStatus.FAILED,
-                f"Sport service rejected stop_move with code {code}",
-                "stop_failed",
+                command, FeedbackStatus.CANCELLED, "Go2 StopMove was accepted", "",
+                evidence={"robot_id": command.robot_id, "outcome_known": True,
+                          "cancellation_confirmed": True, "stop_api_code": code},
             )
-        return self._feedback(command, FeedbackStatus.CANCELLED, "Go2 StopMove was accepted", "")
 
     def close(self) -> None:
         should_stop = False
@@ -374,30 +416,53 @@ class UnitreeGo2SdkDriver:
         library.go2_bridge_destroy.argtypes = [ctypes.c_void_p]
         library.go2_bridge_destroy.restype = None
 
-    def _begin(self, command: Command) -> bool:
+    def _begin(self, command: Command) -> Feedback | None:
         with self._state_lock:
+            previous = self._cancel_before_start.get(command.command_id)
+            if previous is not None:
+                if previous != command:
+                    return self._feedback(command, FeedbackStatus.FAILED,
+                                          "Command ID belongs to a different request", "idempotency_conflict")
+                return self._prevented_feedback(command)
             if self._closing or self._active_command_id is not None:
-                return False
+                return self._feedback(command, FeedbackStatus.FAILED,
+                                      "Another Go2 sport action is active", "action_busy")
             self._active_command_id = command.command_id
+            self._active_command = deepcopy(command)
             self._cancel_event.clear()
-            return True
+            return None
 
     def _end(self, command: Command) -> None:
         with self._state_lock:
-            if self._active_command_id == command.command_id:
+            if self._active_command == command:
+                self._finished_command_ids.add(command.command_id)
                 self._active_command_id = None
+                self._active_command = None
+
+    def _prevented_feedback(self, command: Command) -> Feedback:
+        return self._feedback(
+            command, FeedbackStatus.CANCELLED, "Go2 command was cancelled before native dispatch", "not_dispatched",
+            evidence={"robot_id": command.robot_id, "outcome_known": True,
+                      "cancellation_confirmed": True, "native_dispatch": False},
+        )
 
     def _execute_request(self, command: Command, action: Any) -> tuple[Feedback, ...]:
-        if self._cancel_event.is_set():
-            return self._cancelled(command)
         try:
-            code, body = self._invoke(action.bridge_name, *native_arguments(action, command.parameters))
+            with self._state_lock:
+                if self._cancel_event.is_set():
+                    return self._cancelled(command)
+                code, body = self._invoke(action.bridge_name, *native_arguments(action, command.parameters))
         except Exception as exc:
             error_code = "vui_call_failed" if action.kind == "volume" else "sport_call_failed"
             return self._failed(command, str(exc), error_code)
         if self._cancel_event.is_set():
-            if action.kind != "volume":
-                self._best_effort_stop()
+            if action.kind != "volume" and not self._stop_confirmed():
+                return self._failed(
+                    command,
+                    "StopMove could not be confirmed after cancellation",
+                    "stop_failed",
+                    {"robot_id": command.robot_id, "outcome_known": False, "cancellation_confirmed": False},
+                )
             return self._cancelled(command)
         if code != 0:
             if action.kind == "volume":
@@ -418,7 +483,13 @@ class UnitreeGo2SdkDriver:
         if action.completion == "nominal" and action.estimate_ms > 0:
             reason = self._wait_for_duration(command, action.estimate_ms)
             if reason == "cancelled":
-                self._best_effort_stop()
+                if not self._stop_confirmed():
+                    return self._failed(
+                        command,
+                        "StopMove could not be confirmed after cancellation",
+                        "stop_failed",
+                        {"robot_id": command.robot_id, "outcome_known": False, "cancellation_confirmed": False},
+                    )
                 return self._cancelled(command)
             if reason == "deadline":
                 return self._failed(command, "Nominal duration exceeded the command deadline", "deadline_expired")
@@ -453,9 +524,15 @@ class UnitreeGo2SdkDriver:
                 if reason != "done":
                     break
         except Exception as exc:
+            evidence: dict[str, Any] | None = None
             if sends:
-                self._best_effort_stop()
-            return self._failed(command, str(exc), "sport_call_failed")
+                confirmed = self._stop_confirmed()
+                evidence = {
+                    "robot_id": command.robot_id,
+                    "outcome_known": confirmed,
+                    "cancellation_confirmed": confirmed,
+                }
+            return self._failed(command, str(exc), "sport_call_failed", evidence)
         stop_error = self._stop_failure(command) if sends else None
         if stop_error is not None:
             return stop_error
@@ -496,9 +573,15 @@ class UnitreeGo2SdkDriver:
         try:
             reason, sends = self._pump_move(command, numbers, lambda: tracker.observe(self._position_samples()))
         except Exception as exc:
+            evidence: dict[str, Any] | None = None
             if sends:
-                self._best_effort_stop()
-            return self._failed(command, str(exc), "sport_call_failed")
+                confirmed = self._stop_confirmed()
+                evidence = {
+                    "robot_id": command.robot_id,
+                    "outcome_known": confirmed,
+                    "cancellation_confirmed": confirmed,
+                }
+            return self._failed(command, str(exc), "sport_call_failed", evidence)
         if sends:
             stop_error = self._stop_failure(command)
             if stop_error is not None:
@@ -540,6 +623,170 @@ class UnitreeGo2SdkDriver:
             evidence,
         )
 
+    def _execute_turn(self, command: Command, action: Any) -> tuple[Feedback, ...]:
+        if action.target_radians is None:
+            return self._failed(command, "Go2 turn target is not configured", "invalid_action")
+        try:
+            yaw_start = self._read_imu_yaw()
+        except Exception as exc:
+            return self._failed(command, str(exc), "imu_unavailable")
+        tracker = YawTurnTracker(yaw_start, action.target_radians)
+        started = time.monotonic()
+
+        def reached() -> str | None:
+            if time.monotonic() - started >= action.timeout_ms / 1000.0:
+                return "turn_timeout"
+            try:
+                tracker.observe(self._read_imu_yaw())
+            except Exception:
+                return "imu_unavailable"
+            return "done" if tracker.reached else None
+
+        direction = 1.0 if action.target_radians > 0 else -1.0
+        sends = 0
+        try:
+            reason, sends = self._pump_move(
+                command, [0.0, 0.0, direction * TURN_SPEED_RAD_S], reached
+            )
+        except Exception as exc:
+            stop_code = self._best_effort_stop()
+            confirmed = stop_code == 0
+            evidence = {
+                "robot_id": command.robot_id,
+                "outcome_known": confirmed,
+                "stop_confirmed": confirmed,
+                "stop_api_code": stop_code,
+                "yaw_start": yaw_start,
+                "yaw_delta": tracker.delta_radians,
+            }
+            if not confirmed:
+                return self._failed(
+                    command,
+                    "Turn failed and StopMove could not be confirmed",
+                    "stop_failed",
+                    evidence,
+                )
+            return self._failed(command, str(exc), "sport_call_failed", evidence)
+        stop_code = self._best_effort_stop() if sends else None
+        evidence = {
+            "completion": "measured",
+            "completion_verified": reason == "done" and sends > 0,
+            "target_radians": action.target_radians,
+            "yaw_start": yaw_start,
+            "yaw_current": tracker.previous_yaw,
+            "yaw_delta": tracker.delta_radians,
+            "move_sends": sends,
+            "stop_api_code": stop_code,
+        }
+        evidence.update(self._state_evidence())
+        if sends and stop_code != 0:
+            evidence.update({"outcome_known": False, "cancellation_confirmed": False})
+            return self._failed(command, "StopMove failed after the Go2 turn", "stop_failed", evidence)
+        if reason == "cancelled":
+            evidence.update({
+                "outcome_known": True,
+                "cancellation_confirmed": True,
+                "native_dispatch": sends > 0,
+            })
+            return self._cancelled(command, evidence)
+        if reason == "imu_unavailable":
+            return self._failed(command, "Fresh IMU yaw became unavailable during the turn", "imu_unavailable", evidence)
+        if reason == "rejected":
+            return self._failed(command, "Sport service rejected turn movement", "sport_rejected", evidence)
+        if reason == "deadline":
+            return self._failed(command, "Command deadline expired before the turn completed", "deadline_expired", evidence)
+        if reason == "turn_timeout":
+            return self._failed(command, "Turn target was not reached within its motion budget", "turn_timeout", evidence)
+        if reason != "done" or not sends:
+            return self._failed(command, "Turn ended before movement was confirmed", "turn_not_started", evidence)
+        evidence["condition_met"] = True
+        return self._accepted(command, "IMU yaw reached the turn target and StopMove was accepted", evidence)
+
+    def _execute_expression(self, command: Command, action: Any) -> tuple[Feedback, ...]:
+        steps = _expression_steps(action.skill, command.parameters)
+        if steps is None:
+            return self._failed(command, "Unsupported Go2 expression action", "invalid_action")
+        pose_may_be_active = False
+        failure: tuple[str, str] | None = None
+        reason: str | None = None
+        completed_steps = 0
+        for pose, hold_ms in steps:
+            if self._cancel_event.is_set():
+                reason = "cancelled"
+                break
+            try:
+                with self._state_lock:
+                    if self._cancel_event.is_set():
+                        reason = "cancelled"
+                        break
+                    pose_may_be_active = True
+                    code, _body = self._invoke("euler", list(pose), None)
+            except Exception as exc:
+                failure = (str(exc), "expression_call_failed")
+                break
+            if code != 0:
+                failure = (f"Sport service rejected Euler pose with code {code}", "sport_rejected")
+                break
+            reason = self._wait_for_duration(command, hold_ms)
+            if reason is not None:
+                break
+            completed_steps += 1
+
+        neutral_restored = not pose_may_be_active
+        if pose_may_be_active:
+            try:
+                with self._state_lock:
+                    code, _body = self._invoke("euler", [0.0, 0.0, 0.0], None)
+                if code == 0:
+                    neutral_restored = True
+                else:
+                    failure = (
+                        f"Sport service rejected neutral Euler reset with code {code}",
+                        "expression_reset_failed",
+                    )
+            except Exception as exc:
+                failure = (f"Unable to restore neutral Euler pose: {exc}", "expression_reset_failed")
+            if neutral_restored:
+                recovery_reason = self._wait_for_duration(command, 1000)
+                if reason is None and recovery_reason is not None:
+                    reason = recovery_reason
+
+        evidence = {
+            "completion": "nominal",
+            "completion_verified": False,
+            "estimate_ms": action.estimate_ms,
+            "steps_completed": completed_steps,
+            "steps_total": len(steps),
+            "neutral_restored": neutral_restored,
+            "bridge_action": "euler",
+        }
+        evidence.update(self._state_evidence())
+        if failure is not None:
+            if failure[1] == "expression_reset_failed":
+                evidence["outcome_known"] = False
+            return self._failed(command, failure[0], failure[1], evidence)
+        if reason == "cancelled" or self._cancel_event.is_set():
+            if not neutral_restored:
+                return self._failed(
+                    command,
+                    "Expression was cancelled and neutral Euler reset could not be confirmed",
+                    "expression_reset_failed",
+                    {**evidence, "outcome_known": False},
+                )
+            return self._cancelled(command, {
+                **evidence,
+                "outcome_known": True,
+                "cancellation_confirmed": True,
+            })
+        if reason == "deadline":
+            return self._failed(command, "Expression sequence exceeded the command deadline", "deadline_expired", evidence)
+        evidence["condition_met"] = True
+        return self._accepted(
+            command,
+            "Euler expression sequence elapsed and neutral pose was restored",
+            evidence,
+        )
+
     def _pump_move(self, command: Command, numbers: list[float], stop: Any) -> tuple[str, int]:
         from adapters.unitree_go2 import motion
 
@@ -555,7 +802,10 @@ class UnitreeGo2SdkDriver:
                 return reason, sends
             now = time.monotonic()
             if now >= next_send:
-                code, _body = self._invoke("move", numbers, None)
+                with self._state_lock:
+                    if self._cancel_event.is_set():
+                        return "cancelled", sends
+                    code, _body = self._invoke("move", numbers, None)
                 if code != 0:
                     return "rejected", sends
                 sends += 1
@@ -584,6 +834,33 @@ class UnitreeGo2SdkDriver:
                 if point is not None:
                     samples["odometry"] = point
         return samples
+
+    def _read_imu_yaw(self) -> float:
+        snapshot = self._read_sensors()
+        streams = snapshot.get("streams")
+        if not isinstance(streams, list):
+            raise RuntimeError("Go2 sensor snapshot has no stream list")
+        stream = next(
+            (item for item in streams if isinstance(item, dict) and item.get("id") == "sport"),
+            None,
+        )
+        if not isinstance(stream, dict) or stream.get("available") is not True:
+            raise RuntimeError("SportModeState IMU stream is unavailable")
+        observed_at = _parse_timestamp(stream.get("observed_at"))
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise RuntimeError("SportModeState IMU timestamp must include a timezone")
+        age_ms = (utc_now() - observed_at).total_seconds() * 1000
+        if age_ms < 0 or age_ms > SENSOR_TTL_MS:
+            raise RuntimeError("SportModeState IMU sample is stale")
+        payload = stream.get("payload")
+        imu = payload.get("imu") if isinstance(payload, dict) else None
+        rpy = imu.get("rpy") if isinstance(imu, dict) else None
+        if not isinstance(rpy, list) or len(rpy) < 3:
+            raise RuntimeError("SportModeState IMU yaw is unavailable")
+        yaw = rpy[2]
+        if isinstance(yaw, bool) or not isinstance(yaw, (int, float)) or not isfinite(yaw):
+            raise RuntimeError("SportModeState IMU yaw is invalid")
+        return float(yaw)
 
     def _wait_for_duration(self, command: Command, duration_ms: int) -> str | None:
         deadline = time.monotonic() + (duration_ms / 1000.0)
@@ -639,16 +916,27 @@ class UnitreeGo2SdkDriver:
             return None
         return code
 
+    def _stop_confirmed(self) -> bool:
+        """True only when the native StopMove call returned success."""
+        return self._best_effort_stop() == 0
+
     def _stop_failure(self, command: Command) -> tuple[Feedback, ...] | None:
         stop_code = self._best_effort_stop()
         if stop_code == 0:
             return None
+        evidence = {
+            "robot_id": command.robot_id,
+            "outcome_known": False,
+            "cancellation_confirmed": False,
+            "stop_api_code": stop_code,
+        }
         if stop_code is None:
-            return self._failed(command, "StopMove failed after the Go2 motion", "stop_failed")
+            return self._failed(command, "StopMove failed after the Go2 motion", "stop_failed", evidence)
         return self._failed(
             command,
             f"Sport service rejected stop_move with code {stop_code}",
             "stop_failed",
+            evidence,
         )
 
     def _state_evidence(self) -> dict[str, Any]:
@@ -672,8 +960,20 @@ class UnitreeGo2SdkDriver:
     ) -> tuple[Feedback, ...]:
         return (self._feedback(command, FeedbackStatus.FAILED, message, error_code, evidence=evidence),)
 
-    def _cancelled(self, command: Command) -> tuple[Feedback, ...]:
-        return (self._feedback(command, FeedbackStatus.CANCELLED, "Go2 StopMove was accepted", ""),)
+    def _cancelled(
+        self,
+        command: Command,
+        evidence: dict[str, Any] | None = None,
+    ) -> tuple[Feedback, ...]:
+        return (
+            self._feedback(
+                command,
+                FeedbackStatus.CANCELLED,
+                "Go2 motion was cancelled and its safe stop was confirmed",
+                "",
+                evidence=evidence,
+            ),
+        )
 
     def _accepted(self, command: Command, message: str, evidence: dict[str, Any]) -> tuple[Feedback, ...]:
         accepted_at = utc_now()
@@ -716,6 +1016,42 @@ def _default_bridge_path() -> Path:
     else:
         target_arch = architecture
     return PROJECT_ROOT / "build" / f"linux-{target_arch}" / "lib" / "libopenrobotsoul_go2_bridge.so"
+
+
+def _expression_steps(skill: str, parameters: dict[str, Any]) -> list[tuple[tuple[float, float, float], int]] | None:
+    """Return the fixed Euler/hold sequence for a semantic expression."""
+
+    if skill == "expression.tilt_head":
+        direction = parameters.get("direction")
+        if direction not in {"left", "right"}:
+            return None
+        roll = 0.4 if direction == "left" else -0.4
+        return [((roll, 0.0, 0.0), 1000)]
+    if skill == "expression.nod":
+        count = parameters.get("count")
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, (int, float))
+            or not isfinite(count)
+            or float(count) != trunc(float(count))
+            or not 1 <= count <= 5
+        ):
+            return None
+        count = int(count)
+        return [pose for _ in range(count) for pose in (((0.0, 0.3, 0.0), 500), ((0.0, -0.3, 0.0), 500))]
+    if skill == "expression.shake_head":
+        count = parameters.get("count")
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, (int, float))
+            or not isfinite(count)
+            or float(count) != trunc(float(count))
+            or not 1 <= count <= 5
+        ):
+            return None
+        count = int(count)
+        return [pose for _ in range(count) for pose in (((0.0, 0.0, 0.4), 500), ((0.0, 0.0, -0.4), 500))]
+    return None
 
 
 def _error_text(buffer: ctypes.Array[ctypes.c_char], fallback: str) -> str:

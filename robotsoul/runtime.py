@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 import json
 from hashlib import sha256
 from math import isfinite
+from pathlib import Path
 from threading import Lock
 from time import monotonic
 from typing import Any
@@ -29,8 +30,11 @@ from robotsoul.models import (
     AgentPlan,
     AuditRecord,
     CapabilitySpec,
+    ConversationContext,
     Command,
+    ExecutionCondition,
     Evaluation,
+    EvidenceRequirement,
     Feedback,
     FeedbackStatus,
     InvocationContext,
@@ -49,6 +53,8 @@ from robotsoul.models import (
 )
 from robotsoul.motion_plan import combined_amount, motion_amount_key, same_velocity
 from robotsoul.profiles import RobotProfile
+from robotsoul.safety import LocalSafetySupervisor, SafetyCheck, SafetyReviewMetrics
+from robotsoul.confirmation import ConfirmationManager, ConfirmationRequest, ConfirmationResult, GestureSample
 
 
 _REVIEW_WINDOW = timedelta(seconds=120)
@@ -162,6 +168,17 @@ class RobotRuntime:
     capabilities: dict[str, CapabilitySpec]
     audit_sink: ToolCallAuditSink = field(default_factory=JsonlToolCallAuditSink, repr=False)
     safety_reviewer: SafetyReviewer | None = field(default=None, repr=False)
+    task_store_path: str | Path = field(default=":memory:", repr=False)
+    safety_supervisor: LocalSafetySupervisor | None = field(default=None, repr=False)
+    confirmation_manager: ConfirmationManager | None = field(default=None, repr=False)
+    review_metrics: SafetyReviewMetrics = field(default_factory=SafetyReviewMetrics, repr=False)
+    _task_runner: Any = field(default=None, init=False, repr=False)
+    _runner_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _observation_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _observation_snapshot: dict[tuple[str, str], Observation] = field(default_factory=dict, init=False, repr=False)
+    _observation_records: list[tuple[str, dict[str, Any]]] = field(default_factory=list, init=False, repr=False)
+    _cancel_requested_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    _default_conversation_id: str = field(default_factory=lambda: str(uuid4()), init=False, repr=False)
     _active_commands: dict[str, Command] = field(default_factory=dict, init=False, repr=False)
     _cancel_confirmations: dict[str, Feedback] = field(default_factory=dict, init=False, repr=False)
     _seen_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
@@ -179,6 +196,10 @@ class RobotRuntime:
         adapter: RobotAdapter | None = None,
         audit_sink: ToolCallAuditSink | None = None,
         safety_reviewer: SafetyReviewer | None = None,
+        task_store_path: str | Path = ":memory:",
+        safety_supervisor: LocalSafetySupervisor | None = None,
+        confirmation_manager: ConfirmationManager | None = None,
+        review_metrics: SafetyReviewMetrics | None = None,
     ) -> "RobotRuntime":
         active_adapter = adapter if adapter is not None else create_adapter(profile)
         if adapter is not None and agent is None:
@@ -224,6 +245,10 @@ class RobotRuntime:
             effective,
             audit_sink if audit_sink is not None else JsonlToolCallAuditSink(DEFAULT_TOOL_CALL_LOG_PATH),
             safety_reviewer,
+            task_store_path,
+            safety_supervisor if safety_supervisor is not None else getattr(active_adapter, "safety_supervisor", None),
+            confirmation_manager,
+            review_metrics if review_metrics is not None else SafetyReviewMetrics(),
         )
 
     @staticmethod
@@ -284,6 +309,7 @@ class RobotRuntime:
             description=declared.description,
             estimate_ms=discovered.estimate_ms or declared.estimate_ms,
             completion=discovered.completion if discovered.estimate_ms or discovered.completion != "accepted" else declared.completion,
+            retry_safe=declared.retry_safe and discovered.retry_safe,
         )
 
     def available_tools(self) -> dict[str, dict[str, Any]]:
@@ -321,7 +347,129 @@ class RobotRuntime:
             if self._closed:
                 return
             self._closed = True
+        if self._task_runner is not None:
+            self._task_runner.close()
         self.adapter.close()
+
+    def safety_status(self) -> dict[str, Any]:
+        supervisor = self.safety_supervisor
+        if supervisor is None:
+            status: dict[str, Any] = {"enabled": False, "metrics": {}, "review": self.review_metrics.snapshot()}
+            if self.confirmation_manager is not None:
+                status["confirmation"] = self.confirmation_manager.status()
+            return status
+        status = supervisor.status()
+        status["enabled"] = True
+        status["review"] = self.review_metrics.snapshot()
+        manager = self.confirmation_manager
+        if manager is not None:
+            status["confirmation"] = manager.status()
+        return status
+
+    def trigger_emergency_stop(self, reason: str = "local emergency stop") -> SafetyCheck:
+        supervisor = self.safety_supervisor
+        if supervisor is None:
+            return SafetyCheck(False, "local safety supervisor is unavailable", "supervisor_unavailable")
+        return supervisor.trigger_emergency_stop(reason)
+
+    def open_confirmation(self, request: ConfirmationRequest) -> ConfirmationRequest:
+        if self.confirmation_manager is None:
+            raise RuntimeError("confirmation channel is unavailable")
+        return self.confirmation_manager.open(request)
+
+    def accept_voice_confirmation(self, transcript: str, **kwargs: Any) -> ConfirmationResult:
+        if self.confirmation_manager is None:
+            raise RuntimeError("confirmation channel is unavailable")
+        return self.confirmation_manager.accept_voice(transcript, **kwargs)
+
+    def accept_gesture_confirmation(self, sample: GestureSample, **kwargs: Any) -> ConfirmationResult:
+        if self.confirmation_manager is None:
+            raise RuntimeError("confirmation channel is unavailable")
+        return self.confirmation_manager.accept_gesture(sample, **kwargs)
+
+    def conversation(self, channel: str = "cli", principal_id: str = "local", conversation_id: str | None = None) -> ConversationContext:
+        return ConversationContext(self.profile.robot_id, channel, principal_id, conversation_id or self._default_conversation_id)
+
+    def _runner(self):
+        with self._runner_lock:
+            if self._closed:
+                raise RuntimeError("Robot runtime is closed")
+            if self._task_runner is None:
+                from robotsoul.task_runner import TaskRunner
+                self._task_runner = TaskRunner(self, store_path=self.task_store_path)
+            return self._task_runner
+
+    def submit_task(self, text: str, *, conversation: ConversationContext | None = None, **kwargs: Any) -> str:
+        return self._runner().submit_task(text, conversation=conversation or self.conversation(), **kwargs)
+
+    def get_task(self, task_id: str, *, conversation: ConversationContext | None = None) -> TaskResult:
+        return self._runner().get_task(task_id, conversation=conversation)
+
+    def resume_task(self, task_id: str, *, conversation: ConversationContext | None = None, **kwargs: Any) -> str:
+        return self._runner().resume_task(task_id, conversation=conversation or self.conversation(), **kwargs)
+
+    def wait_task(self, task_id: str, timeout: float | None = None) -> TaskResult:
+        return self._runner().wait_task(task_id, timeout=timeout)
+
+    def pending_input(self, conversation: ConversationContext) -> str | None:
+        return self._runner().pending_input(conversation)
+
+    def register_result_evaluator(self, name: str, evaluator: Any, *, description: str = "") -> None:
+        self._runner().register_evaluator(name, evaluator, description=description)
+
+    def dispatch_coding_task(self, task: Task, decision: Any, cancelled: Any) -> str:
+        dispatcher = getattr(self.agent, "coding", None)
+        if dispatcher is None or not callable(getattr(dispatcher, "dispatch", None)):
+            raise RuntimeError("Coding dispatcher is unavailable")
+        return dispatcher.dispatch(decision.coding_task, cancel_event=cancelled)
+
+    def interrupt_task_decision(self, task_id: str) -> None:
+        cancel = getattr(self.agent, "cancel_decision", None)
+        if callable(cancel):
+            cancel(task_id)
+        review_session = getattr(self.safety_reviewer, "session", None)
+        interrupt = getattr(review_session, "interrupt", None)
+        if callable(interrupt):
+            interrupt(task_id)
+
+    def execute_task_step(self, task: Task, intent: AgentIntent, invocation_context: InvocationContext, *,
+                          prior_feedback: tuple[Feedback, ...] = (), on_dispatch: Any = None) -> TaskResult:
+        history: list[AuditRecord] = []
+
+        def record(event_type: str, details: dict[str, Any] | None = None) -> None:
+            history.append(AuditRecord(utc_now(), event_type, task.task_id, task.trace_id, details or {}))
+
+        def transition(status: TaskStatus) -> None:
+            task.status = status
+            task.updated_at = utc_now()
+            record("task.status", {"status": status.value})
+
+        result = self._execute_step(task, history, intent, invocation_context,
+                                    invocation_context.operator_confirmed, task.user_input,
+                                    transition, record, prior_feedback=prior_feedback,
+                                    finalize=True, on_dispatch=on_dispatch)
+        assert isinstance(result, TaskResult)
+        return result
+
+    def collect_task_observations(self) -> tuple[Observation, ...]:
+        # Only this collector drains the adapter; successive decisions see live state.
+        with self._observation_lock:
+            incoming, error = self._collect_observations(lambda kind, details: self._observation_records.append((kind, details)))
+            if error:
+                raise RuntimeError(error)
+            for item in incoming:
+                key = (item.device_id, item.event_type)
+                previous = self._observation_snapshot.get(key)
+                if previous is None or item.observed_at >= previous.observed_at:
+                    self._observation_snapshot[key] = item
+            self._observation_snapshot = {key: item for key, item in self._observation_snapshot.items() if item.is_fresh}
+            return tuple(self._observation_snapshot.values())
+
+    def drain_task_observation_records(self) -> tuple[tuple[str, dict[str, Any]], ...]:
+        with self._observation_lock:
+            records = tuple(self._observation_records)
+            self._observation_records.clear()
+            return records
 
     def invoke_skill(
         self,
@@ -333,6 +481,7 @@ class RobotRuntime:
         user_input: str | None = None,
         task_id: str | None = None,
         trace_id: str | None = None,
+        conversation: ConversationContext | None = None,
     ) -> TaskResult:
         """Invoke a typed skill using a caller context created by the service.
 
@@ -352,6 +501,7 @@ class RobotRuntime:
             _intent=AgentIntent(skill, parameters),
             _invocation_context=invocation_context,
             _operator_confirmed=operator_confirmed,
+            conversation=conversation,
         )
 
     def validate_skill_request(
@@ -396,6 +546,22 @@ class RobotRuntime:
             ),),
         )
 
+    def active_command(self, task_id: str) -> Command | None:
+        """Return the command currently executing for a task, if any."""
+        with self._runtime_lock:
+            return self._active_commands.get(task_id)
+
+    def active_capability(self, task_id: str) -> CapabilitySpec | None:
+        command = self.active_command(task_id)
+        return None if command is None else self.capabilities.get(command.skill)
+
+    def discard_cancel_state(self, task_id: str) -> None:
+        """Drop per-task cancellation bookkeeping once the task is terminal."""
+        with self._runtime_lock:
+            self._cancel_requested_ids.discard(task_id)
+            self._preempted_task_ids.discard(task_id)
+            self._cancel_confirmations.pop(task_id, None)
+
     def preempt_task(self, task_id: str) -> Feedback | None:
         """Drop a voice task that has not started, or cancel it if it is interruptible.
 
@@ -404,6 +570,19 @@ class RobotRuntime:
         command uses ``cancel_task``. A running command that is not
         interruptible is left alone.
         """
+        if self._task_runner is not None:
+            try:
+                self._task_runner.get_task(task_id)
+            except KeyError:
+                pass
+            else:
+                capability = self.active_capability(task_id)
+                if capability is not None and not capability.interruptible:
+                    # Announce nothing: the action keeps running and the task
+                    # reports its actual result instead of a fake cancellation.
+                    return None
+                self._task_runner.cancel_task(task_id)
+                return None
         with self._runtime_lock:
             command = self._active_commands.get(task_id)
             if command is None:
@@ -412,7 +591,7 @@ class RobotRuntime:
         capability = self.capabilities.get(command.skill)
         if capability is not None and not capability.interruptible:
             return None
-        return self.cancel_task(task_id)
+        return self.cancel_active_command(task_id)
 
     def _consume_preempted(self, task_id: str) -> bool:
         with self._runtime_lock:
@@ -421,17 +600,43 @@ class RobotRuntime:
             self._preempted_task_ids.discard(task_id)
             return True
 
-    def cancel_task(self, task_id: str) -> Feedback | None:
+    def cancel_task(self, task_id: str, *, conversation: ConversationContext | None = None) -> TaskResult | Feedback | None:
+        if conversation is not None:
+            return self._runner().cancel_task(task_id, conversation=conversation)
+        if not callable(getattr(self.agent, "decide", None)):
+            with self._runtime_lock:
+                active = task_id in self._active_commands
+            if active:
+                return self.cancel_active_command(task_id)
+        if self._task_runner is not None:
+            try:
+                self._task_runner.get_task(task_id, conversation=conversation)
+            except KeyError:
+                pass
+            else:
+                return self._task_runner.cancel_task(task_id, conversation=conversation)
+        return self.cancel_active_command(task_id)
+
+    def cancel_active_command(self, task_id: str) -> Feedback | None:
         """Request local cancellation of the task's active command.
 
         A returned cancelled feedback is a stop acknowledgement from the adapter;
         None means that this runtime has no command active for the task.
         """
+        self.interrupt_task_decision(task_id)
         with self._runtime_lock:
+            self._cancel_requested_ids.add(task_id)
             command = self._active_commands.get(task_id)
         if command is None:
             return None
         capability = self.capabilities.get(command.skill)
+        if capability is not None and not capability.interruptible:
+            # A non-interruptible action keeps running; the adapter must not be
+            # asked to stop it and the caller must not report a cancellation.
+            return self._local_feedback(
+                command, FeedbackStatus.FAILED,
+                "Command is not interruptible", "not_interruptible",
+            )
         arguments = safe_tool_arguments(command, capability) if capability is not None else {}
         private_values = private_command_values(command)
         cancel_call_id = str(uuid4())
@@ -513,7 +718,9 @@ class RobotRuntime:
         _intent: AgentIntent | AgentPlan | None = None,
         _invocation_context: InvocationContext | None = None,
         _operator_confirmed: bool = False,
+        conversation: ConversationContext | None = None,
     ) -> TaskResult:
+        """Synchronous compatibility entry over the single durable task runner."""
         resolved_task_id = task_id if task_id is not None else str(uuid4())
         resolved_trace_id = trace_id if trace_id is not None else str(uuid4())
         if not isinstance(resolved_task_id, str) or not resolved_task_id.strip():
@@ -524,122 +731,13 @@ class RobotRuntime:
             if resolved_task_id in self._used_task_ids:
                 raise ValueError(f"task_id has already been used in this runtime: {resolved_task_id}")
             self._used_task_ids.add(resolved_task_id)
-        task = Task(resolved_task_id, resolved_trace_id, self.profile.robot_id, text)
-        history: list[AuditRecord] = []
-        feedback: tuple[Feedback, ...] = ()
-        evaluation: Evaluation | None = None
-
-        def record(event_type: str, details: dict[str, Any] | None = None) -> None:
-            history.append(AuditRecord(utc_now(), event_type, task.task_id, task.trace_id, details or {}))
-
-        def transition(status: TaskStatus) -> None:
-            task.status = status
-            task.updated_at = utc_now()
-            record("task.status", {"status": status.value})
-
-        record("task.received", {"input_chars": len(text)})
-        _trace("Info", task.task_id, f"收到指令：{text.strip()}")
-        if self._consume_preempted(resolved_task_id):
-            return self._failed_result(task, history, "Voice command was replaced", transition, record)
-        if not text.strip():
-            return self._failed_result(task, history, "Task input is empty", transition, record)
-        transition(TaskStatus.CONTEXTUALIZING)
-        observations, observation_error = self._collect_observations(record)
-        if observation_error:
-            return self._failed_result(task, history, observation_error, transition, record)
-        transition(TaskStatus.AWAITING_AGENT)
-        try:
-            if _intent is not None:
-                intent = _intent
-            else:
-                slash_intent = resolve_slash_command(text, self.capabilities)
-                if isinstance(slash_intent, str):
-                    return self._failed_result(task, history, slash_intent, transition, record)
-                if slash_intent is not None:
-                    _trace("Info", task.task_id, "使用直接指令")
-                    intent = slash_intent
-                else:
-                    _trace("Info", task.task_id, "等待语言决策")
-                    intent = self.agent.plan(text, self.capabilities, observations)
-        except TimeoutError:
-            return self._failed_result(task, history, "Agent request timed out", transition, record)
-        except AgentRejected as exc:
-            return self._failed_result(task, history, exc.reason, transition, record)
-        except Exception as exc:
-            return self._failed_result(task, history, f"Agent request failed: {exc}", transition, record)
-        if intent is None:
-            return self._failed_result(task, history, "No supported skill matched the request", transition, record)
-        steps, plan_error = _coerce_steps(intent)
-        if plan_error:
-            return self._failed_result(task, history, plan_error, transition, record)
-        requested = len(steps)
-        steps = _collapse_repeated_motion(steps, self.capabilities)
-        if len(steps) != requested:
-            record(
-                "plan.collapsed",
-                {"from": requested, "to": len(steps), "skills": [step.skill for step in steps]},
-            )
-        if len(steps) == 1:
-            record("agent.intent", {"skill": steps[0].skill, "parameter_names": sorted(steps[0].parameters) if isinstance(steps[0].parameters, dict) else []})
-            rationale = steps[0].rationale.strip() if isinstance(steps[0].rationale, str) else ""
-            _trace("Info", task.task_id, f"已选择技能 {steps[0].skill}" + (f" 理由={rationale}" if rationale else ""))
-        else:
-            record(
-                "agent.plan",
-                {
-                    "steps": [
-                        {
-                            "skill": step.skill,
-                            "parameter_names": sorted(step.parameters) if isinstance(step.parameters, dict) else [],
-                        }
-                        for step in steps
-                    ],
-                    "rationale": intent.rationale if isinstance(intent, AgentPlan) else "",
-                },
-            )
-            _trace("Info", task.task_id, f"已编排计划 步数={len(steps)}")
-        context = _invocation_context or InvocationContext(InvocationSource.AGENT)
-        if len(steps) > 1:
-            for step in steps:
-                authorization_error = self._authorize_step(step, context, _operator_confirmed)
-                if authorization_error:
-                    return self._failed_result(task, history, authorization_error, transition, record)
-        allowances = []
-        for step in steps:
-            capability = self.capabilities.get(step.skill) if isinstance(step.parameters, dict) else None
-            allowances.append(step_allowance_ms(capability, step.parameters) if capability is not None else 0)
-        plan_deadline = utc_now() + timedelta(milliseconds=sum(allowances) + _PLAN_MARGIN_MS)
-        record(
-            "plan.scheduled",
-            {"steps": [step.skill for step in steps], "allowance_ms": allowances, "margin_ms": _PLAN_MARGIN_MS},
+        if _invocation_context is not None and _invocation_context.operator_confirmed and not _operator_confirmed:
+            _invocation_context = replace(_invocation_context, operator_confirmed=False)
+        submitted = self.submit_task(
+            text, conversation=conversation, task_id=resolved_task_id, trace_id=resolved_trace_id,
+            intent=_intent, invocation_context=_invocation_context,
         )
-        executed: list[Feedback] = []
-        for index, step in enumerate(steps):
-            if utc_now() > plan_deadline:
-                return self._failed_result(
-                    task,
-                    history,
-                    "Plan deadline expired before the next step",
-                    transition,
-                    record,
-                    tuple(executed),
-                )
-            outcome = self._execute_step(
-                task,
-                history,
-                step,
-                context,
-                _operator_confirmed,
-                text,
-                transition,
-                record,
-                prior_feedback=tuple(executed),
-                finalize=index == len(steps) - 1,
-            )
-            if isinstance(outcome, TaskResult):
-                return outcome
-            executed.extend(outcome)
-        return self._failed_result(task, history, "Plan produced no result", transition, record, tuple(executed))
+        return self.wait_task(submitted)
 
     def _authorize_step(
         self,
@@ -703,6 +801,7 @@ class RobotRuntime:
         *,
         prior_feedback: tuple[Feedback, ...],
         finalize: bool,
+        on_dispatch: Any = None,
     ) -> TaskResult | tuple[Feedback, ...]:
         transition(TaskStatus.VALIDATING_INTENT)
         validation_error = self._validate_intent(intent)
@@ -733,6 +832,7 @@ class RobotRuntime:
         ):
             return self._finish_failure(prior_feedback, task, history, "Capability requires authenticated operator confirmation", transition, record)
         proposal_command: Command | None = None
+        review_conditions: tuple[ExecutionCondition, ...] = ()
         operator_confirmation_id = None
         if capability.risk_level == RiskLevel.HIGH or capability.requires_operator_confirmation:
             operator_confirmation_id = str(uuid4())
@@ -760,6 +860,7 @@ class RobotRuntime:
                 **{**proposal_command.__dict__, "review_digest": digest}
             )
             if self.safety_reviewer is None:
+                self.review_metrics.record_review(ReviewVerdict.ALLOW, "Dashboard operator supplied the review")
                 record(
                     "safety.review.completed",
                     {"verdict": "allow", "reviewer": "dashboard_operator", "arguments_digest": digest},
@@ -777,27 +878,50 @@ class RobotRuntime:
                 except Exception as exc:
                     record("safety.review.failed", {"proposal_id": proposal.proposal_id, "error_type": type(exc).__name__})
                     return self._finish_failure(prior_feedback, task, history, "Safety review failed closed", transition, record)
-                record("safety.review.completed", {"proposal_id": proposal.proposal_id, "verdict": getattr(getattr(review, "verdict", None), "value", "invalid"), "arguments_digest": digest})
+                record("safety.review.completed", {
+                    "proposal_id": proposal.proposal_id,
+                    "verdict": getattr(getattr(review, "verdict", None), "value", "invalid"),
+                    "arguments_digest": digest,
+                    "conditions": [condition.to_dict() for condition in getattr(review, "conditions", ())],
+                    "evidence_requirements": [item.to_dict() for item in getattr(review, "evidence_requirements", ())],
+                })
                 reviewed_digest = command_proposal_digest(proposal.command, self.profile.profile_version)
                 expired = utc_now() >= proposal.expires_at
                 verdict = review.verdict if isinstance(review, SafetyReviewResult) else None
+                self.review_metrics.record_review(
+                    verdict.value if isinstance(verdict, ReviewVerdict) else "deny",
+                    review.rationale if isinstance(review, SafetyReviewResult) else "invalid review result",
+                )
                 digest_matches = (
                     isinstance(review, SafetyReviewResult)
                     and review.arguments_digest == digest
                     and reviewed_digest == digest
                 )
-                if verdict == ReviewVerdict.ALLOW and digest_matches and not expired:
+                if verdict is not None and verdict.is_pass and digest_matches and not expired:
+                    review_conditions = tuple(getattr(review, "conditions", ()))
+                    evidence_requirements = tuple(getattr(review, "evidence_requirements", ()))
+                    if any(not isinstance(item, EvidenceRequirement) for item in evidence_requirements):
+                        return self._finish_failure(prior_feedback, task, history, "安全复核包含无效证据要求，没有执行", transition, record)
+                    if any(not isinstance(item, ExecutionCondition) for item in review_conditions):
+                        return self._finish_failure(prior_feedback, task, history, "安全复核包含无效执行条件，没有执行", transition, record)
+                    if evidence_requirements:
+                        review_conditions = review_conditions + tuple(
+                            ExecutionCondition(f"review_evidence_{index + 1}", evidence=item)
+                            for index, item in enumerate(evidence_requirements)
+                        )
                     _trace("Info", task.task_id, f"安全复核通过 技能={intent.skill}")
-                if verdict != ReviewVerdict.ALLOW or not digest_matches or expired:
+                if verdict is None or not verdict.is_pass or not digest_matches or expired:
                     reason = f"安全复核没有通过，没有执行 {intent.skill}"
                     if (
                         isinstance(review, SafetyReviewResult)
-                        and verdict != ReviewVerdict.ALLOW
+                        and not verdict.is_pass
                         and digest_matches
                         and not expired
                         and review.rationale.strip()
                     ):
                         reason = review.rationale.strip()
+                    if isinstance(review, SafetyReviewResult) and verdict is not None and verdict.is_needs_evidence and digest_matches and not expired:
+                        reason = review.rationale.strip() or "安全复核需要明确的方向、数量、范围和有效期证据，没有执行"
                     elif expired:
                         reason = f"{intent.skill} 的安全复核超时，没有执行"
                     elif not digest_matches:
@@ -873,9 +997,64 @@ class RobotRuntime:
                 record,
             )
         record("tool.call.started", tool_started)
+        if on_dispatch is not None:
+            try:
+                on_dispatch(command)
+            except Exception as exc:
+                return self._finish_failure(prior_feedback, task, history, f"Command could not be persisted: {exc}", transition, record)
+        supervisor = self.safety_supervisor
+        if supervisor is not None:
+            supervisor.bind_conditions(command.command_id, review_conditions)
+            safety_check = supervisor.check_command(command, phase="before")
+            if not safety_check.allowed:
+                self.review_metrics.record_condition_failure(
+                    safety_check.reason or "local safety supervisor rejected the command",
+                    safety_check.error_code,
+                )
+                record("safety.execution_condition_failed", {
+                    "command_id": command.command_id,
+                    "error_code": safety_check.error_code,
+                    "reason": safety_check.reason,
+                    "evidence": safety_check.evidence or {},
+                })
+                rejected = self._local_feedback(
+                    command,
+                    FeedbackStatus.FAILED,
+                    safety_check.reason or "Local safety supervisor rejected the command",
+                    safety_check.error_code or "safety_rejected",
+                )
+                tool_completed = tool_call_event(
+                    "completed",
+                    command,
+                    capability,
+                    tool_arguments,
+                    utc_now(),
+                    call_id=tool_call_id,
+                    duration_ms=0,
+                    outcome="returned",
+                    response=summarize_feedback((rejected,), private_values),
+                )
+                record("tool.call.completed", tool_completed)
+                self._write_tool_audit(tool_completed)
+                supervisor.clear_conditions(command.command_id)
+                return self._finish_failure(
+                    prior_feedback,
+                    task,
+                    history,
+                    rejected.message,
+                    transition,
+                    record,
+                    (rejected,),
+                )
         with self._runtime_lock:
-            self._active_commands[task.task_id] = command
-            self._cancel_confirmations.pop(task.task_id, None)
+            cancelled_before_dispatch = task.task_id in self._cancel_requested_ids or task.task_id in self._preempted_task_ids
+            if not cancelled_before_dispatch:
+                self._active_commands[task.task_id] = command
+                self._cancel_confirmations.pop(task.task_id, None)
+        if cancelled_before_dispatch:
+            stopped = self._local_feedback(command, FeedbackStatus.CANCELLED, "Cancelled before adapter dispatch", "not_dispatched")
+            transition(TaskStatus.CANCELLED)
+            return TaskResult(task, prior_feedback + (stopped,), None, tuple(history))
         execute_started = monotonic()
         try:
             feedback = self.adapter.execute(command)
@@ -931,6 +1110,36 @@ class RobotRuntime:
         with self._runtime_lock:
             self._active_commands.pop(task.task_id, None)
             confirmation = self._cancel_confirmations.pop(task.task_id, None)
+        if supervisor is not None:
+            landing_check = supervisor.after_feedback(command, feedback)
+            if not landing_check.allowed and any(item.status == FeedbackStatus.SUCCEEDED for item in feedback):
+                self.review_metrics.record_condition_failure(
+                    landing_check.reason or "local safety supervisor rejected the completed state",
+                    landing_check.error_code,
+                )
+                record("safety.landing_condition_failed", {
+                    "command_id": command.command_id,
+                    "error_code": landing_check.error_code,
+                    "reason": landing_check.reason,
+                    "evidence": landing_check.evidence or {},
+                })
+                safety_failure = self._local_feedback(
+                    command,
+                    FeedbackStatus.FAILED,
+                    landing_check.reason or "Local safety supervisor rejected the completed state",
+                    landing_check.error_code or "safety_landing_failed",
+                )
+                supervisor.clear_conditions(command.command_id)
+                return self._finish_failure(
+                    prior_feedback,
+                    task,
+                    history,
+                    safety_failure.message,
+                    transition,
+                    record,
+                    tuple(feedback) + (safety_failure,),
+                )
+            supervisor.clear_conditions(command.command_id)
         if confirmation is not None:
             record(
                 "command.cancel_confirmation",

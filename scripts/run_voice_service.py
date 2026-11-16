@@ -37,16 +37,14 @@ from robotsoul.voice.factory import create_voice_service
 
 
 def _build_agent() -> tuple[object, str, LanguageSession | None]:
-    """Use the resident language gateway when an LLM config exists, else demo rules."""
+    """Use the resident dialogue process when an LLM config exists, else demo rules."""
     configured = os.environ.get("ROBOTSOUL_LLM_CONFIG", "").strip()
     llm_path = Path(configured) if configured else default_llm_path()
     if not llm_path.is_file():
         return DemoAgent(), "demo", None
-    try:
-        session = LanguageSession.start_resident(llm_path)
-    except LanguageGatewayError as exc:
-        print(f"language gateway unavailable ({exc}); falling back to demo agent", flush=True)
-        return DemoAgent(), "demo", None
+    # A missing dialogue binary is a deployment error, not a reason to silently
+    # fall back to the rule-based agent: see docs/robot-agent-plan/18.
+    session = LanguageSession.start_resident(llm_path)
     model = ""
     try:
         model = str(json.loads(llm_path.read_text(encoding="utf-8")).get("model", "")).strip()
@@ -132,6 +130,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resource-root", default=os.environ.get("ROBOTSOUL_VOICE_RESOURCE_ROOT"))
     parser.add_argument("--runtime-dir", default=os.environ.get("ROBOTSOUL_VOICE_RUNTIME_DIR", "/run/mimax2-voice"))
     parser.add_argument("--period", type=float, default=10.0, help="status/heartbeat period in seconds")
+    parser.add_argument(
+        "--task-store",
+        default=os.environ.get("OPENROBOTSOUL_TASK_STORE", str(Path.home() / ".openrobotsoul" / "tasks.sqlite3")),
+        help="SQLite task database shared with the dashboard",
+    )
     return parser
 
 
@@ -167,9 +170,21 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     profile = load_selected_profile(args.profile, args.robot_config)
-    agent, agent_label, language_session = _build_agent()
+    try:
+        agent, agent_label, language_session = _build_agent()
+    except LanguageGatewayError as exc:
+        # A configured model must not silently degrade to the rule-based demo
+        # agent on a production voice service.
+        _write_atomic(status_path, json.dumps({
+            "timestamp": _now_iso(), "pid": os.getpid(), "phase": "startup-failed",
+            "error": str(exc),
+        }, ensure_ascii=False) + "\n")
+        print(f"voice service failed: {exc}", file=sys.stderr)
+        return 1
     runtime = RobotRuntime.from_profile(
-        profile, agent=agent, audit_sink=JsonlToolCallAuditSink())
+        profile, agent=agent, audit_sink=JsonlToolCallAuditSink(),
+        task_store_path=args.task_store,
+    )
     print(f"agent: {agent_label}", flush=True)
     service = None
     started_at = time.monotonic()
@@ -184,8 +199,11 @@ def main(argv: list[str] | None = None) -> int:
         events["transcript"] = {"text": str(text), "at": _now_iso()}
         print(f"transcript: {text}", flush=True)
 
-    def run_text_logged(text: str):
-        result = runtime.run_text(text)
+    def run_text_logged(text: str, task_id=None, intent=None, conversation=None):
+        # The factory wrapper supplies task_id/intent/conversation; forwarding the
+        # conversation keeps voice isolated from dashboard/CLI history and lets a
+        # pending clarification resume on the same task.
+        result = runtime.run_text(text, task_id=task_id, _intent=intent, conversation=conversation)
         task = getattr(result, "task", None)
         evaluation = getattr(result, "evaluation", None)
         events["last_result"] = {

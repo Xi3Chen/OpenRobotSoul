@@ -43,7 +43,7 @@ def _parse_capability(raw: Any) -> CapabilitySpec:
     allowed = {
         "name", "parameters", "risk_level", "allowed_callers", "requires_operator_confirmation",
         "interruptible", "timeout_ms", "required", "description",
-        "estimate_ms", "completion",
+        "estimate_ms", "completion", "retry_safe",
     }
     if set(raw) - allowed:
         raise ValueError(f"Unknown capability fields: {sorted(set(raw) - allowed)}")
@@ -118,6 +118,9 @@ def _parse_capability(raw: Any) -> CapabilitySpec:
     completion = raw.get("completion", "accepted")
     if completion not in {"accepted", "nominal", "timed", "measured"}:
         raise ValueError(f"Invalid completion for {name}")
+    retry_safe = raw.get("retry_safe", False)
+    if not isinstance(retry_safe, bool):
+        raise ValueError(f"Invalid retry_safe for {name}")
     return CapabilitySpec(
         name=name,
         parameters=parsed_parameters,
@@ -130,6 +133,7 @@ def _parse_capability(raw: Any) -> CapabilitySpec:
         description=description,
         estimate_ms=estimate_ms,
         completion=completion,
+        retry_safe=retry_safe,
     )
 
 
@@ -233,7 +237,9 @@ def load_selected_profile(
     from robotsoul.robot_config import load_robot_deployment_config
 
     selected_path = Path(config_path) if config_path is not None else PROJECT_ROOT / "config" / "robot.json"
-    deployment = load_robot_deployment_config(selected_path.expanduser().resolve())
+    deployment = load_robot_deployment_config(
+        selected_path.expanduser().resolve() if config_path is not None or selected_path.is_file() else None
+    )
     selected_module = deployment.robot_module
     selected_profile = profile_id if profile_id is not None else deployment.profile_id
     return load_profile(selected_profile, selected_module)

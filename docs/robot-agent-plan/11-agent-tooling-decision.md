@@ -9,7 +9,7 @@ Go 版 PicoClaw 仍有两条用途，工具面分开：
 1. **对话**：`openrobotsoul-dialogue` 通过 Go `replace` 导入 `third_party/picoclaw`，持有 session 历史与摘要；工具全部关闭；只能返回已注册技能、拒绝理由或转出编码任务。技能由 Python 运行时校验并执行。
 2. **编码**：Python 宿主继续用 `picoclaw agent --message ... --session ...` 启动一次性编码子进程，限制在隔离工作区。
 
-自然语言会话只能请求当前 profile 已注册的技能，由 Python 运行时校验 schema、调用者、风险和确认要求后再执行。编码任务保持下面的工作区隔离，不能借同一次会话去控制机器人。自动部署、canary 和回滚仍受阶段 8/9 的验收门禁约束。本决策不授予对话进程或编码进程直接访问机器人设备、生产凭证、用户记忆或运行时主目录的权限，也不允许它们绕过事务流改写安全策略。
+自然语言会话只能请求当前 profile 已注册的技能，由 Python 运行时校验 schema、调用者、风险和确认要求后再执行。编码任务保持下面的工作区隔离，不能借同一次会话去控制机器人。自动部署、canary 和回滚仍受阶段 8/9 的验收门禁约束。本决策不授予对话进程或编码进程直接访问机器人设备、用户记忆或运行时主目录的权限，也不允许它们绕过事务流改写安全策略。编码进程可以读取生产模型凭证（见下文），因为没有凭证它无法调用模型；这不扩大它对机器人和用户数据的权限。
 
 DemoAgent 不再做自由文本关键词匹配，只保留给没有模型配置时的接口测试。本地直接调用只有 `/技能名` 或 `/技能名 参数=值`。它不是 Dashboard、实机或语音对话的规划器。
 
@@ -29,9 +29,9 @@ replace github.com/sipeed/picoclaw => ../../third_party/picoclaw
 
 构建产物为 `build/<platform>-<arch>/bin/openrobotsoul-dialogue`。主进程启动时由 `LanguageSession` 拉起，退出时关闭。协议仍是一行一个 JSON（`decide` / `note` / `review`）。模型、地址与密钥来自 `config/llm.json` 生成的临时 PicoClaw `Config`，不读取 `~/.picoclaw/config.json`。
 
-对话进程调用子模块已有 API：`agent.NewAgentLoop`、`ProcessDirect`、`SessionStore`、`legacyContextManager`（异步摘要与紧急压缩）。技能表与身份写入工作区引导文件进入系统提示；用户原话与助手 JSON 进入 session 历史。任务结束后用 `note` 写入执行结果，不再调模型。`voice` / `call` / `dashboard` 使用不同 session key，避免串上下文。
+对话进程调用子模块的公开 API：`agent.NewAgentLoop`、`ProcessDirect`，并通过公开的 `RegisterContextManager` 注册自有 ContextManager 与共享 SessionStore（追加日志、完整回合摘要）。不使用 PicoClaw 的 legacy 摘要，因为它在并发追加时会丢消息，见 [19 号评估](19-agent-foundation-feasibility.md)。技能表与身份写入受控引导文件进入系统提示；用户原话与助手 JSON 进入 session 历史。任务结束后用 `note` 写入执行结果，不再调模型。会话键由宿主按机器人、入口、主体和对话生成不透明键，不使用裸 `voice` / `call` / `dashboard`，避免串上下文，见 [18 号文档](18-picoclaw-dialogue-context.md)。
 
-对话配置强制关闭全部工具、hooks、evolution、heartbeat 与 MCP；`max_tool_iterations=1`。模型若返回工具调用，本轮拒绝执行。
+对话配置强制关闭全部工具、hooks、evolution、heartbeat 与 MCP；`max_tool_iterations=1`。模型若返回工具调用，本轮拒绝执行。这是首阶段的过渡实现，目标形态是原生 tool-calling，见下文「工具与 skill」。
 
 ### 编码进程（CLI 子进程）
 
@@ -49,13 +49,44 @@ Python 宿主通过 `picoclaw agent --message ... --session ...` 启动单次 co
 
 历史说明：早期实现曾用纯 Python 的 `robotsoul.language_gateway` 做无状态单轮决策。该入口由链接 `third_party/picoclaw` 的常驻对话进程接替，以恢复多轮上下文与压缩；Python 侧仍负责协议封装、技能校验与运行时执行。
 
+## PicoClaw 依赖策略与退出条件
+
+决策（MVP 期间）：薄依赖加自研。PicoClaw 只承担 AgentLoop 外壳、系统提示拼装和 provider 工厂；上下文与会话存储、任务回环、传感器与事件续接、主动触发资格均由本项目自有代码承担。不 fork，不修改子模块源码。
+
+理由：
+
+- [19 号评估](19-agent-foundation-feasibility.md) 复现的缺陷（裸会话键串历史、reaction 工具残留、异步摘要丢消息）都能通过公开扩展点绕过，没有必须改源码的理由。fork 会让项目长期背着补丁追一个快速迭代、v1.0 前不建议生产使用的上游，还会扩大本来要关闭的表面（工具、渠道、MCP、自进化）。
+- 传感器推送和主动探索不是 PicoClaw 的设计目标，也不应由它承担。它们属于宿主层：观测管线负责来源、有效期、隐私和去重；`resume_task(event=...)` 把事件续到同一任务；主动行为由本地资格策略放行，云端 Agent 只能提议。
+
+边界：JSON 行协议（hello、decide、resume、note、review、clear、shutdown）是唯一边界。Python 侧不依赖任何 PicoClaw 概念。补一套协议契约测试，任何对话进程实现都必须通过同一套测试，使切换成本保持较低。
+
+升级规则：固定提交。每次升级重跑 19 号的 6 个探针以及 Go 与 Python 回归，并同步更新证据。
+
+退出条件：满足任一项即评估改为自研对话循环。
+
+1. 低延迟方案要求的流式增量决策无法套用现有的工具与 ToolCalls 守卫。
+2. 目标部署板（如 Mi Max 2，ARM64，约 3.5GB 内存）上 Go 对话进程的内存或启动时间不达标。linux/arm64 产物目前尚未在 Linux 主机上执行过。
+3. 出现第三个只能通过非公开接口绕过的缺陷。
+4. 单次升级加回归的耗时超出团队可接受的预算。
+
+## 工具与 skill
+
+目标形态：对话进程里的 agent loop 使用原生 tool-calling，工具做成 loop 最顺手的样子，而不是每轮输出一段 JSON 决策再由宿主解析。工具分两类。
+
+- 机器人动作统一做成 skill。每个 skill 由设备适配器或 profile 声明：参数 schema、前置条件、执行情景（该设备上这个动作怎样算开始、进行、完成）、完成证据、可中断性、风险等级和超时。同一个动作名在不同设备上的执行情景可能不同，所以情景属于 skill 声明，不写进 Agent 提示词。skill 不在对话进程内执行：Agent 只提出调用，TaskRunner 和 Runtime 仍校验参数、能力、风险和确认，并经本地安全检查后才派发。
+- 通用 agent 工具不触碰硬件：读取授权记忆、查询任务状态、取消任务、创建 proposal 等，直接作为 agent loop 的原生工具。
+
+过渡：当前实现是 tools=0 加单一 JSON 决策（`act`、`run_rule`、`wait`、`complete`、`clarify`、`reject`、`coding_task`），provider 包装层拒绝非空工具声明和模型 ToolCalls，见 [18](18-picoclaw-dialogue-context.md) 与 [20](20-agent-foundation-implementation.md)。这是首阶段现状，不阻塞阶段 2A 的首次真实端到端测试。切换到原生 tool-calling 需要同时改三处：上文「对话配置强制关闭全部工具」与 `max_tool_iterations=1`，18/19/20 中 tools=0 与 ToolCalls 守卫的约束，以及重跑 19 号的探针。
+
+对退出条件的影响：改成原生 tool-calling 后，退出条件 1 里「现有工具与 ToolCalls 守卫」的前提不再成立，需按新形态重新评估。切换时机待用户确认。
+
 ## 验收条件
 
 - 固定 PicoClaw 上游提交和构建方式，在项目支持的目标平台可重复构建；`third_party/picoclaw` 源码无本地脏改动。
 - Dashboard 文本、本地语音最终转写和通话最终转写进入同一自然语言入口，并由 `openrobotsoul-dialogue`（`third_party/picoclaw` AgentLoop）对照已注册技能规划；同一 session 的后续话轮能看到必要历史或摘要。
 - 对话进程不能编辑文件、执行 shell 或调用未注册技能；编码会话不能调用机器人技能。
 - Python 宿主能启动、监控、超时和关闭对话常驻进程与编码子进程；故障、取消及退出码可追踪到任务 ID。
-- 编码子进程使用独立临时 home/config/session；主机环境变量和 API 密钥不直接继承，任务结束后临时凭证副本被清理。
+- 编码子进程使用独立临时 home/config/session；允许把生产模型凭证复制进临时 config（已放开读取），但不整体继承主机环境变量，临时副本在任务结束后清理，凭证不进日志和任务产物。
 - Agent 能在临时工作区完成代表性文件读取、编辑、测试和补丁输出任务。
 - 越出工作区的文件访问、未声明网络和未经允许的命令会被隔离层拒绝。
 - 工具调用与结果可结构化关联，不能把工具受理当作代码验证通过或部署成功。

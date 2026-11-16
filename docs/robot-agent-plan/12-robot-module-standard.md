@@ -61,6 +61,6 @@ adapters/
 3. 新增零动作或仅已验证低风险动作的 profile；任何运动能力必须带实测单位、范围、超时、可中断性、完成证据与失败/停止语义。
 4. 更新静态 profile 目录和 adapter factory registry，并设置模块默认 profile。
 5. 编写契约测试，覆盖身份错配、能力交集、参数拒绝、反馈生命周期、超时、取消、断连和重复命令。
-6. 在硬件安全条件下完成硬件在环验证；profile 在完成验证前标记为 development/unverified，不启用物理动作。
+6. 在硬件安全条件下完成硬件在环验证；profile 在完成验证前标记为 development/unverified。新协议或自研硬件在验证前不启用物理动作；Go2 这类成熟量产机器人自带平衡与避障，厂商 SDK 已声明的动作在首次实机冒烟（单位、完成反馈、停止与断连行为）通过后即可启用，再按风险分级放行，不要求逐项完整验证后才开放。
 
 切换机器人型号时改 `config/robot.json` 中的 `robot_module`，或通过 `profile_id` 选择同模块的另一个已验证 profile。不能通过扩大 core runtime 中的品牌分支来接入新硬件。

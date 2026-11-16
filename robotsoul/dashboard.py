@@ -17,7 +17,7 @@ from threading import Lock
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from robotsoul.models import InvocationContext, InvocationSource, TaskResult
+from robotsoul.models import ConversationContext, InvocationContext, InvocationSource, TaskResult
 from robotsoul.runtime import RobotRuntime
 from robotsoul.robot_config import RobotDeploymentConfig, load_robot_deployment_config, robot_settings_view
 from robotsoul.settings import (
@@ -43,6 +43,7 @@ SESSION_TTL_SECONDS = 30 * 60
 ACTION_TTL_SECONDS = 30
 MAX_REQUEST_BYTES = 64 * 1024
 ASSET_ROOT = Path(__file__).with_name("web")
+DASHBOARD_STEP_UP_SKILLS = frozenset({"sport.switch_avoid_mode", "sport.auto_recover_set"})
 
 CAPABILITY_LABELS = {
     "speech.say": "语音播报",
@@ -116,6 +117,7 @@ class _Session:
     principal_id: str
     role: str
     expires_at: float
+    conversation_id: str
 
 
 @dataclass
@@ -191,9 +193,22 @@ class DashboardService:
                 principal_id=candidate,
                 role="operator",
                 expires_at=now + self.session_ttl_seconds,
+                conversation_id=secrets.token_urlsafe(24),
             )
             self._sessions[session.session_id] = session
             return session, None
+
+    def task_conversation(self, session: _Session) -> ConversationContext:
+        return ConversationContext(self.runtime.profile.robot_id, "dashboard", session.principal_id, session.conversation_id)
+
+    def voice_conversation(self) -> ConversationContext:
+        with self._lock:
+            active = self._active_call
+            if active is not None:
+                session = self._sessions.get(active["session_id"])
+                if session is not None:
+                    return ConversationContext(self.runtime.profile.robot_id, "call", session.principal_id, active["call_id"])
+        return self.runtime.conversation("voice", "local-microphone", "local")
 
     def session(self, session_id: str | None) -> _Session | None:
         if not session_id:
@@ -463,8 +478,12 @@ class DashboardService:
             "policy_version": getattr(self.runtime.profile, "profile_version", "unknown"),
             "capabilities": [self._capability_view(name, spec) for name, spec in capabilities.items()],
             "actions": list(reversed(self._actions[-100:])),
+            "safety": self.runtime.safety_status(),
         }
         return payload
+
+    def safety_metrics(self) -> dict[str, Any]:
+        return self.runtime.safety_status()
 
     def _robot_configuration_view(self, identity: RobotDeploymentConfig | None) -> dict[str, Any]:
         profile = self.runtime.profile
@@ -576,6 +595,10 @@ class DashboardService:
         reason = None
         if risk == "high" and not dashboard_allowed:
             enabled, reason = False, "Dashboard caller is not authorized by policy"
+        operator_required = (
+            getattr(capability, "requires_operator_confirmation", risk == "high")
+            or name in DASHBOARD_STEP_UP_SKILLS
+        )
         return {
             "name": name,
             "label": CAPABILITY_LABELS.get(name, name),
@@ -583,7 +606,7 @@ class DashboardService:
             "risk_level": risk,
             "allowed_callers": callers,
             "dashboard_allowed": dashboard_allowed,
-            "operator_confirmation_required": getattr(capability, "requires_operator_confirmation", risk == "high"),
+            "operator_confirmation_required": operator_required,
             "ai_review_required": risk == "confirm" and self.runtime.safety_reviewer is not None,
             "enabled": enabled,
             "disabled_reason": reason,
@@ -637,7 +660,11 @@ class DashboardService:
             json.dumps(binding, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         risk = getattr(capability, "risk_level", "normal")
-        requires_operator = risk == "high" or getattr(capability, "requires_operator_confirmation", False)
+        requires_operator = (
+            risk == "high"
+            or getattr(capability, "requires_operator_confirmation", False)
+            or skill in DASHBOARD_STEP_UP_SKILLS
+        )
         ai_review_required = risk == "confirm" and self.runtime.safety_reviewer is not None
         challenge = _ActionChallenge(
             challenge_id=challenge_id,
@@ -692,8 +719,10 @@ class DashboardService:
             if not hmac.compare_digest(digest, challenge.digest):
                 raise PermissionError("Action confirmation does not match its parameters")
             risk = getattr(capability, "risk_level", "normal")
-            requires_operator = risk == "high" or getattr(
-                capability, "requires_operator_confirmation", False
+            requires_operator = (
+                risk == "high"
+                or getattr(capability, "requires_operator_confirmation", False)
+                or challenge.skill in DASHBOARD_STEP_UP_SKILLS
             )
             if requires_operator != challenge.requires_operator:
                 raise PermissionError("Confirmation policy changed; prepare a new action")
@@ -705,8 +734,10 @@ class DashboardService:
                 )
                 if password_error:
                     raise PermissionError(password_error)
-            operator_confirmed = risk == "high" or getattr(
-                capability, "requires_operator_confirmation", False
+            operator_confirmed = (
+                risk == "high"
+                or getattr(capability, "requires_operator_confirmation", False)
+                or challenge.skill in DASHBOARD_STEP_UP_SKILLS
             )
             context = InvocationContext(
                 source=InvocationSource.DASHBOARD,
@@ -722,6 +753,7 @@ class DashboardService:
                 operator_confirmed=operator_confirmed,
                 task_id=challenge.task_id,
                 trace_id=challenge.trace_id,
+                conversation=self.task_conversation(session),
             )
             action = {
                 "operation": challenge.skill,
@@ -779,7 +811,11 @@ class DashboardService:
         return {
             "risk_level": getattr(capability, "risk_level", "normal"),
             "allowed_callers": sorted(getattr(capability, "allowed_callers", ("agent", "dashboard"))),
-            "operator_confirmation_required": getattr(capability, "requires_operator_confirmation", False),
+            "operator_confirmation_required": (
+                getattr(capability, "requires_operator_confirmation", False)
+                or getattr(capability, "risk_level", "normal") == "high"
+                or capability.name in DASHBOARD_STEP_UP_SKILLS
+            ),
             "parameters_schema": {
                 name: {
                     "type": spec.value_type,
@@ -819,6 +855,7 @@ def _task_result_view(result: TaskResult) -> dict[str, Any]:
         "trace_id": result.task.trace_id,
         "status": result.task.status.value,
         "error": result.task.error,
+        "reply": result.reply,
         "evaluation": result.evaluation.conclusion if result.evaluation is not None else None,
         "invoked_action": _invoked_action(result),
         "feedback": [
@@ -948,12 +985,25 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/dashboard/overview":
             self._json(HTTPStatus.OK, self.server.service.overview())
             return
+        if path == "/api/safety/metrics":
+            self._json(HTTPStatus.OK, self.server.service.safety_metrics())
+            return
         if path == "/api/capabilities":
             data = self.server.service.overview()
             self._json(HTTPStatus.OK, {"capabilities": data["capabilities"]})
             return
         if path == "/api/proposals":
             self._json(HTTPStatus.OK, {"proposals": []})
+            return
+        if path.startswith("/api/tasks/"):
+            task_id = unquote(path[len("/api/tasks/"):])
+            try:
+                result = self.server.service.runtime.get_task(task_id, conversation=self.server.service.task_conversation(session))
+                self._json(HTTPStatus.OK, {"task": _task_result_view(result)})
+            except KeyError:
+                self._json(HTTPStatus.NOT_FOUND, {"error": "Task not found"})
+            except PermissionError as exc:
+                self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
             return
         if path == "/api/logs":
             try:
@@ -1017,7 +1067,27 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 task_text = body.get("text")
                 if not isinstance(task_text, str) or not task_text.strip() or len(task_text) > 1000:
                     raise ValueError("text must contain between 1 and 1000 characters")
-                result = self.server.service.runtime.run_text(task_text)
+                asynchronous = body.get("async", False)
+                if not isinstance(asynchronous, bool):
+                    raise ValueError("async must be boolean")
+                task_id = body.get("request_id")
+                if task_id is not None and (not isinstance(task_id, str) or not 1 <= len(task_id) <= 128):
+                    raise ValueError("request_id must contain 1 to 128 characters")
+                goal_kind = body.get("goal_kind", "general")
+                if goal_kind not in {"general", "physical"}:
+                    raise ValueError("goal_kind must be general or physical")
+                expected_evaluator = body.get("expected_evaluator")
+                if expected_evaluator is not None and (
+                    not isinstance(expected_evaluator, str) or not expected_evaluator.strip()
+                ):
+                    raise ValueError("expected_evaluator must be a non-empty string")
+                runtime = self.server.service.runtime
+                conversation = self.server.service.task_conversation(session)
+                task_id = runtime.submit_task(
+                    task_text, conversation=conversation, task_id=task_id,
+                    goal_kind=goal_kind, expected_evaluator=expected_evaluator,
+                )
+                result = runtime.get_task(task_id, conversation=conversation) if asynchronous else runtime.wait_task(task_id)
                 task = _task_result_view(result)
                 action = {
                     "operation": "自然语言任务",
@@ -1025,18 +1095,44 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     "risk_level": "normal",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "status": task["status"],
-                    "message": task["error"] or task["status"],
+                    "message": task["reply"] or task["error"] or task["status"],
                     "task_id": task["task_id"],
                 }
                 with self.server.service._lock:
                     self.server.service._actions.append(action)
-                self._json(HTTPStatus.OK, {"task": task, "action": action})
+                self._json(HTTPStatus.ACCEPTED if asynchronous else HTTPStatus.OK, {"task": task, "action": action})
+                return
+            if path.startswith("/api/tasks/") and (path.endswith("/resume") or path.endswith("/cancel")):
+                task_id, operation = path[len("/api/tasks/"):].rsplit("/", 1)
+                task_id = unquote(task_id)
+                runtime = self.server.service.runtime
+                conversation = self.server.service.task_conversation(session)
+                if operation == "cancel":
+                    result = runtime.cancel_task(task_id, conversation=conversation)
+                else:
+                    answer = body.get("text")
+                    if not isinstance(answer, str) or not answer.strip() or len(answer) > 1000:
+                        raise ValueError("text must contain between 1 and 1000 characters")
+                    event_id = body.get("event_id")
+                    if event_id is not None and (not isinstance(event_id, str) or not 1 <= len(event_id) <= 128):
+                        raise ValueError("event_id must contain 1 to 128 characters")
+                    runtime.resume_task(task_id, text=answer, event_id=event_id, conversation=conversation)
+                    result = runtime.get_task(task_id, conversation=conversation)
+                self._json(HTTPStatus.OK, {"task": _task_result_view(result)})
                 return
             if path == "/api/actions/prepare":
                 skill, parameters = body.get("skill"), body.get("parameters")
                 if not isinstance(skill, str) or not isinstance(parameters, dict):
                     raise ValueError("skill and parameters are required")
                 self._json(HTTPStatus.CREATED, self.server.service.prepare_action(session, skill, parameters))
+                return
+            if path == "/api/safety/stop":
+                reason = body.get("reason", "Dashboard emergency stop")
+                if not isinstance(reason, str) or not reason.strip() or len(reason) > 256:
+                    raise ValueError("reason must contain 1 to 256 characters")
+                check = self.server.service.runtime.trigger_emergency_stop(reason.strip())
+                status = HTTPStatus.CONFLICT if check.error_code in {"supervisor_unavailable", "stop_failed"} else HTTPStatus.OK
+                self._json(status, {"safety": self.server.service.safety_metrics(), "result": check.to_dict()})
                 return
             if path == "/api/settings/llm":
                 self._json(HTTPStatus.OK, self.server.service.update_llm(body))
@@ -1071,6 +1167,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
         except PermissionError as exc:
             self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+        except KeyError:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "Task not found"})
         except NotImplementedError as exc:
             self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc), "media_available": False})
         except WebRtcUnavailable as exc:
@@ -1263,6 +1361,8 @@ def create_dashboard_server(
     server = _DashboardHTTPServer(
         (host, port), DashboardRequestHandler, service, secure=bool(tls_cert), allowed_host=host
     )
+    if capture_arbiter is not None and hasattr(capture_arbiter, "runtime_conversation"):
+        capture_arbiter.runtime_conversation = service.voice_conversation
     if tls_cert:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
