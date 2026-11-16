@@ -1,5 +1,7 @@
 # 打断（Barge-in）与全双工语音可行性调研
 
+> 状态说明（2026-11-15）：本文是调研，不是已采纳方案。AEC、播放期 VAD、快速停播和动作取消令牌的思路仍可参考，但落地时要与 [16](../robot-agent-plan/16-voice-interaction.md) 的 Voice Service 状态机对齐。文中「ASR partial 即做意图预分类、预生成」属于提前执行，已暂缓；「关键词快速路径」只限于停止播报，不得直接提交机器人技能。这里的「打断」是语音交互层概念，与任务底座的 `INTERRUPTED`（动作结果未知，见 [20](../robot-agent-plan/20-agent-foundation-implementation.md)）不是同一件事。
+
 > task-3 · 2026-11-14 · 对象：MiMax2 = Xiaomi Mi Max 2 / postmarketOS(Alpine, musl) / aarch64 8×Cortex-A53 / ~3.5GB RAM(+5GB zram) / PulseAudio / 内置 Mic1 48kHz 单声道 / 内置扬声器·麦克风互拾音。
 > 现状：OpenRobotSoul 半双工（唤醒→ASR→DeepSeek Flash→整句 TTS→播放；播完丢麦克风缓冲并重置 ASR/VAD，因而不可打断）。目标：随时可打断、低延迟、说话时就能预推理动作。
 > 标注：**[待验证]** = 尚未在本机实测，属经验值/估算；所有引用见文末编号。

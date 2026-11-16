@@ -18,6 +18,8 @@ from typing import Callable, Sequence
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SDK_ROOT = Path("adapters") / "unitree_sdk2"
 PICOCLAW_ROOT = Path("third_party") / "picoclaw"
+DIALOGUE_ROOT = Path("cmd") / "openrobotsoul-dialogue"
+EXPECTED_PICOCLAW_COMMIT = "bbf6893ca7afad27f1d00a0f5a45982a549c6ed6"
 GO2_BRIDGE_ROOT = Path("adapters") / "unitree_go2" / "bridge"
 GO2_TARGETS = (
     "go2_sport_client",
@@ -188,6 +190,114 @@ def _default_runner(command: Sequence[str], cwd: Path) -> None:
         raise BuildError(f"Build command failed with exit code {exc.returncode}: {command[0]}") from exc
 
 
+def _normalize_build_type(build_type: str) -> str:
+    build_types = {
+        "debug": "Debug",
+        "release": "Release",
+        "relwithdebinfo": "RelWithDebInfo",
+        "minsizerel": "MinSizeRel",
+    }
+    try:
+        return build_types[build_type.replace("_", "").lower()]
+    except (AttributeError, KeyError) as exc:
+        raise BuildError("Build type must be Debug, Release, RelWithDebInfo, or MinSizeRel") from exc
+
+
+def _go_build_environment(output_dir: Path, platform_name: str, architecture: str) -> dict[str, str]:
+    cache = output_dir / "go" / "gocache"
+    modules = output_dir / "go" / "modules"
+    for directory in (cache, modules):
+        directory.mkdir(parents=True, exist_ok=True)
+    return {
+        "GOOS": {"linux": "linux", "windows": "windows", "macos": "darwin"}[platform_name],
+        "GOARCH": {"x86_64": "amd64", "aarch64": "arm64"}[architecture],
+        "CGO_ENABLED": "0",
+        "GOTOOLCHAIN": "local",
+        "GOWORK": "off",
+        "GOCACHE": str(cache),
+        "GOMODCACHE": str(modules),
+    }
+
+
+def _validate_dialogue_module(project_root: Path) -> Path:
+    dialogue_dir = project_root / DIALOGUE_ROOT
+    if not (dialogue_dir / "go.mod").is_file():
+        raise BuildError(f"Dialogue Go module is missing: {dialogue_dir / 'go.mod'}")
+    return dialogue_dir
+
+
+def _build_dialogue_binary(
+    project_root: Path,
+    output_dir: Path,
+    platform_name: str,
+    architecture: str,
+    go: str,
+    runner: CommandRunner,
+    jobs: int | None = None,
+) -> Path:
+    dialogue_dir = _validate_dialogue_module(project_root)
+    binary = output_dir / "bin" / ("openrobotsoul-dialogue.exe" if platform_name == "windows" else "openrobotsoul-dialogue")
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    command = [go, "build", "-tags", "goolm,stdjson", "-mod=readonly"]
+    if jobs is not None:
+        command.extend(("-p", str(jobs)))
+    command.extend(("-ldflags", _picoclaw_ldflags(project_root / PICOCLAW_ROOT, go), "-o", str(binary), "."))
+    try:
+        with _temporary_environment(_go_build_environment(output_dir, platform_name, architecture)):
+            runner(command, dialogue_dir)
+    except BuildError as exc:
+        raise BuildError(f"Dialogue build failed: {exc}") from exc
+    if not binary.is_file():
+        raise BuildError(f"Dialogue build completed without producing {binary}")
+    return binary
+
+
+def build_dialogue(
+    *,
+    platform_name: str,
+    architecture: str,
+    build_type: str = "Release",
+    jobs: int | None = None,
+    project_root: Path = PROJECT_ROOT,
+    which: Callable[[str], str | None] = shutil.which,
+    runner: CommandRunner = _default_runner,
+) -> BuildResult:
+    """Build only the dialogue process; no Unitree libraries or C++ tools are required."""
+    target_platform = normalize_platform(platform_name)
+    target_arch = normalize_architecture(architecture)
+    normalized_build_type = _normalize_build_type(build_type)
+    if jobs is not None and jobs < 1:
+        raise BuildError("Build jobs must be a positive integer")
+    project_root = project_root.resolve()
+    go = _validate_pico_go_version(project_root, which)
+    picoclaw_dir = project_root / PICOCLAW_ROOT
+    if not (picoclaw_dir / "go.mod").is_file():
+        raise BuildError(f"PicoClaw Go module is missing: {picoclaw_dir / 'go.mod'}; initialize the Git submodule first")
+    _validate_picoclaw_go_module(picoclaw_dir)
+    output_dir = project_root / "build" / f"{target_platform}-{target_arch}"
+    binary = _build_dialogue_binary(project_root, output_dir, target_platform, target_arch, go, runner, jobs)
+    manifest = output_dir / "dialogue-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "platform": target_platform,
+                "architecture": target_arch,
+                "build_type": normalized_build_type,
+                "source": [str(DIALOGUE_ROOT), str(PICOCLAW_ROOT)],
+                "picoclaw_commit": EXPECTED_PICOCLAW_COMMIT,
+                "targets": ["openrobotsoul-dialogue"],
+                "binaries": [binary.relative_to(project_root).as_posix()],
+                "dependencies": [],
+                "toolchain": None,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    return BuildResult(target_platform, target_arch, normalized_build_type, output_dir, (binary,), (), manifest)
+
+
 def build_project(
     *,
     platform_name: str,
@@ -203,16 +313,7 @@ def build_project(
 ) -> BuildResult:
     target_platform = normalize_platform(platform_name)
     target_arch = normalize_architecture(architecture)
-    build_types = {
-        "debug": "Debug",
-        "release": "Release",
-        "relwithdebinfo": "RelWithDebInfo",
-        "minsizerel": "MinSizeRel",
-    }
-    try:
-        normalized_build_type = build_types[build_type.replace("_", "").lower()]
-    except (AttributeError, KeyError) as exc:
-        raise BuildError("Build type must be Debug, Release, RelWithDebInfo, or MinSizeRel")
+    normalized_build_type = _normalize_build_type(build_type)
     if jobs is not None and jobs < 1:
         raise BuildError("Build jobs must be a positive integer")
 
@@ -259,20 +360,15 @@ def build_project(
     if not picoclaw_mod.is_file():
         raise BuildError(f"PicoClaw Go module is missing: {picoclaw_mod}; initialize the Git submodule first")
     _validate_picoclaw_go_module(picoclaw_dir)
+    _validate_dialogue_module(project_root)
 
     output_dir = project_root / "build" / f"{target_platform}-{target_arch}"
     cmake_build_dir = output_dir / "cmake"
     bridge_build_dir = output_dir / "bridge"
-    go_build_dir = output_dir / "go"
     binary_dir = output_dir / "bin"
     dependency_dir = output_dir / "lib"
     binary_dir.mkdir(parents=True, exist_ok=True)
     dependency_dir.mkdir(parents=True, exist_ok=True)
-    go_cache_dir = go_build_dir / "cache"
-    go_module_cache_dir = go_build_dir / "modules"
-    go_build_cache_dir = go_build_dir / "gocache"
-    for directory in (go_cache_dir, go_module_cache_dir, go_build_cache_dir):
-        directory.mkdir(parents=True, exist_ok=True)
 
     sdk_arch_lib = sdk_dir / "thirdparty" / "lib" / target_arch
     staged_dependencies: list[Path] = []
@@ -370,18 +466,9 @@ def build_project(
         shutil.copy2(source, destination)
         staged_binaries.append(destination)
 
-    goarch = {"x86_64": "amd64", "aarch64": "arm64"}[target_arch]
-    goos = {"linux": "linux", "windows": "windows", "macos": "darwin"}[target_platform]
-    picoclaw_name = "picoclaw.exe" if goos == "windows" else "picoclaw"
+    picoclaw_name = "picoclaw.exe" if target_platform == "windows" else "picoclaw"
     picoclaw_binary = binary_dir / picoclaw_name
-    go_environment = {
-        "GOOS": goos,
-        "GOARCH": goarch,
-        "CGO_ENABLED": "0",
-        "GOTOOLCHAIN": "local",
-        "GOCACHE": str(go_build_cache_dir),
-        "GOMODCACHE": str(go_module_cache_dir),
-    }
+    go_environment = _go_build_environment(output_dir, target_platform, target_arch)
     go_command = [
         dependencies["go"],
         "build",
@@ -402,14 +489,18 @@ def build_project(
     if not picoclaw_binary.is_file():
         raise BuildError(f"PicoClaw build completed without producing {picoclaw_binary}")
     staged_binaries.append(picoclaw_binary)
+    staged_binaries.append(
+        _build_dialogue_binary(project_root, output_dir, target_platform, target_arch, dependencies["go"], runner, jobs)
+    )
 
     manifest_path = output_dir / "manifest.json"
     manifest = {
         "platform": target_platform,
         "architecture": target_arch,
         "build_type": normalized_build_type,
-        "source": [str(SDK_ROOT), str(PICOCLAW_ROOT)],
-        "targets": [*GO2_TARGETS, "unitree_go2_bridge", "picoclaw"],
+        "source": [str(SDK_ROOT), str(PICOCLAW_ROOT), str(DIALOGUE_ROOT)],
+        "picoclaw_commit": EXPECTED_PICOCLAW_COMMIT,
+        "targets": [*GO2_TARGETS, "unitree_go2_bridge", "picoclaw", "openrobotsoul-dialogue"],
         "binaries": [path.relative_to(project_root).as_posix() for path in staged_binaries],
         "dependencies": [path.relative_to(project_root).as_posix() for path in staged_dependencies],
         "toolchain": str(toolchain_path) if toolchain_path else None,
@@ -452,23 +543,40 @@ def _picoclaw_ldflags(picoclaw_dir: Path, go: str) -> str:
 
 
 def _validate_picoclaw_go_module(picoclaw_dir: Path) -> None:
-    completed = subprocess.run(
-        ["git", "status", "--short", "--", "go.mod", "go.sum"],
-        cwd=picoclaw_dir,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        raise BuildError(f"Unable to validate PicoClaw module files: {completed.stderr.strip()}")
-    if completed.stdout.strip():
+    try:
+        completed = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"],
+            cwd=picoclaw_dir,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise BuildError(f"Unable to validate PicoClaw working tree: {completed.stderr.strip()}")
+        if completed.stdout.strip():
+            raise BuildError(
+                "PicoClaw contains local changes or untracked files. Restore a clean checkout of the verified "
+                f"commit {EXPECTED_PICOCLAW_COMMIT} before building."
+            )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=picoclaw_dir,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise BuildError(f"Unable to validate PicoClaw checkout using Git: {exc}") from exc
+    if head.returncode != 0:
+        raise BuildError(f"Unable to read PicoClaw commit: {head.stderr.strip()}")
+    if head.stdout.strip() != EXPECTED_PICOCLAW_COMMIT:
         raise BuildError(
-            "PicoClaw go.mod/go.sum contain local changes. Resolve or restore those dependency changes "
-            "before building so the root build cache remains reproducible."
+            f"PicoClaw must be at verified commit {EXPECTED_PICOCLAW_COMMIT}; "
+            f"found {head.stdout.strip() or 'unknown'}. Initialize or update the Git submodule to the pinned commit."
         )
 
 
-def _validate_pico_go_version(project_root: Path, which: Callable[[str], str | None]) -> None:
+def _validate_pico_go_version(project_root: Path, which: Callable[[str], str | None]) -> str:
     go = which("go")
     if go is None:
         raise BuildError(
@@ -482,6 +590,7 @@ def _validate_pico_go_version(project_root: Path, which: Callable[[str], str | N
             f"PicoClaw requires Go 1.25.13 or newer (go.mod declares go 1.25.13); found Go {found}. "
             "Install a compatible Go toolchain and retry."
         )
+    return go
 
 
 def _prompt_choice(label: str, choices: Sequence[str], default: str) -> str:
@@ -557,7 +666,7 @@ def _print_dependency_help(platform_name: str) -> None:
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="robotsoul-build",
-        description="跨平台配置并构建 Unitree Go2 SDK 示例；所有输出都位于项目根目录 build/。",
+        description="构建 Go2 原生组件、PicoClaw 与对话进程；所有输出都位于项目根目录 build/。",
     )
     parser.add_argument("--platform", help="目标系统：linux、windows 或 macos")
     parser.add_argument("--arch", help="目标架构：x86_64/amd64 或 aarch64/arm64")
@@ -568,9 +677,10 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="CMake build type，默认 Release",
     )
     parser.add_argument("--toolchain", help="跨编译使用的 CMake toolchain 文件")
+    parser.add_argument("--dialogue-only", action="store_true", help="只构建对话进程，仅需要 Go 和 Git；默认使用当前系统和架构")
     parser.add_argument("--jobs", type=int, help="并行构建任务数")
     parser.add_argument("--guide", action="store_true", help="只输出目标平台依赖安装指引")
-    parser.add_argument("--list-targets", action="store_true", help="显示此 SDK checkout 中可构建的目标平台/架构")
+    parser.add_argument("--list-targets", action="store_true", help="显示可构建的目标平台/架构")
     return parser.parse_args(argv)
 
 
@@ -581,8 +691,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         provided_args = list(argv)
 
+    if args.dialogue_only and args.toolchain:
+        print("--dialogue-only 使用 Go 交叉编译，不接受 CMake --toolchain。", file=sys.stderr)
+        return 2
+
     if args.list_targets:
-        targets = available_sdk_targets()
+        targets = (
+            tuple((os_name, arch) for os_name in ("linux", "windows", "macos") for arch in ("x86_64", "aarch64"))
+            if args.dialogue_only else available_sdk_targets()
+        )
         if not targets:
             print("此 SDK checkout 中未找到支持平台的预编译库。")
             return 1
@@ -590,7 +707,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"{platform_name}/{architecture}")
         return 0
 
-    if not provided_args:
+    if args.dialogue_only:
+        try:
+            platform_name = normalize_platform(args.platform or detect_host_platform())
+            architecture = normalize_architecture(args.arch or detect_host_architecture())
+        except BuildError as exc:
+            print(f"构建失败：{exc}", file=sys.stderr)
+            return 1
+        build_type = args.build_type
+        toolchain = None
+        if args.guide:
+            print("对话进程构建需要 Git、Go 1.25.13 或更新版本和已初始化的 PicoClaw 子模块。")
+            print("Go 下载：https://go.dev/dl/；可直接选择 Windows/Linux x86_64/aarch64 目标进行交叉编译。")
+            return 0
+    elif not provided_args:
         try:
             choices = _interactive_options()
         except BuildError as exc:
@@ -617,13 +747,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
 
     try:
-        result = build_project(
-            platform_name=platform_name,
-            architecture=architecture,
-            build_type=build_type,
-            toolchain=toolchain,
-            jobs=args.jobs,
-        )
+        if args.dialogue_only:
+            result = build_dialogue(
+                platform_name=platform_name,
+                architecture=architecture,
+                build_type=build_type,
+                jobs=args.jobs,
+            )
+        else:
+            result = build_project(
+                platform_name=platform_name,
+                architecture=architecture,
+                build_type=build_type,
+                toolchain=toolchain,
+                jobs=args.jobs,
+            )
     except BuildError as exc:
         print(f"构建失败：{exc}", file=sys.stderr)
         return 1
@@ -632,7 +770,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("二进制文件：")
     for binary in result.binaries:
         print(f"  {binary}")
-    print(f"运行依赖：{result.output_dir / 'lib'}")
+    if result.staged_dependencies:
+        print(f"运行依赖：{result.output_dir / 'lib'}")
     print(f"构建清单：{result.manifest}")
     return 0
 

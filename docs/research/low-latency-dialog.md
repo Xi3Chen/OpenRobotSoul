@@ -1,5 +1,7 @@
 # 级联语音助手：最低首字延迟 + 边说边推理动作（调研笔记）
 
+> 状态说明（2026-11-15）：本文是调研，不是已采纳方案。以下几点已被项目决定覆盖：①「闭集命令快路径」（P1）已否决，语音不设本地命令快速路径，所有最终转写都交给对话进程（见 [16](../robot-agent-plan/16-voice-interaction.md)）；②partial 驱动的 speculative dispatch 与 LLM 流式增量 tool_calls dispatch 暂缓，等第一次真实端到端测试拿到数据后再评估；③文中针对的 `robotsoul/language_gateway.py` 已被常驻对话进程接替；④TTS 改走 API，文中本地 TTS 的线程、预合成和 RTF 数据只作历史参照；ASR 经 OpenAI 兼容接口调用，没有配置 `base_url` 时自动启动本机后台识别服务，TTS 按同一条规则处理（见 [16](../robot-agent-plan/16-voice-interaction.md)），文中本地 ASR 的数据对该本地服务仍有参考价值。
+
 > 对象：现有 OpenRobotSoul 级联管线（KWS→Silero VAD→流式 zipformer ASR→DeepSeek Flash 语言网关→技能→Xiao-Ya VITS→pacat）。
 > 目标：闭集命令 TTFA≤300ms、开放请求 TTFA≤800ms（p50）、动作在 TTS 念到关键词前就绪、可打断。
 > 标记：「实测」=本机/本仓已知；「待验证」=须在 Mi Max 2（A53×8/3.5GB/musl）上量测；外部数字均给 URL。

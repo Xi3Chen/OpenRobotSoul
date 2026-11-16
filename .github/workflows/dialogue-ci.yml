@@ -1,0 +1,33 @@
+name: dialogue-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  dialogue:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cmd/openrobotsoul-dialogue/go.mod
+          cache-dependency-path: cmd/openrobotsoul-dialogue/go.sum
+
+      - name: Go unit tests
+        working-directory: cmd/openrobotsoul-dialogue
+        run: go test -mod=readonly -count=1 ./...
+
+      - name: Go vet
+        working-directory: cmd/openrobotsoul-dialogue
+        run: go vet -mod=readonly ./...
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build dialogue binary
+        run: python -m robotsoul.build --dialogue-only --platform linux --arch amd64

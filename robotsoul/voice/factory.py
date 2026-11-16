@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import inspect
 import os
 import shutil
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from robotsoul.resources import default_root
@@ -86,13 +88,59 @@ def create_voice_service(
     engine = SherpaVoiceEngine(
         root, wake_phrases, speech=SpeechClient(config.speech), language=config.language,
     )
-    def run_voice_text(text: str, task_id: str | None = None, intent: Any = None):
-        return runtime.run_text(text, task_id=task_id, _intent=intent)
+    aliases: dict[str, str] = {}
+    alias_lock = Lock()
+
+    def _delegate(text: str, task_id: str | None, intent: Any, conversation: Any) -> Any:
+        if run_text is None:
+            return runtime.run_text(text, task_id=task_id, _intent=intent, conversation=conversation)
+        try:
+            parameters = inspect.signature(run_text).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        kwargs: dict[str, Any] = {}
+        if "task_id" in parameters:
+            kwargs["task_id"] = task_id
+        if intent is not None and "intent" in parameters:
+            kwargs["intent"] = intent
+        if "conversation" in parameters:
+            kwargs["conversation"] = conversation
+        return run_text(text, **kwargs) if kwargs else run_text(text)
+
+    def run_voice_text(text: str, task_id: str | None = None, intent: Any = None, conversation: Any = None):
+        conversation = conversation or service.runtime_conversation()
+        pending = runtime.pending_input(conversation)
+        actual = pending or task_id
+        if task_id is not None and actual is not None:
+            with alias_lock:
+                aliases[task_id] = actual
+        try:
+            # A closed-set command is a new instruction, never an answer to a
+            # pending clarification: keep the pending task open and replace.
+            if pending is not None and intent is None:
+                runtime.resume_task(pending, text=text, conversation=conversation)
+                return runtime.wait_task(pending)
+            return _delegate(text, task_id, intent, conversation)
+        finally:
+            if task_id is not None:
+                with alias_lock:
+                    aliases.pop(task_id, None)
+
+    def cancel_voice_task(task_id: str):
+        with alias_lock:
+            actual = aliases.get(task_id, task_id)
+        return runtime.preempt_task(actual)
+
+    def conversation_for_voice():
+        # Local microphone conversation. Call entry points must inject their own
+        # ConversationContext built from the authenticated principal and call id
+        # (the dashboard does this); generation numbers are not identities.
+        return runtime.conversation("voice", "local-microphone", "local")
 
     service = VoiceService(
         capture=capture,
         engine=engine,
-        run_text=run_text or run_voice_text,
+        run_text=run_voice_text,
         robot_name=robot_config.robot_name,
         speaker=speaker,
         follow_up_seconds=config.follow_up_seconds,
@@ -103,6 +151,7 @@ def create_voice_service(
         command_matcher=lambda text: match_closed_command(
             text, runtime.capabilities, wake_phrase=wake_phrases
         ),
-        cancel_task=runtime.preempt_task,
+        cancel_task=cancel_voice_task,
     )
+    service.runtime_conversation = conversation_for_voice
     return service, config

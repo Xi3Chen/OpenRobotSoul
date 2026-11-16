@@ -9,11 +9,13 @@ from fused position readings, not from the cycle count.
 
 from __future__ import annotations
 
-from math import hypot, isfinite
+from math import hypot, isfinite, pi
 
 
 NATIVE_MOVE_MS = 2000
 MOVE_RESEND_MS = 500
+TURN_SPEED_RAD_S = 0.4
+TURN_TOLERANCE_RAD = 0.08
 
 
 def move_cycle_count(duration_ms: int, slice_ms: int = NATIVE_MOVE_MS) -> int:
@@ -22,6 +24,38 @@ def move_cycle_count(duration_ms: int, slice_ms: int = NATIVE_MOVE_MS) -> int:
     if duration_ms <= 0 or slice_ms <= 0:
         return 0
     return (duration_ms + slice_ms - 1) // slice_ms
+
+
+def normalize_angle(angle: float) -> float:
+    """Normalize an angle difference to [-pi, pi)."""
+
+    return (angle + pi) % (2 * pi) - pi
+
+
+class YawTurnTracker:
+    """Accumulate signed yaw deltas while handling the IMU +/-pi boundary."""
+
+    def __init__(self, initial_yaw: float, target_radians: float, tolerance_rad: float = TURN_TOLERANCE_RAD) -> None:
+        if not isfinite(initial_yaw) or not isfinite(target_radians) or not isfinite(tolerance_rad):
+            raise ValueError("Turn angles must be finite")
+        self.initial_yaw = float(initial_yaw)
+        self.previous_yaw = float(initial_yaw)
+        self.target_radians = float(target_radians)
+        self.tolerance_rad = float(tolerance_rad)
+        self.delta_radians = 0.0
+
+    def observe(self, yaw: float) -> float:
+        if not isfinite(yaw):
+            raise ValueError("IMU yaw must be finite")
+        self.delta_radians += normalize_angle(float(yaw) - self.previous_yaw)
+        self.previous_yaw = float(yaw)
+        return self.delta_radians
+
+    @property
+    def reached(self) -> bool:
+        if self.target_radians >= 0:
+            return self.delta_radians >= self.target_radians - self.tolerance_rad
+        return self.delta_radians <= self.target_radians + self.tolerance_rad
 
 
 def horizontal(position: object) -> tuple[float, float] | None:

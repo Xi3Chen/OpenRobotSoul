@@ -63,6 +63,8 @@ def main() -> None:
     parser.add_argument("--profile", help="Override the profile selected in config/robot.json")
     parser.add_argument("--robot-module", help="Override the robot_module selected in config/robot.json")
     parser.add_argument("--robot-config", help="Path to deployment robot selection JSON")
+    parser.add_argument("--task-store", help="SQLite task database (default ~/.openrobotsoul/tasks.sqlite3)")
+    parser.add_argument("--conversation-id", help="Explicit local text conversation; a new conversation is created when omitted")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("profiles", help="List profiles registered by robot modules")
     subparsers.add_parser("status", help="Check the selected robot connection and read-only state")
@@ -237,6 +239,7 @@ def main() -> None:
             agent=agent,
             audit_sink=JsonlToolCallAuditSink(),
             safety_reviewer=reviewer,
+            task_store_path=args.task_store or os.environ.get("OPENROBOTSOUL_TASK_STORE", str(Path.home() / ".openrobotsoul" / "tasks.sqlite3")),
         )
     except (RuntimeError, ValueError) as exc:
         if use_language:
@@ -248,9 +251,9 @@ def main() -> None:
     _log_runtime_connection(runtime)
 
     def _close_started_processes() -> None:
+        runtime.close()
         if language_session is not None:
             language_session.close()
-        runtime.close()
 
     if args.command == "dashboard":
         from robotsoul.settings import OperatorDirectory, default_llm_path, default_operators_path, default_voice_config_path
@@ -321,7 +324,7 @@ def main() -> None:
         return
     try:
         text = "/head.look yaw_deg=0 pitch_deg=10" if args.command == "demo" else " ".join(args.text)
-        result = runtime.run_text(text)
+        result = runtime.run_text(text, conversation=runtime.conversation(conversation_id=args.conversation_id))
         print(json.dumps(_json_value(result), ensure_ascii=False, indent=2))
         if result.task.status.value != "completed":
             raise SystemExit(1)

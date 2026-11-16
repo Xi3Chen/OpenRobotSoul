@@ -1,0 +1,24 @@
+PicoClaw dialogue feasibility probes (temporary external Go module)
+Date: 2026-11-14 Asia/Shanghai
+Repository source: C:/Users/Xi3Chen/Documents/MyProject/RobotHarness/third_party/picoclaw
+Source commit: bbf6893ca7afad27f1d00a0f5a45982a549c6ed6
+Toolchain: go1.27.3 windows/amd64
+Command: go test -mod=mod -v -count=1 -timeout=90s .
+External go.mod: require github.com/sipeed/picoclaw v0.0.0; replace github.com/sipeed/picoclaw => <absolute source path>
+Build result: PASS. No discordgo replacement was needed for these imports on this platform.
+Network/LLM: no real model, robot, or device requests. fakeProvider supplies every LLM response. Go module resolution may access package mirrors.
+Isolation: temporary workspace, PICOCLAW_HOME, and PICOCLAW_BUILTIN_SKILLS. No repository files changed.
+Sentinels: all ORIGINAL, SECRET, FAKE-REASON, TURN-*, and NOTE-* strings are invented test data; none are credentials.
+
+Six executed probes:
+1. TestDialogue PASS: explicit opaque session preserves prior user text and rejection reason over two ProcessDirect calls. A note written using AddMessage+Save survives closing the loop and reopening a new loop against the same on-disk workspace. This is session-backend reopen, not an end-to-end resident-process restart test. Baseline zero-value ToolsConfig unexpectedly exposes [reaction].
+2. TestBareKeysCollide PASS (expected defect reproduced): bare voice then bare call route to the same opaque session. The call request contains the voice sentinel. Raw voice history len=0; raw call history len=4 after alias reassignment.
+3. TestUnexpectedToolCall PASS (behavior observed): zero-value ToolsConfig leaves reaction registered; exec is not registered and is not executed. Unsolicited exec ToolCalls nevertheless enter the tool pipeline, append a tool-not-found result, and return an English max_tool_iterations string with nil error. This is not a structured immediate refusal.
+4. TestDynamicContributor PASS: public ContextBuilder.RegisterPromptContributor inserts SENSOR-TIME-1 then fresh SENSOR-TIME-2 into successive system prompts without source edits.
+5. TestSummaryAppendLossRepro PASS (expected defect reproduced): third completed turn starts asynchronous summarization; fake summary call is blocked; a note is appended; summary released; keepLast=4 truncation deletes TURN-B-UNSUMMARIZED even though the summary covered only TURN-A. The note is retained. This is a logical concurrency loss, not a Go data race.
+6. TestNoToolsFrontmatterAndProviderGuard PASS: controlled workspace AGENT.md frontmatter tools: [] creates an actually empty registry; reaction is not callable; model tool definitions are empty. A wrapping provider rejects any returned ToolCalls with an error before the execution/history pipeline. ProcessDirect returns an error and no tool-role/tool-call messages are stored. Tested one injected provider with no fallbacks; any future fallback/streaming path needs the same guard.
+
+Important limits:
+- No physical timing, real model JSON reliability, Linux/ARM cross-build, device navigation, image understanding, or power-loss/fsync failure tested.
+- Test PASS for defects means the described undesirable behavior was successfully reproduced; it does not mean the proposed design is safe unchanged.
+- Public ToolRegistry.SetAllowlist(empty) after construction restricts later registrations; it does not remove existing reaction entries. Prefer a controlled tools: [] definition before construction, backed by a zero-count startup assertion.

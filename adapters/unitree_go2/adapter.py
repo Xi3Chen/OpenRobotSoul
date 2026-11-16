@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from math import isfinite
+import json
+import os
 from typing import Any
 from uuid import uuid4
 
@@ -20,6 +22,7 @@ from robotsoul.models import (
 )
 from robotsoul.profiles import RobotProfile
 from robotsoul.runlog import log as runtime_log
+from robotsoul.safety import LocalSafetySupervisor
 
 
 class UnitreeGo2Adapter:
@@ -34,6 +37,13 @@ class UnitreeGo2Adapter:
         self.connected = False
         self._speaker: Any | None = None
         self._capabilities: dict[str, CapabilitySpec] = {}
+        self.safety_supervisor = LocalSafetySupervisor(
+            self.robot_id,
+            max_speed_mps=_safety_speed_limit(),
+            watchdog_timeout_seconds=_safety_watchdog_seconds(),
+            zone=_safety_zone(),
+            stop_callback=self._hardware_stop,
+        )
 
     def connect(self) -> None:
         try:
@@ -50,6 +60,8 @@ class UnitreeGo2Adapter:
             self.connected = False
             raise
         self.connected = True
+        self.safety_supervisor.set_connected(True)
+        self.safety_supervisor.heartbeat()
         self._start_speaker()
 
     def _start_speaker(self) -> None:
@@ -61,7 +73,11 @@ class UnitreeGo2Adapter:
             runtime_log("Go2", "Warning", f"机身喇叭未登记：{exc}")
 
     def health(self) -> bool:
-        return self.connected and self.driver.health()
+        healthy = self.connected and self.driver.health()
+        self.safety_supervisor.set_connected(healthy)
+        if healthy:
+            self.safety_supervisor.heartbeat()
+        return healthy
 
     def battery(self) -> BatteryStatus | None:
         if not self.connected:
@@ -101,6 +117,9 @@ class UnitreeGo2Adapter:
             not isinstance(observation, Observation) for observation in observations
         ):
             raise RuntimeError("Go2 driver returned malformed observations")
+        for observation in observations:
+            if observation.event_type == "robot.sport_state":
+                self.safety_supervisor.update_state(observation.payload, observed_at=observation.observed_at)
         return observations
 
     def sensor_snapshot(self) -> dict[str, Any]:
@@ -121,7 +140,30 @@ class UnitreeGo2Adapter:
         error = self._validate_command(command)
         if error:
             return (self._feedback(command, FeedbackStatus.FAILED, error, "command_rejected"),)
-        return self.driver.execute(command)
+        local_check = self.safety_supervisor.check_command(command, phase="before")
+        if not local_check.allowed:
+            return (
+                self._feedback(
+                    command,
+                    FeedbackStatus.FAILED,
+                    local_check.reason,
+                    local_check.error_code or "safety_rejected",
+                    evidence=local_check.evidence,
+                ),
+            )
+        feedback = self.driver.execute(command)
+        landing_check = self.safety_supervisor.after_feedback(command, feedback)
+        if not landing_check.allowed and any(item.status == FeedbackStatus.SUCCEEDED for item in feedback):
+            return feedback + (
+                self._feedback(
+                    command,
+                    FeedbackStatus.FAILED,
+                    landing_check.reason,
+                    landing_check.error_code or "safety_landing_failed",
+                    evidence=landing_check.evidence,
+                ),
+            )
+        return feedback
 
     def cancel(self, command: Command) -> Feedback:
         capability = self._capabilities.get(command.skill)
@@ -151,7 +193,20 @@ class UnitreeGo2Adapter:
             try:
                 self.driver.close()
             finally:
+                self.safety_supervisor.set_connected(False)
                 self.connected = False
+
+    def _hardware_stop(self, reason: str) -> None:
+        stopper = getattr(self.driver, "emergency_stop", None)
+        if callable(stopper):
+            stopper(reason)
+            return
+        stopper = getattr(self.driver, "_best_effort_stop", None)
+        if callable(stopper):
+            if stopper() != 0:
+                raise RuntimeError("Go2 StopMove was not confirmed")
+            return
+        raise RuntimeError(f"Go2 emergency stop is unavailable: {reason}")
 
     def _validate_command(self, command: Command) -> str | None:
         if not self.connected or not self.driver.health():
@@ -210,6 +265,8 @@ class UnitreeGo2Adapter:
         status: FeedbackStatus,
         message: str,
         error_code: str,
+        *,
+        evidence: dict[str, Any] | None = None,
     ) -> Feedback:
         return Feedback(
             feedback_id=str(uuid4()),
@@ -220,6 +277,7 @@ class UnitreeGo2Adapter:
             timestamp=utc_now(),
             message=message,
             error_code=error_code,
+            evidence=evidence or {},
         )
 
 
@@ -266,4 +324,44 @@ def _intersect_capabilities(
         description=profile.description,
         estimate_ms=device.estimate_ms or profile.estimate_ms,
         completion=device.completion if device.estimate_ms or device.completion != "accepted" else profile.completion,
+        retry_safe=profile.retry_safe and device.retry_safe,
     )
+
+
+def _safety_speed_limit() -> float:
+    raw = os.environ.get("OPENROBOTSOUL_GO2_MAX_SPEED_MPS", "0.8")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 0.8
+    return value if isfinite(value) and value > 0 else 0.8
+
+
+def _safety_watchdog_seconds() -> float:
+    raw = os.environ.get("OPENROBOTSOUL_GO2_WATCHDOG_SECONDS", "2")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 2.0
+    return value if isfinite(value) and value > 0 else 2.0
+
+
+def _safety_zone() -> dict[str, float] | None:
+    raw = os.environ.get("OPENROBOTSOUL_GO2_SAFETY_ZONE", "").strip()
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        runtime_log("Go2", "Warning", "安全区域配置不是有效 JSON，已使用无区域默认值")
+        return None
+    if not isinstance(value, dict):
+        return None
+    zone: dict[str, float] = {}
+    for name in ("min_x", "max_x", "min_y", "max_y"):
+        number = value.get(name)
+        if isinstance(number, (int, float)) and not isinstance(number, bool) and isfinite(float(number)):
+            zone[name] = float(number)
+    if not zone:
+        return None
+    return zone

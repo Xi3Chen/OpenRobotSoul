@@ -74,16 +74,17 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         self.assertEqual(declared, catalog)
         self.assertEqual(self.profile.required_capabilities, ("sport.stop_move",))
         self.assertNotIn("sport.damp", declared)
-        high = {item.name for item in self.profile.capabilities if item.risk_level == RiskLevel.HIGH}
         self.assertEqual(
-            high,
+            {item.name for item in self.profile.capabilities if item.risk_level == RiskLevel.HIGH},
+            set(),
+        )
+        confirm = {item.name for item in self.profile.capabilities if item.risk_level == RiskLevel.CONFIRM}
+        self.assertEqual(
+            confirm,
             {
-                "sport.recovery_stand",
                 "sport.front_flip",
                 "sport.front_jump",
                 "sport.front_pounce",
-                "sport.dance1",
-                "sport.dance2",
                 "sport.left_flip",
                 "sport.back_flip",
                 "sport.handstand",
@@ -91,8 +92,18 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
                 "sport.free_jump",
                 "sport.switch_joystick",
                 "sport.auto_recover_set",
+                "sport.switch_avoid_mode",
+                "motion.turn_left",
+                "motion.turn_right",
+                "motion.turn_around",
             },
         )
+        for name in confirm:
+            self.assertIn("agent", declared[name].allowed_callers)
+            self.assertFalse(declared[name].requires_operator_confirmation)
+        for name in ("sport.recovery_stand", "sport.dance1", "sport.dance2"):
+            self.assertEqual(declared[name].risk_level, RiskLevel.NORMAL)
+            self.assertIn("agent", declared[name].allowed_callers)
         self.assertEqual(declared["sport.stand_up"].description, catalog["sport.stand_up"].description)
         self.assertIn("站立锁定", declared["sport.stand_up"].description)
         self.assertIn("速度控制", declared["sport.move"].description)
@@ -496,8 +507,111 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         self.assertIn("sport.stand_up", runtime.available_tools())
         self.assertIn("sport.move", runtime.available_tools())
         self.assertIn("vui.set_volume", runtime.available_tools())
-        self.assertNotIn("sport.front_flip", runtime.available_tools())
+        self.assertIn("sport.front_flip", runtime.available_tools())
         self.assertIn("sport.front_flip", runtime.dashboard_tools())
+        self.assertIn("sport.dance1", runtime.available_tools())
+        self.assertIn("motion.turn_left", runtime.available_tools())
+        self.assertIn("expression.nod", runtime.available_tools())
+
+    def test_composite_action_metadata_declares_sensor_and_retry_contracts(self):
+        capabilities = {item.name: item for item in sport_capabilities()}
+        for name in ("motion.turn_left", "motion.turn_right", "motion.turn_around"):
+            self.assertEqual(capabilities[name].risk_level, RiskLevel.CONFIRM)
+            self.assertEqual(capabilities[name].completion, "measured")
+            self.assertFalse(capabilities[name].retry_safe)
+            self.assertEqual(capabilities[name].parameters, {})
+        self.assertEqual(capabilities["expression.tilt_head"].parameters["direction"].value_type, "string")
+        self.assertEqual(capabilities["expression.nod"].parameters["count"].minimum, 1.0)
+        self.assertEqual(capabilities["expression.nod"].parameters["count"].maximum, 5.0)
+        for name in ("expression.tilt_head", "expression.nod", "expression.shake_head"):
+            self.assertEqual(capabilities[name].risk_level, RiskLevel.NORMAL)
+            self.assertEqual(capabilities[name].completion, "nominal")
+            self.assertTrue(capabilities[name].retry_safe)
+
+    def test_composite_action_parameter_validation(self):
+        from adapters.unitree_go2.actions import sport_action, validate_parameters
+
+        self.assertIsNone(validate_parameters(sport_action("expression.tilt_head"), {"direction": "left"}))
+        self.assertIsNone(validate_parameters(sport_action("expression.nod"), {"count": 2}))
+        self.assertIsNotNone(validate_parameters(sport_action("expression.tilt_head"), {"direction": "up"}))
+        self.assertIsNotNone(validate_parameters(sport_action("expression.nod"), {"count": 1.5}))
+
+    def test_turn_left_uses_fresh_imu_yaw_and_stops_after_target(self):
+        from unittest.mock import patch
+
+        calls = []
+        driver = _connected_driver(self.profile, calls)
+        yaws = iter((0.0, 0.0, 0.7, 1.5))
+        driver._read_sensors = lambda: {
+            "streams": [{
+                "id": "sport",
+                "available": True,
+                "observed_at": utc_now().isoformat(),
+                "payload": {"imu": {"rpy": [0.0, 0.0, next(yaws)]}},
+            }]
+        }
+        driver._read_state = lambda: {
+            "mode": 1,
+            "error_code": 0,
+            "velocity": [0.0, 0.0, 0.0],
+            "yaw_speed": 0.0,
+        }
+        with patch("adapters.unitree_go2.motion.MOVE_RESEND_MS", 0):
+            feedback = driver.execute(_sport_command(
+                self.profile, "motion.turn_left", {}, RiskLevel.CONFIRM,
+            ))
+
+        self.assertEqual(feedback[-1].status, FeedbackStatus.SUCCEEDED)
+        self.assertTrue(feedback[-1].evidence["completion_verified"])
+        self.assertGreaterEqual(feedback[-1].evidence["yaw_delta"], 1.49)
+        self.assertEqual(calls[-1], "stop_move")
+
+    def test_turn_tracker_accumulates_across_the_imu_yaw_boundary(self):
+        from math import pi
+
+        from adapters.unitree_go2.motion import YawTurnTracker
+
+        tracker = YawTurnTracker(3.0, pi / 2)
+        tracker.observe(-3.0)
+        tracker.observe(-1.5)
+
+        self.assertTrue(tracker.reached)
+        self.assertAlmostEqual(tracker.delta_radians, 1.7831853071795862)
+
+    def test_expression_restores_neutral_pose_after_euler_sequence(self):
+        from unittest.mock import patch
+
+        calls = []
+        driver = _connected_driver(self.profile, calls)
+        with patch.object(driver, "_wait_for_duration", return_value=None) as wait:
+            feedback = driver.execute(_sport_command(
+                self.profile, "expression.tilt_head", {"direction": "left"}, RiskLevel.NORMAL,
+            ))
+
+        self.assertEqual(feedback[-1].status, FeedbackStatus.SUCCEEDED)
+        self.assertTrue(feedback[-1].evidence["neutral_restored"])
+        self.assertEqual(calls, ["euler", "euler"])
+        self.assertEqual(wait.call_count, 2)
+
+    def test_turn_sensor_failure_after_motion_still_confirms_stop(self):
+        calls = []
+        driver = _connected_driver(self.profile, calls)
+        seen = {"count": 0}
+
+        def read_yaw():
+            seen["count"] += 1
+            if seen["count"] <= 2:
+                return 0.0
+            raise RuntimeError("stale IMU")
+
+        driver._read_imu_yaw = read_yaw
+        feedback = driver.execute(_sport_command(
+            self.profile, "motion.turn_left", {}, RiskLevel.CONFIRM,
+        ))
+
+        self.assertEqual(feedback[-1].status, FeedbackStatus.FAILED)
+        self.assertEqual(feedback[-1].error_code, "imu_unavailable")
+        self.assertEqual(calls, ["move", "stop_move"])
 
     def test_sdk_driver_dispatches_stand_up_and_rejects_ranges_locally(self):
         calls = []

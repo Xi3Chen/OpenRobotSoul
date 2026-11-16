@@ -1,5 +1,5 @@
 (() => {
-  const state = { csrf: null, overview: null, pendingAction: null, voice: null, voiceBusy: false, levels: null };
+  const state = { csrf: null, overview: null, pendingAction: null, voice: null, voiceBusy: false, levels: null, task: null, taskPoll: null };
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -19,6 +19,10 @@
   }
 
   function showLogin() {
+    clearTimeout(state.taskPoll);
+    state.task = null;
+    $("#task-cancel").hidden = true;
+    $("#task-progress").textContent = "";
     state.csrf = null;
     $("#operator-password").value = "";
     $("#account-current-password").value = "";
@@ -208,6 +212,12 @@
     $("#active-task").textContent = text(data.active_task, "无");
     $("#latest-feedback").textContent = text(data.latest_feedback, "暂无");
     $("#policy-version").textContent = text(data.policy_version);
+    const safety = data.safety || {};
+    const reviewCounts = safety.review?.counts || {};
+    const rejected = Number(reviewCounts.review_deny || 0) + Number(reviewCounts.review_needs_evidence || 0) + Number(reviewCounts.condition_failures || 0);
+    $("#safety-status").textContent = safety.enabled === true
+      ? (safety.emergency_stop === true ? "急停中" : rejected ? `已启用 · ${rejected} 次拒绝` : "已启用")
+      : "未启用";
     if (!state.voiceBusy && !state.voice) {
       const details = {
         PASSIVE: ["good", "唤醒待机", `${text(voice.robot_name, "机器人")}正在监听唤醒词`],
@@ -943,19 +953,63 @@
     const spoken = field.value.trim();
     submit.disabled = true;
     try {
-      const data = await request("/api/tasks", { method: "POST", body: JSON.stringify({ text: field.value }) });
+      const pending = state.task?.status === "awaiting_input" ? state.task.task_id : null;
+      const endpoint = pending ? `/api/tasks/${encodeURIComponent(pending)}/resume` : "/api/tasks";
+      const data = await request(endpoint, { method: "POST", body: JSON.stringify({ text: field.value, async: true, event_id: crypto.randomUUID(), request_id: crypto.randomUUID() }) });
       const task = data.task || {};
       field.value = "";
       appendConversation("user", spoken);
-      appendConversation("agent", task.error || task.evaluation || "已处理", task.invoked_action);
-      await refresh();
-      announce("任务已处理");
+      showTask(task);
     } catch (error) {
       appendConversation("user", spoken);
       appendConversation("agent", error.message);
       showError(error.message);
     } finally {
-      submit.disabled = false;
+      submit.disabled = Boolean(state.task && !["awaiting_input", "completed", "failed", "cancelled", "interrupted"].includes(state.task.status));
+    }
+  });
+
+  function showTask(task) {
+    clearTimeout(state.taskPoll);
+    state.task = task;
+    const finished = ["completed", "failed", "cancelled", "interrupted"].includes(task.status);
+    const waiting = task.status === "awaiting_input";
+    const labels = { received: "任务已接收", awaiting_agent: "正在判断下一步", reviewing: "正在检查动作", executing: "正在执行", waiting_event: "等待设备反馈", cancel_requested: "正在停止动作", awaiting_input: "请补充信息", completed: "任务完成", failed: "任务未完成", cancelled: "任务已取消", interrupted: "任务已中断，请检查执行结果" };
+    $("#task-progress").textContent = labels[task.status] || "任务进行中";
+    $("#task-cancel").hidden = finished;
+    $("#task-form button[type=submit]").disabled = !finished && !waiting;
+    if (finished || waiting) {
+      appendConversation("agent", task.reply || task.error || task.evaluation || labels[task.status], task.invoked_action);
+      if (waiting) $("#task-text").focus();
+      if (finished) refresh().catch(showError);
+      return;
+    }
+    const id = task.task_id;
+    state.taskPoll = setTimeout(async () => {
+      try {
+        const data = await request(`/api/tasks/${encodeURIComponent(id)}`);
+        if (state.task?.task_id === id) showTask(data.task);
+      } catch (error) {
+        showError(error.message);
+        $("#task-form button[type=submit]").disabled = false;
+      }
+    }, 400);
+  }
+
+  $("#task-cancel").addEventListener("click", async () => {
+    if (!state.task) return;
+    try {
+      const data = await request(`/api/tasks/${encodeURIComponent(state.task.task_id)}/cancel`, { method: "POST", body: "{}" });
+      showTask(data.task);
+    } catch (error) { showError(error.message); }
+  });
+
+  $("#safety-stop").addEventListener("click", async () => {
+    try {
+      await request("/api/safety/stop", { method: "POST", body: JSON.stringify({ reason: "Dashboard emergency stop" }) });
+      await refresh();
+    } catch (error) {
+      showError(error.message);
     }
   });
 

@@ -21,6 +21,18 @@ stateDiagram-v2
   monitoring --> evaluating
   monitoring --> recovering
   monitoring --> cancelled
+  monitoring --> waiting_event
+  waiting_event --> monitoring
+  waiting_event --> awaiting_agent
+  awaiting_agent --> waiting_user
+  waiting_user --> awaiting_agent
+  waiting_user --> cancelled
+  executing --> cancel_requested
+  monitoring --> cancel_requested
+  cancel_requested --> cancelled
+  executing --> interrupted
+  interrupted --> awaiting_agent
+  interrupted --> failed
   recovering --> awaiting_agent
   recovering --> failed
   recovering --> cancelled
@@ -34,7 +46,9 @@ stateDiagram-v2
 
 具体状态可按 MVP 简化，但终态必须清晰。事务是逻辑工作流，不意味着真实机器人动作能被数据库回滚。
 
-另有一个与任务状态并行的交互状态机，用来决定何时形成可交给 Agent 的任务输入：
+术语消歧：`interrupted`（任务底座的 `INTERRUPTED`）表示动作已派发但结果未知，重启或断连后必须先查询真实状态再决定下一步，见 [20](20-agent-foundation-implementation.md)；`cancel_requested` 表示用户或策略已请求取消、正在等设备确认。主动行为被用户呼叫打断记为 `preempted_by_user`（见 [08](08-proactive-behavior.md)），它不是 `interrupted`，两者不得混用。语音里的打断（播报被新一句话替换）属于交互层事件，归 Voice Service，不写成任务状态。
+
+交互状态（唤醒、聆听、说话对象、跟进窗口和超时）归 Voice Service，状态机见 [语音交互子系统](16-voice-interaction.md)。事务流只接收 `wake.detected`、最终转写和 `interaction.cancelled` 等有界事件，并据此创建任务；手势、注意力等非语音触发引入时同样以事件形式进来。下图是事务流侧对这些事件的简化视图，只说明何时创建任务，不是第二个交互状态机的实现：
 
 ~~~mermaid
 stateDiagram-v2
@@ -55,7 +69,7 @@ stateDiagram-v2
 
 ## 正常处理步骤
 
-1. 交互回环等待已授权的唤醒词/手势/可选注意力信号；按配置开启有限时长的语音采集。最终转写有效后，与 Dashboard 文本一样作为自然语言创建 task_id，并记录机器人、时间和触发来源，交给常驻对话进程 `openrobotsoul-dialogue`（链接 `third_party/picoclaw` AgentLoop）规划。不按本地关键词表选择技能；编码用的 Go 版 PicoClaw CLI 不参与这次技能选择。
+1. Voice Service（见 [16](16-voice-interaction.md)）等待已授权的唤醒词/手势/可选注意力信号，并管理有限时长的语音采集；事务流收到有效的最终转写后，与 Dashboard 文本一样作为自然语言创建 task_id，并记录机器人、时间和触发来源，交给常驻对话进程 `openrobotsoul-dialogue`（链接 `third_party/picoclaw` AgentLoop）规划。不按本地关键词表选择技能；编码用的 Go 版 PicoClaw CLI 不参与这次技能选择。
 2. 订阅新观测并检查有效期、来源和权限。状态估计更新时保留证据与置信度。
 3. 将相关状态、技能清单和任务进度整理为 Agent 上下文。
 4. Agent 返回意图或工具调用；回环验证技能可用性、schema、数值边界、确认要求和任务状态。

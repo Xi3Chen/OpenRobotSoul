@@ -197,10 +197,12 @@ class SherpaVoiceEngine:
             vad_config = sherpa_onnx.VadModelConfig()
             vad_config.silero_vad.model = str(vad_files["silero_vad.int8.onnx"])
             vad_config.silero_vad.threshold = 0.5
-            # 0.25 s splits Mandarin commands on natural pauses ("然后"/"请").
-            # Keep one spoken command in a single segment for the speech API.
+            # 0.25 s is the low-latency endpoint budget. Natural Mandarin pauses
+            # can still split one command into two VAD segments; the service
+            # merges those at dispatch time (see _should_hold_dispatch) instead
+            # of paying a longer silence wait on every utterance.
             vad_config.silero_vad.min_silence_duration = _env_float(
-                "ROBOTSOUL_VOICE_VAD_MIN_SILENCE", 0.7
+                "ROBOTSOUL_VOICE_VAD_MIN_SILENCE", 0.25
             )
             vad_config.silero_vad.min_speech_duration = 0.25
             vad_config.silero_vad.max_speech_duration = 20.0

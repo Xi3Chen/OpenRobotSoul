@@ -74,7 +74,9 @@
               <div><dt>当前任务</dt><dd id="active-task">无</dd></div>
               <div><dt>最近反馈</dt><dd id="latest-feedback">暂无</dd></div>
               <div><dt>策略版本</dt><dd id="policy-version">—</dd></div>
+              <div><dt>安全门禁</dt><dd id="safety-status">未启用</dd></div>
             </dl>
+            <button id="safety-stop" class="danger-button" type="button" title="立即停止当前动作">急停</button>
           </div>
 
           <section class="robot-info-section" aria-labelledby="robot-info-title">
@@ -100,6 +102,8 @@
             <section class="control-section conversation-panel" aria-labelledby="task-title">
               <div class="section-heading"><h2 id="task-title">对话</h2><span class="subtle">普通句子交给模型；只有 /技能名 会本地直接调用</span></div>
               <div id="conversation-log" class="conversation-log" aria-live="polite"></div>
+              <p id="task-progress" class="subtle" role="status"></p>
+              <button id="task-cancel" class="quiet-button" type="button" hidden>取消当前任务</button>
               <form id="task-form" class="task-form">
                 <label class="visually-hidden" for="task-text">任务内容</label>
                 <textarea id="task-text" name="text" rows="2" maxlength="1000" placeholder="输入一句话，或 /stand_up" required></textarea>

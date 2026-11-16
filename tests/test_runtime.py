@@ -541,7 +541,7 @@ class RuntimeContractTests(unittest.TestCase):
             ],
         )
 
-    def test_duplicate_observation_event_id_is_not_forwarded_twice(self):
+    def test_duplicate_event_is_rejected_but_fresh_state_is_retained(self):
         profile = load_profile("simulator-basic")
         agent = ObservationAgent(AgentIntent("head.look", {"yaw_deg": 0, "pitch_deg": 10}))
         runtime = RobotRuntime.from_profile(profile, agent=agent)
@@ -563,7 +563,7 @@ class RuntimeContractTests(unittest.TestCase):
         runtime.adapter.publish_observation(observation)
         second_result = runtime.run_text("请抬头")
 
-        self.assertEqual(agent.observations, ())
+        self.assertEqual(agent.observations, (observation,))
         self.assertTrue(
             any(
                 item.event_type == "observation.rejected"
@@ -797,7 +797,7 @@ class RuntimeContractTests(unittest.TestCase):
         runtime.adapter.execute = fail_execute
         result = runtime.run_text("请抬头")
 
-        self.assertEqual(result.task.status, "failed")
+        self.assertEqual(result.task.status, "interrupted")
         self.assertEqual(sink.events[-1]["phase"], "completed")
         self.assertEqual(sink.events[-1]["outcome"], "raised")
         self.assertEqual(sink.events[-1]["error"]["type"], "RuntimeError")
@@ -945,7 +945,7 @@ class RuntimeContractTests(unittest.TestCase):
         runtime.adapter.execute = accepted_only
         result = runtime.run_text("/head.look yaw_deg=0 pitch_deg=10")
 
-        self.assertEqual(result.task.status, "failed")
+        self.assertEqual(result.task.status, "interrupted")
         self.assertFalse(result.evaluation and result.evaluation.success)
 
     def test_feedback_with_naive_timestamp_is_rejected(self):
@@ -967,7 +967,7 @@ class RuntimeContractTests(unittest.TestCase):
         runtime.adapter.execute = naive_feedback
         result = runtime.run_text("/head.look yaw_deg=0 pitch_deg=10")
 
-        self.assertEqual(result.task.status, "failed")
+        self.assertEqual(result.task.status, "interrupted")
         self.assertIn("invalid timestamp", result.task.error)
 
     def test_adapter_feedback_after_deadline_does_not_complete_task(self):
@@ -989,7 +989,7 @@ class RuntimeContractTests(unittest.TestCase):
 
         result = runtime.run_text("/head.look yaw_deg=0 pitch_deg=10")
 
-        self.assertEqual(result.task.status, "failed")
+        self.assertEqual(result.task.status, "interrupted")
         self.assertIn("deadline", result.task.error)
 
     def test_runtime_cancellation_requires_adapter_stop_confirmation(self):

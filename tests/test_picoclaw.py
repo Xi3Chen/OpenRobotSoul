@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Event
 from unittest.mock import Mock, patch
 
 from robotsoul.picoclaw import PROJECT_ROOT, PicoClawCodingAgent, PicoClawError
@@ -133,6 +134,36 @@ class PicoClawCodingAgentTests(unittest.TestCase):
             agent.run_task("inspect", self.root / "missing")
         with self.assertRaisesRegex(ValueError, "outside"):
             agent.run_task("inspect", PROJECT_ROOT)
+
+    @patch("robotsoul.picoclaw.subprocess.Popen")
+    def test_cancel_event_before_launch_does_not_start_coding_process(self, popen):
+        cancelled = Event()
+        cancelled.set()
+        agent = PicoClawCodingAgent(binary=self.binary)
+        with patch.dict(os.environ, {"PICOCLAW_CONFIG": str(self._write_config())}):
+            result = agent.run_task("inspect", self.workspace, cancel_event=cancelled)
+        self.assertTrue(result.cancelled)
+        popen.assert_not_called()
+
+    @patch("robotsoul.picoclaw.subprocess.Popen")
+    def test_cancel_event_interrupts_running_coding_process(self, popen):
+        cancelled = Event()
+        process = Mock(returncode=-9)
+
+        def communicate(timeout=None):
+            if timeout is not None:
+                cancelled.set()
+                raise subprocess.TimeoutExpired("coding", timeout)
+            return "partial", ""
+
+        process.communicate.side_effect = communicate
+        popen.return_value = process
+        agent = PicoClawCodingAgent(binary=self.binary)
+        with patch.dict(os.environ, {"PICOCLAW_CONFIG": str(self._write_config())}):
+            result = agent.run_task("inspect", self.workspace, cancel_event=cancelled)
+        self.assertTrue(result.cancelled)
+        self.assertFalse(result.succeeded)
+        process.kill.assert_called_once()
 
     def test_missing_executable_has_actionable_error(self):
         agent = PicoClawCodingAgent(binary=self.root / "missing.exe")
