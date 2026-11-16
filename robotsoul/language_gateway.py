@@ -140,9 +140,20 @@ def _decide(request: dict[str, Any], complete: Completer) -> dict[str, Any]:
                     "completion 为 nominal 时，estimate_ms 是名义保持时间，不是实测完成。"
                     "completion 为 measured 时，estimate_ms 只是截止预算；到时还没达到条件，这一步失败，后面的步骤不会开始。"
                     "用户要走多少米时用 sport.move_distance，一次调用。用户要走多久时用 sport.move，一次调用。"
-                    "用户要左转、右转、转身、调头时用 sport.move，设置 vyaw（vx/vy 可为 0），不要用 sport.euler。"
-                    "用户要点头、摇头、歪头、抬头低头时：先 sport.balance_stand（若尚未平衡站立），再用 sport.euler；"
-                    "pitch 点头/抬头低头，yaw 左右扭身摇头，roll 歪头。euler 的 yaw 不是原地转身。"
+                    "若 skills 里有 motion.back_up：纯后退指定距离用 motion.back_up，只填 distance_m。"
+                    "若 skills 里有 motion.strafe_left / motion.strafe_right：纯左右侧移用它们，只填 distance_m。"
+                    "若 skills 里有 motion.turn_left / motion.turn_right / motion.turn_around："
+                    "左转约 90° 用 motion.turn_left；右转约 90° 用 motion.turn_right；"
+                    "向后转、往后转、掉头、转过身、转身、转一百八十度用 motion.turn_around。"
+                    "这些转向技能 parameters 必须是空对象 {}，角度已固定在技能里，不要自造 angle/degrees 字段。"
+                    "只有用户要任意角度/任意时长原地转，且没有对应 motion.turn_* 时，才用 sport.move 设 vyaw（vx/vy 可为 0）。"
+                    "不要用 sport.euler 做原地转身；euler 的 yaw 只是扭身姿态。"
+                    "若 skills 里有 expression.nod / expression.shake_head / expression.tilt_head："
+                    "点头用 expression.nod；摇头用 expression.shake_head；歪头用 expression.tilt_head。"
+                    "不要用 sport.euler 拼接点头、摇头或歪头序列。"
+                    "用户只要抬头/低头或保持某个姿态角时，才先 sport.balance_stand（若尚未平衡站立）再用 sport.euler。"
+                    "站起来/起立/站立用 sport.stand_up。一句话里有多步（例如站起来再向后转）必须输出计划，先站后转，不要拆成多次追问。"
+                    "常见口令直接执行，不要为“是不是 180°”“面向哪边”向用户确认，除非技能缺失或参数超出声明范围。"
                     "一句话只对应一个动作时，输出一个技能。需要按顺序做多件事时，输出一个计划，最多 "
                     f"{_MAX_PLAN_STEPS} 步。不要编造技能，不要输出解释性正文。只输出一个 JSON 对象，格式是以下之一："
                     '{"skill":"技能名","parameters":{},"rationale":"简短理由"}；'
@@ -265,6 +276,11 @@ def _review(request: dict[str, Any], complete: Completer) -> dict[str, Any]:
                     "只判断这次提案现在能否执行。只输出一个 JSON 对象："
                     '{"verdict":"allow"|"deny"|"uncertain","rationale":"理由"}。'
                     "拒绝或不确定时必须写明理由；语气可与灵魂设定一致，但 verdict 必须严格客观。"
+                    "技能若声明 parameters 为空对象，则 parameters={} 是正确且完整的，不得以缺少角度/方向字段为由 deny。"
+                    "motion.turn_left/right/around 的角度已固定在技能定义中；user_input 里的“向后转/掉头”对应 turn_around 即可 allow。"
+                    "user_input 可能包含多步（如先站起来再转向）。你只复核当前这一步技能：只要该技能是用户请求中的合法一步，就允许，"
+                    "不要因为同句还有其他动作、或本步未打包全部动作而 deny。"
+                    "不可逆本身不是 deny 理由；confirm 级存在就是为了复核后执行。"
                 ),
             },
             {

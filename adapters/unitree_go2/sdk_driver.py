@@ -192,7 +192,7 @@ class UnitreeGo2SdkDriver:
             duration_ms = int(command.parameters["duration_ms"])
             if utc_now() + timedelta(milliseconds=duration_ms + 4500) > command.deadline:
                 return self._failed(command, "Command deadline is too soon for the bounded move", "deadline_expired")
-        if action.kind == "move_distance" and utc_now() + timedelta(milliseconds=2000) > command.deadline:
+        if action.kind in {"move_distance", "translate"} and utc_now() + timedelta(milliseconds=2000) > command.deadline:
             return self._failed(command, "Command deadline is too soon for the distance move", "deadline_expired")
         if action.completion == "nominal" and action.estimate_ms > 0:
             if utc_now() + timedelta(milliseconds=action.estimate_ms + 1500) > command.deadline:
@@ -203,7 +203,7 @@ class UnitreeGo2SdkDriver:
         try:
             if action.kind == "move":
                 return self._execute_move(command, action)
-            if action.kind == "move_distance":
+            if action.kind in {"move_distance", "translate"}:
                 return self._execute_distance(command, action)
             if action.kind == "turn":
                 return self._execute_turn(command, action)
@@ -501,7 +501,94 @@ class UnitreeGo2SdkDriver:
         evidence.update(self._state_evidence())
         return self._accepted(command, message, evidence)
 
+    def _ensure_velocity_mode(self, command: Command) -> str | None:
+        """Leave locked stand so SportClient.Move is actually applied.
+
+        After ``stand_up`` the robot is often in idle/locked stand (mode 0).
+        Move may return success while body velocity and yaw stay near zero.
+        Prefer explicit mode APIs when the firmware supports them; otherwise
+        engage gait with a short forward Move nudge. Prep failure must not
+        hard-block the turn—callers still run the velocity loop afterward.
+        """
+
+        try:
+            mode = self._read_state().get("mode")
+        except Exception:
+            mode = None
+        if isinstance(mode, int) and mode not in {0}:
+            self._velocity_prep = {"mode": mode, "skipped": True}
+            return None
+        results: list[dict[str, Any]] = []
+
+        def invoke(name: str, numbers: list[float], flag: bool | None) -> int:
+            with self._state_lock:
+                if self._cancel_event.is_set():
+                    raise RuntimeError("cancelled")
+                code, _body = self._invoke(name, numbers, flag)
+            results.append({"action": name, "api_code": code})
+            return code
+
+        try:
+            # Joystick exclusive control can reject gait switches; best-effort.
+            invoke("switch_joystick", [], False)
+        except RuntimeError as exc:
+            if str(exc) == "cancelled":
+                self._velocity_prep = {"mode": mode, "attempts": results, "cancelled": True}
+                return "cancelled"
+            raise RuntimeError(f"Unable to prepare velocity mode via switch_joystick: {exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Unable to prepare velocity mode via switch_joystick: {exc}") from exc
+
+        for name, numbers, flag in (
+            ("free_walk", [], None),
+            ("balance_stand", [], None),
+            ("classic_walk", [], True),
+        ):
+            try:
+                code = invoke(name, numbers, flag)
+            except RuntimeError as exc:
+                if str(exc) == "cancelled":
+                    self._velocity_prep = {"mode": mode, "attempts": results, "cancelled": True}
+                    return "cancelled"
+                raise RuntimeError(f"Unable to prepare velocity mode via {name}: {exc}") from exc
+            if code == 0:
+                self._velocity_prep = {"mode": mode, "attempts": results, "chosen": name}
+                return self._wait_for_duration(command, 1500)
+
+        # Firmware returned -1 for mode APIs on this robot. A short forward
+        # Move often leaves locked stand so later vyaw turns are honored.
+        try:
+            code = invoke("move", [0.2, 0.0, 0.0], None)
+        except RuntimeError as exc:
+            if str(exc) == "cancelled":
+                self._velocity_prep = {"mode": mode, "attempts": results, "cancelled": True}
+                return "cancelled"
+            raise RuntimeError(f"Unable to prepare velocity mode via move nudge: {exc}") from exc
+        if code == 0:
+            waited = self._wait_for_duration(command, 800)
+            if waited is not None:
+                self._velocity_prep = {"mode": mode, "attempts": results, "chosen": "move_nudge"}
+                return waited
+            try:
+                invoke("stop_move", [], None)
+            except Exception:
+                pass
+            self._velocity_prep = {"mode": mode, "attempts": results, "chosen": "move_nudge"}
+            return self._wait_for_duration(command, 300)
+
+        # Still proceed: the turn loop will report turn_timeout with evidence.
+        self._velocity_prep = {"mode": mode, "attempts": results, "chosen": None, "continued": True}
+        return None
+
     def _execute_move(self, command: Command, action: Any) -> tuple[Feedback, ...]:
+        try:
+            prep = self._ensure_velocity_mode(command)
+        except Exception as exc:
+            return self._failed(command, str(exc), "sport_call_failed")
+        if prep == "cancelled":
+            return self._cancelled(command)
+        if prep == "deadline":
+            return self._failed(command, "Command deadline expired before velocity motion started", "deadline_expired")
         duration_ms = int(command.parameters["duration_ms"])
         numbers, _flag = native_arguments(action, command.parameters)
         cycles = move_cycle_count(duration_ms, NATIVE_MOVE_MS)
@@ -567,7 +654,20 @@ class UnitreeGo2SdkDriver:
         )
 
     def _execute_distance(self, command: Command, action: Any) -> tuple[Feedback, ...]:
-        numbers, _flag = native_arguments(action, command.parameters)
+        try:
+            prep = self._ensure_velocity_mode(command)
+        except Exception as exc:
+            return self._failed(command, str(exc), "sport_call_failed")
+        if prep == "cancelled":
+            return self._cancelled(command)
+        if prep == "deadline":
+            return self._failed(command, "Command deadline expired before distance move started", "deadline_expired")
+        if action.kind == "translate":
+            if action.move_velocity is None:
+                return self._failed(command, "Go2 translate velocity is not configured", "invalid_action")
+            numbers = [float(value) for value in action.move_velocity]
+        else:
+            numbers, _flag = native_arguments(action, command.parameters)
         tracker = DistanceTracker(float(command.parameters["distance_m"]))
         sends = 0
         try:
@@ -594,6 +694,7 @@ class UnitreeGo2SdkDriver:
             "readings_m": dict(tracker.readings),
             "fusion": tracker.status,
             "move_sends": sends,
+            "move_velocity": numbers,
             "completion_verified": tracker.status == "reached",
         }
         evidence.update(self._state_evidence())
@@ -627,15 +728,32 @@ class UnitreeGo2SdkDriver:
         if action.target_radians is None:
             return self._failed(command, "Go2 turn target is not configured", "invalid_action")
         try:
+            prep = self._ensure_velocity_mode(command)
+        except Exception as exc:
+            return self._failed(command, str(exc), "sport_call_failed")
+        if prep == "cancelled":
+            return self._cancelled(command)
+        if prep == "deadline":
+            return self._failed(command, "Command deadline expired before the turn started", "deadline_expired")
+        try:
             yaw_start = self._read_imu_yaw()
         except Exception as exc:
             return self._failed(command, str(exc), "imu_unavailable")
         tracker = YawTurnTracker(yaw_start, action.target_radians)
         started = time.monotonic()
+        # Leave headroom for StopMove so runtime does not mask the turn outcome
+        # as "Adapter returned after the command deadline".
+        stop_headroom_s = 2.0
+        motion_budget_s = min(
+            action.timeout_ms / 1000.0,
+            max(0.0, (command.deadline - utc_now()).total_seconds() - stop_headroom_s),
+        )
 
         def reached() -> str | None:
-            if time.monotonic() - started >= action.timeout_ms / 1000.0:
+            if time.monotonic() - started >= motion_budget_s:
                 return "turn_timeout"
+            if (command.deadline - utc_now()).total_seconds() <= stop_headroom_s:
+                return "deadline"
             try:
                 tracker.observe(self._read_imu_yaw())
             except Exception:
@@ -678,6 +796,9 @@ class UnitreeGo2SdkDriver:
             "move_sends": sends,
             "stop_api_code": stop_code,
         }
+        prep_evidence = getattr(self, "_velocity_prep", None)
+        if isinstance(prep_evidence, dict):
+            evidence["velocity_prep"] = prep_evidence
         evidence.update(self._state_evidence())
         if sends and stop_code != 0:
             evidence.update({"outcome_known": False, "cancellation_confirmed": False})

@@ -26,6 +26,7 @@
 - [对话上下文与 PicoClaw AgentLoop](18-picoclaw-dialogue-context.md)
 - [对话方案与 Agent 运行底座可行性评估](19-agent-foundation-feasibility.md)
 - [Agent 底座首阶段实施验收](20-agent-foundation-implementation.md)
+- [唤醒词残段进入 ASR 转写：问题与方案](21-wake-asr-transcript-plan.md)
 
 ## 核心决策
 

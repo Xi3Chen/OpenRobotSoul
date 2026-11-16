@@ -13,7 +13,7 @@ from adapters.unitree_go2.sdk_driver import (
 )
 from robotsoul.adapters.base import BatteryStatus
 from adapters.unitree_go2.actions import SPORT_ACTIONS, sport_capabilities
-from robotsoul.models import CapabilitySpec, ParameterSpec, RiskLevel, utc_now
+from robotsoul.models import CapabilitySpec, Observation, ParameterSpec, RiskLevel, utc_now
 
 
 class FakeGo2Driver:
@@ -76,8 +76,12 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         self.assertNotIn("sport.damp", declared)
         self.assertEqual(
             {item.name for item in self.profile.capabilities if item.risk_level == RiskLevel.HIGH},
-            set(),
+            {"obstacles.avoid_set"},
         )
+        high = declared["obstacles.avoid_set"]
+        self.assertEqual(high.allowed_callers, ("dashboard",))
+        self.assertTrue(high.requires_operator_confirmation)
+        self.assertEqual(high.parameters["enabled"].value_type, "boolean")
         confirm = {item.name for item in self.profile.capabilities if item.risk_level == RiskLevel.CONFIRM}
         self.assertEqual(
             confirm,
@@ -93,11 +97,14 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
                 "sport.switch_joystick",
                 "sport.auto_recover_set",
                 "sport.switch_avoid_mode",
-                "motion.turn_left",
-                "motion.turn_right",
-                "motion.turn_around",
+                "motion.back_up",
+                "motion.strafe_left",
+                "motion.strafe_right",
             },
         )
+        for name in ("motion.turn_left", "motion.turn_right", "motion.turn_around"):
+            self.assertEqual(declared[name].risk_level, RiskLevel.NORMAL)
+            self.assertIn("agent", declared[name].allowed_callers)
         for name in confirm:
             self.assertIn("agent", declared[name].allowed_callers)
             self.assertFalse(declared[name].requires_operator_confirmation)
@@ -109,7 +116,8 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         self.assertIn("速度控制", declared["sport.move"].description)
         self.assertIn("vyaw", declared["sport.move"].description)
         self.assertIn("不是原地转身", declared["sport.euler"].description)
-        self.assertIn("点头", declared["sport.euler"].description)
+        self.assertIn("expression.nod", declared["sport.euler"].description)
+        self.assertNotIn("完整点头或摇头需在姿态间切换", declared["sport.euler"].description)
         self.assertIn("Hello()", declared["sport.hello"].description)
         self.assertTrue(all(item.description for item in self.profile.capabilities))
         self.assertEqual(declared["sport.switch_avoid_mode"].risk_level, RiskLevel.CONFIRM)
@@ -488,6 +496,62 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         self.assertEqual(feedback[0].error_code, "command_rejected")
         self.assertEqual(driver.executed, [])
 
+    def test_execute_refreshes_safety_watchdog_across_language_and_nominal_waits(self):
+        clock = [100.0]
+        samples = []
+
+        class RefreshingDriver(FakeGo2Driver):
+            def drain_observations(self_inner):
+                return tuple(samples)
+
+            def execute(self_inner, command):
+                clock[0] += 3.0
+                return super().execute(command)
+
+        capabilities = {
+            "sport.stand_up": CapabilitySpec("sport.stand_up", {}, risk_level=RiskLevel.NORMAL),
+        }
+        driver = RefreshingDriver(self.profile.robot_id, capabilities)
+        adapter = UnitreeGo2Adapter(self.profile, driver)
+        adapter.connect()
+        adapter.discover_capabilities()
+        adapter.safety_supervisor._clock = lambda: clock[0]
+        adapter.safety_supervisor.watchdog_timeout_seconds = 1.0
+        adapter.safety_supervisor.heartbeat()
+
+        def push_sport_state() -> None:
+            samples.clear()
+            samples.append(
+                Observation(
+                    event_id=f"sport-{clock[0]}",
+                    robot_id=self.profile.robot_id,
+                    device_id="unitree-go2-sport-state",
+                    event_type="robot.sport_state",
+                    observed_at=utc_now(),
+                    received_at=utc_now(),
+                    payload={"position": [0.0, 0.0, 0.3], "velocity": [0.0, 0.0], "yaw_degrees": 0.0},
+                    source="unitree_sdk2",
+                    ttl_ms=1500,
+                )
+            )
+
+        clock[0] = 103.0
+        push_sport_state()
+        command = Command(
+            "command-refresh", "task-refresh", "trace-refresh", self.profile.robot_id,
+            "sport.stand_up", {},
+            utc_now() + timedelta(seconds=10),
+            risk_level=RiskLevel.NORMAL,
+        )
+        feedback = adapter.execute(command)
+        self.assertEqual([item.status for item in feedback], [
+            FeedbackStatus.ACCEPTED,
+            FeedbackStatus.RUNNING,
+            FeedbackStatus.SUCCEEDED,
+        ])
+        self.assertEqual(len(driver.executed), 1)
+        self.assertFalse(any(item.error_code == "watchdog_expired" for item in feedback))
+
     def test_runtime_requires_the_stop_action(self):
         driver = FakeGo2Driver(self.profile.robot_id)
         adapter = UnitreeGo2Adapter(self.profile, driver)
@@ -516,10 +580,17 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
     def test_composite_action_metadata_declares_sensor_and_retry_contracts(self):
         capabilities = {item.name: item for item in sport_capabilities()}
         for name in ("motion.turn_left", "motion.turn_right", "motion.turn_around"):
-            self.assertEqual(capabilities[name].risk_level, RiskLevel.CONFIRM)
+            self.assertEqual(capabilities[name].risk_level, RiskLevel.NORMAL)
             self.assertEqual(capabilities[name].completion, "measured")
             self.assertFalse(capabilities[name].retry_safe)
             self.assertEqual(capabilities[name].parameters, {})
+        for name in ("motion.back_up", "motion.strafe_left", "motion.strafe_right"):
+            self.assertEqual(capabilities[name].risk_level, RiskLevel.CONFIRM)
+            self.assertEqual(capabilities[name].completion, "measured")
+            self.assertFalse(capabilities[name].retry_safe)
+            self.assertEqual(set(capabilities[name].parameters), {"distance_m"})
+        self.assertEqual(capabilities["motion.back_up"].parameters["distance_m"].maximum, 3.0)
+        self.assertEqual(capabilities["motion.strafe_left"].parameters["distance_m"].maximum, 1.5)
         self.assertEqual(capabilities["expression.tilt_head"].parameters["direction"].value_type, "string")
         self.assertEqual(capabilities["expression.nod"].parameters["count"].minimum, 1.0)
         self.assertEqual(capabilities["expression.nod"].parameters["count"].maximum, 5.0)
@@ -535,6 +606,9 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         self.assertIsNone(validate_parameters(sport_action("expression.nod"), {"count": 2}))
         self.assertIsNotNone(validate_parameters(sport_action("expression.tilt_head"), {"direction": "up"}))
         self.assertIsNotNone(validate_parameters(sport_action("expression.nod"), {"count": 1.5}))
+        self.assertIsNone(validate_parameters(sport_action("motion.back_up"), {"distance_m": 1.0}))
+        self.assertIsNotNone(validate_parameters(sport_action("motion.back_up"), {"distance_m": 4.0}))
+        self.assertIsNotNone(validate_parameters(sport_action("motion.strafe_left"), {"distance_m": 2.0}))
 
     def test_turn_left_uses_fresh_imu_yaw_and_stops_after_target(self):
         from unittest.mock import patch
@@ -558,7 +632,7 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         }
         with patch("adapters.unitree_go2.motion.MOVE_RESEND_MS", 0):
             feedback = driver.execute(_sport_command(
-                self.profile, "motion.turn_left", {}, RiskLevel.CONFIRM,
+                self.profile, "motion.turn_left", {}, RiskLevel.NORMAL,
             ))
 
         self.assertEqual(feedback[-1].status, FeedbackStatus.SUCCEEDED)
@@ -606,12 +680,104 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
 
         driver._read_imu_yaw = read_yaw
         feedback = driver.execute(_sport_command(
-            self.profile, "motion.turn_left", {}, RiskLevel.CONFIRM,
+            self.profile, "motion.turn_left", {}, RiskLevel.NORMAL,
         ))
 
         self.assertEqual(feedback[-1].status, FeedbackStatus.FAILED)
         self.assertEqual(feedback[-1].error_code, "imu_unavailable")
-        self.assertEqual(calls, ["move", "stop_move"])
+        self.assertIn("move", calls)
+        self.assertEqual(calls[-1], "stop_move")
+
+    def test_turn_enters_free_walk_from_locked_idle_mode(self):
+        from unittest.mock import patch
+
+        calls = []
+        driver = _connected_driver(self.profile, calls)
+        driver._read_state = lambda: {
+            "mode": 0,
+            "error_code": 0,
+            "velocity": [0.0, 0.0, 0.0],
+            "yaw_speed": 0.0,
+        }
+        yaws = iter((0.0, 0.0, 0.7, 1.5))
+        driver._read_sensors = lambda: {
+            "streams": [{
+                "id": "sport",
+                "available": True,
+                "observed_at": utc_now().isoformat(),
+                "payload": {"imu": {"rpy": [0.0, 0.0, next(yaws)]}},
+            }]
+        }
+        with patch.object(driver, "_wait_for_duration", return_value=None), patch(
+            "adapters.unitree_go2.motion.MOVE_RESEND_MS", 0
+        ):
+            feedback = driver.execute(_sport_command(
+                self.profile, "motion.turn_left", {}, RiskLevel.NORMAL,
+            ))
+
+        self.assertEqual(feedback[-1].status, FeedbackStatus.SUCCEEDED)
+        self.assertEqual(calls[0], "switch_joystick")
+        self.assertIn("free_walk", calls)
+        self.assertIn("move", calls)
+        self.assertEqual(calls[-1], "stop_move")
+        self.assertEqual(feedback[-1].evidence.get("velocity_prep", {}).get("chosen"), "free_walk")
+
+    def test_turn_uses_move_nudge_when_mode_apis_return_minus_one(self):
+        from unittest.mock import patch
+
+        calls = []
+        codes = {
+            "switch_joystick": -1,
+            "free_walk": -1,
+            "balance_stand": -1,
+            "classic_walk": -1,
+            "move": 0,
+            "stop_move": 0,
+        }
+
+        def on_call(name):
+            return codes.get(name, 0)
+
+        driver = _connected_driver(self.profile, calls)
+        original = driver._library.go2_bridge_call.side_effect
+
+        def call(handle, action, numbers, count, has_flag, flag, output, output_capacity, error, error_capacity):
+            import ctypes
+
+            name = action.decode("utf-8") if isinstance(action, (bytes, bytearray)) else str(action)
+            calls.append(name)
+            code = on_call(name)
+            payload = f'{{"api_code":{code}}}\0'.encode()
+            ctypes.memmove(output, payload, len(payload))
+            return 1
+
+        driver._library.go2_bridge_call.side_effect = call
+        driver._read_state = lambda: {
+            "mode": 0,
+            "error_code": 0,
+            "velocity": [0.0, 0.0, 0.0],
+            "yaw_speed": 0.0,
+        }
+        yaws = iter((0.0, 0.0, 0.7, 1.5, 1.6))
+        driver._read_sensors = lambda: {
+            "streams": [{
+                "id": "sport",
+                "available": True,
+                "observed_at": utc_now().isoformat(),
+                "payload": {"imu": {"rpy": [0.0, 0.0, next(yaws)]}},
+            }]
+        }
+        with patch.object(driver, "_wait_for_duration", return_value=None), patch(
+            "adapters.unitree_go2.motion.MOVE_RESEND_MS", 0
+        ):
+            feedback = driver.execute(_sport_command(
+                self.profile, "motion.turn_left", {}, RiskLevel.NORMAL, seconds=12,
+            ))
+
+        self.assertEqual(feedback[-1].status, FeedbackStatus.SUCCEEDED)
+        self.assertEqual(feedback[-1].evidence.get("velocity_prep", {}).get("chosen"), "move_nudge")
+        self.assertIn("move", calls)
+        del original
 
     def test_sdk_driver_dispatches_stand_up_and_rejects_ranges_locally(self):
         calls = []
@@ -898,6 +1064,73 @@ class UnitreeGo2AdapterTests(unittest.TestCase):
         ))
         self.assertEqual(feedback[-1].error_code, "distance_unavailable")
         self.assertEqual(calls, [])
+
+    def test_back_up_uses_fixed_reverse_velocity_and_fused_distance(self):
+        from adapters.unitree_go2.motion import BACK_UP_SPEED_MPS
+
+        calls = []
+        driver = _connected_driver(self.profile, calls)
+        seen = {"n": 0}
+
+        def read_state():
+            seen["n"] += 1
+            distance = 0.0 if seen["n"] < 3 else 1.0
+            return {
+                "position": [-distance, 0.0, 0.0],
+                "mode": 1,
+                "error_code": 0,
+                "velocity": [-BACK_UP_SPEED_MPS, 0.0, 0.0],
+                "yaw_speed": 0.0,
+            }
+
+        driver._read_state = read_state
+        driver._try_read_sensors = lambda: {
+            "streams": [{
+                "id": "odometry",
+                "available": True,
+                "payload": {"position": [0.0 if seen["n"] < 3 else -1.0, 0.0, 0.0]},
+            }]
+        }
+        feedback = driver.execute(_sport_command(
+            self.profile, "motion.back_up", {"distance_m": 1.0}, RiskLevel.CONFIRM, seconds=5,
+        ))
+        self.assertEqual(feedback[-1].status, FeedbackStatus.SUCCEEDED)
+        self.assertEqual(feedback[-1].evidence["move_velocity"], [-BACK_UP_SPEED_MPS, 0.0, 0.0])
+        self.assertGreaterEqual(feedback[-1].evidence["traveled_m"], 1.0)
+        self.assertIn("stop_move", calls)
+
+    def test_strafe_left_uses_positive_lateral_velocity(self):
+        from adapters.unitree_go2.motion import STRAFE_SPEED_MPS
+
+        calls = []
+        driver = _connected_driver(self.profile, calls)
+        seen = {"n": 0}
+
+        def read_state():
+            seen["n"] += 1
+            distance = 0.0 if seen["n"] < 3 else 0.5
+            return {
+                "position": [0.0, distance, 0.0],
+                "mode": 1,
+                "error_code": 0,
+                "velocity": [0.0, STRAFE_SPEED_MPS, 0.0],
+                "yaw_speed": 0.0,
+            }
+
+        driver._read_state = read_state
+        driver._try_read_sensors = lambda: {
+            "streams": [{
+                "id": "odometry",
+                "available": True,
+                "payload": {"position": [0.0, 0.0 if seen["n"] < 3 else 0.5, 0.0]},
+            }]
+        }
+        feedback = driver.execute(_sport_command(
+            self.profile, "motion.strafe_left", {"distance_m": 0.5}, RiskLevel.CONFIRM, seconds=5,
+        ))
+        self.assertEqual(feedback[-1].status, FeedbackStatus.SUCCEEDED)
+        self.assertEqual(feedback[-1].evidence["move_velocity"], [0.0, STRAFE_SPEED_MPS, 0.0])
+        self.assertIn("stop_move", calls)
 
 
 class _FixedAgent:

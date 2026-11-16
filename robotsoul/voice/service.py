@@ -938,7 +938,11 @@ class VoiceService:
             return False
         intent = self._command_matcher(cleaned) if self._command_matcher is not None else None
         if intent is not None:
-            self._note("Info", f"闭集技能：{getattr(intent, 'skill', '')}")
+            steps = getattr(intent, "steps", None)
+            if steps:
+                self._note("Info", f"闭集计划：{[getattr(step, 'skill', '') for step in steps]}")
+            else:
+                self._note("Info", f"闭集技能：{getattr(intent, 'skill', '')}")
         self._turn_mark("dispatch")
         self._remember_dispatch(cleaned, mergeable=intent is None)
         self.gate.hold("runtime")

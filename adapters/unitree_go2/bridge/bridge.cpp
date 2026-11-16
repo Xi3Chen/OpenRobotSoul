@@ -5,6 +5,7 @@
 #include <unitree/idl/go2/SportModeState_.hpp>
 #include <unitree/robot/channel/channel_factory.hpp>
 #include <unitree/robot/channel/channel_subscriber.hpp>
+#include <unitree/robot/go2/obstacles_avoid/obstacles_avoid_client.hpp>
 #include <unitree/robot/go2/sport/sport_client.hpp>
 #include <unitree/robot/go2/vui/vui_client.hpp>
 
@@ -43,6 +44,7 @@ struct Bridge {
   std::mutex mutex;
   std::unique_ptr<unitree::robot::go2::SportClient> client;
   std::unique_ptr<unitree::robot::go2::VuiClient> vui;
+  std::unique_ptr<unitree::robot::go2::ObstaclesAvoidClient> obstacles;
   std::unique_ptr<Subscriber> subscriber;
   std::unique_ptr<LowSubscriber> low_subscriber;
   State state;
@@ -110,6 +112,7 @@ struct Bridge {
     }
     low_subscriber.reset();
     sensors.close();
+    obstacles.reset();
     vui.reset();
     client.reset();
     try {
@@ -310,6 +313,26 @@ SportResult invoke_volume(unitree::robot::go2::VuiClient& client,
   }
   SportResult result;
   result.code = client.SetVolume(static_cast<int>(level));
+  return result;
+}
+
+SportResult invoke_obstacles_avoid_set(unitree::robot::go2::ObstaclesAvoidClient& client,
+                                       const double* numbers, size_t number_count,
+                                       int has_flag, int flag) {
+  if (has_flag != 1 || number_count != 0) {
+    throw std::runtime_error("unexpected obstacles avoid parameters");
+  }
+  if (flag != 0 && flag != 1) {
+    throw std::runtime_error("unexpected obstacles avoid parameters");
+  }
+  SportResult result;
+  result.code = client.SwitchSet(flag == 1);
+  if (result.code == 0) {
+    bool enabled = false;
+    if (client.SwitchGet(enabled) == 0) {
+      result.extra = std::string("\"enabled\":") + (enabled ? "true" : "false");
+    }
+  }
   return result;
 }
 
@@ -568,6 +591,16 @@ int go2_bridge_call(void* handle, const char* action, const double* numbers,
         bridge->vui = std::move(created);
       }
       result = invoke_volume(*bridge->vui, numbers, number_count, has_flag, flag);
+    } else if (action_name == "obstacles_avoid_set") {
+      if (!bridge->obstacles) {
+        std::unique_ptr<unitree::robot::go2::ObstaclesAvoidClient> created(
+            new unitree::robot::go2::ObstaclesAvoidClient());
+        created->SetTimeout(5.0f);
+        created->Init();
+        bridge->obstacles = std::move(created);
+      }
+      result = invoke_obstacles_avoid_set(
+          *bridge->obstacles, numbers, number_count, has_flag, flag);
     } else {
       result = invoke_sport(*client, action_name, numbers, number_count, has_flag, flag);
     }

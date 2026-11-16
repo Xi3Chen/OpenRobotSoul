@@ -1,5 +1,5 @@
 (() => {
-  const state = { csrf: null, overview: null, pendingAction: null, voice: null, voiceBusy: false, levels: null, task: null, taskPoll: null };
+  const state = { csrf: null, overview: null, pendingAction: null, voice: null, voiceBusy: false, levels: null, task: null, taskPoll: null, controlsSignature: null, capabilitiesSignature: null };
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -21,6 +21,8 @@
   function showLogin() {
     clearTimeout(state.taskPoll);
     state.task = null;
+    state.controlsSignature = null;
+    state.capabilitiesSignature = null;
     $("#task-cancel").hidden = true;
     $("#task-progress").textContent = "";
     state.csrf = null;
@@ -275,8 +277,16 @@
     }
   }
 
+  function capabilitySignature(capabilities) {
+    return JSON.stringify(capabilities);
+  }
+
   function renderCapabilities(capabilities) {
     const root = $("#capability-list");
+    const signature = capabilitySignature(capabilities);
+    if (signature === state.capabilitiesSignature) return;
+    state.capabilitiesSignature = signature;
+    const scrollTop = root.scrollTop;
     root.replaceChildren();
     if (!capabilities.length) {
       root.append(empty("当前 profile 未启用可调用能力"));
@@ -312,6 +322,7 @@
       row.append(name, parameters, risk, access);
       root.append(row);
     }
+    root.scrollTop = scrollTop;
   }
 
   function callerLabel(caller) {
@@ -320,8 +331,12 @@
 
   function renderControls(capabilities) {
     const root = $("#controls-list");
-    root.replaceChildren();
     const available = capabilities.filter(item => item.dashboard_allowed);
+    const signature = capabilitySignature(available);
+    if (signature === state.controlsSignature) return;
+    state.controlsSignature = signature;
+    const scrollTop = root.scrollTop;
+    root.replaceChildren();
     if (!available.length) {
       root.append(empty("当前没有开放给 Dashboard 的控制操作"));
       return;
@@ -355,6 +370,7 @@
     for (const capability of available) {
       if (!grouped.has(capability)) root.append(controlRow(capability));
     }
+    root.scrollTop = scrollTop;
   }
 
   function controlRow(capability) {
@@ -442,7 +458,8 @@
       : capability.ai_review_required
         ? "服务端将先对这组固定参数进行 AI 复核。"
         : "本次由已登录的操作员确认后执行。";
-    const operatorText = capability.risk_level === "high" || capability.operator_confirmation_required ? "本次执行会记录为当前操作员的明确确认。" : "";
+    const needsOperator = capability.risk_level === "high" || capability.operator_confirmation_required;
+    const operatorText = needsOperator ? "本次执行需重新输入当前账户密码，并记录为操作员确认。" : "";
     $("#dialog-description").textContent = `目标机器人：${text(state.overview?.robot?.robot_id)}。${reviewText}${operatorText}操作仍会经过服务端策略和适配器本地检查。`;
     const summary = $("#dialog-parameters");
     summary.replaceChildren();
@@ -457,12 +474,15 @@
     }
     $("#explicit-confirm-row").classList.toggle("hidden", capability.risk_level !== "high");
     $("#explicit-confirm").checked = false;
+    $("#dialog-password-row").classList.toggle("hidden", !needsOperator);
+    $("#dialog-operator-password").value = "";
     $("#dialog-execute").disabled = capability.risk_level === "high";
     $("#dialog-execute").className = capability.risk_level === "high" ? "danger-button" : "primary-button";
     $("#action-dialog").showModal();
+    if (needsOperator) $("#dialog-operator-password").focus();
   }
 
-  async function invokeAction(capability, parameters) {
+  async function invokeAction(capability, parameters, operatorPassword = null) {
     $("#action-dialog").close();
     try {
       const prepared = await request("/api/actions/prepare", {
@@ -471,8 +491,8 @@
       });
       const body = {};
       if (prepared.requires_operator_confirmation) {
-        const password = window.prompt("请输入当前账户密码以确认本次操作");
-        if (password === null) throw new Error("已取消操作员确认");
+        const password = typeof operatorPassword === "string" ? operatorPassword : "";
+        if (!password) throw new Error("请输入当前账户密码以确认本次操作");
         body.operator_password = password;
       }
       const data = await request("/api/actions/execute", {
@@ -1040,8 +1060,15 @@
   $("#dialog-execute").addEventListener("click", () => {
     if (!state.pendingAction) return;
     const { capability, parameters } = state.pendingAction;
+    const needsOperator = capability.risk_level === "high" || capability.operator_confirmation_required;
+    const password = needsOperator ? $("#dialog-operator-password").value : null;
+    if (needsOperator && !password) {
+      showError("请输入当前账户密码以确认本次操作");
+      $("#dialog-operator-password").focus();
+      return;
+    }
     state.pendingAction = null;
-    invokeAction(capability, parameters);
+    invokeAction(capability, parameters, password);
   });
   $("#dialog-cancel").addEventListener("click", () => {
     state.pendingAction = null;
@@ -1050,6 +1077,7 @@
   $("#action-dialog").addEventListener("close", () => {
     state.pendingAction = null;
     $("#explicit-confirm").checked = false;
+    $("#dialog-operator-password").value = "";
   });
   $("#sign-out").addEventListener("click", async () => {
     await endVoiceCall({ quiet: true });

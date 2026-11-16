@@ -8,7 +8,7 @@
   },
   "speech": {
     "asr": {
-      "base_url": "http://192.168.99.74:9000/v1",
+      "base_url": "http://192.168.99.137:9000/v1",
       "model": "qwen3-asr",
       "timeout_seconds": 30,
       "api_key_env": "ROBOTSOUL_ASR_API_KEY"

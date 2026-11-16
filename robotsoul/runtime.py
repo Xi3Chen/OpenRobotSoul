@@ -87,11 +87,15 @@ def step_allowance_ms(capability: CapabilitySpec, parameters: dict[str, Any]) ->
 
 def _measured_budget_ms(parameters: dict[str, Any], timeout_ms: int, estimate_ms: int) -> int:
     distance = parameters.get("distance_m")
-    speed = parameters.get("vx")
     if isinstance(distance, bool) or not isinstance(distance, (int, float)):
-        return max(timeout_ms, estimate_ms)
+        # Turns and other measured skills without distance need StopMove headroom
+        # after the skill's own motion budget, or runtime masks the real outcome.
+        return max(timeout_ms, estimate_ms) + 5000
+    speed = parameters.get("vx")
     if isinstance(speed, bool) or not isinstance(speed, (int, float)) or abs(float(speed)) < 0.2:
-        return max(timeout_ms, estimate_ms)
+        # Semantic translate skills only pass distance_m; budget from a safe 0.5 m/s.
+        budget = int(abs(float(distance)) / 0.5 * 2000) + 5000
+        return min(max(budget, estimate_ms, 3000), timeout_ms)
     budget = int(abs(float(distance)) / abs(float(speed)) * 2000) + 5000
     return min(max(budget, 3000), timeout_ms)
 
@@ -1004,6 +1008,12 @@ class RobotRuntime:
                 return self._finish_failure(prior_feedback, task, history, f"Command could not be persisted: {exc}", transition, record)
         supervisor = self.safety_supervisor
         if supervisor is not None:
+            refresh = getattr(self.adapter, "refresh_safety_state", None)
+            if callable(refresh):
+                try:
+                    refresh()
+                except Exception as exc:
+                    record("safety.refresh_failed", {"phase": "before", "error": str(exc)})
             supervisor.bind_conditions(command.command_id, review_conditions)
             safety_check = supervisor.check_command(command, phase="before")
             if not safety_check.allowed:
@@ -1111,6 +1121,12 @@ class RobotRuntime:
             self._active_commands.pop(task.task_id, None)
             confirmation = self._cancel_confirmations.pop(task.task_id, None)
         if supervisor is not None:
+            refresh = getattr(self.adapter, "refresh_safety_state", None)
+            if callable(refresh):
+                try:
+                    refresh()
+                except Exception as exc:
+                    record("safety.refresh_failed", {"phase": "after", "error": str(exc)})
             landing_check = supervisor.after_feedback(command, feedback)
             if not landing_check.allowed and any(item.status == FeedbackStatus.SUCCEEDED for item in feedback):
                 self.review_metrics.record_condition_failure(

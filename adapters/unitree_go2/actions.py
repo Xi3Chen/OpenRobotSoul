@@ -16,9 +16,10 @@ Ordinary posture, gait changes, dances, recovery stand, and timed motion
 execute after schema checks. Confirm-tier covers motions that need a large
 clear area and that obstacle avoidance cannot make safe (flips, jumps, pounce,
 handstand, free bound), plus the obstacle-avoidance mode switch, the joystick
-source switch, and the auto-recover switch. No Go2 action is high-tier. High is
-reserved for switches that disable the robot's own protection, which are not
-exposed.
+source switch, and the auto-recover switch. High-tier is reserved for switches
+that change the robot's own protection service; currently that is
+``obstacles.avoid_set`` (ObstaclesAvoidClient::SwitchSet), Dashboard-only with
+fresh operator password confirmation.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from dataclasses import dataclass
 from math import isfinite, pi, trunc
 from typing import Any
 
+from adapters.unitree_go2.motion import BACK_UP_SPEED_MPS, STRAFE_SPEED_MPS
 from robotsoul.models import CapabilitySpec, ParameterSpec, RiskLevel
 
 
@@ -70,6 +72,7 @@ class SportAction:
     completion: str = "accepted"
     retry_safe: bool = False
     target_radians: float | None = None
+    move_velocity: tuple[float, float, float] | None = None
 
     def capability(self) -> CapabilitySpec:
         high = self.risk_level == RiskLevel.HIGH
@@ -139,6 +142,7 @@ def _action(
     timeout_ms: int | None = None,
     retry_safe: bool = False,
     target_radians: float | None = None,
+    move_velocity: tuple[float, float, float] | None = None,
 ) -> SportAction:
     default_completion, default_estimate, default_timeout = _timing(bridge_name)
     return SportAction(
@@ -154,6 +158,7 @@ def _action(
         completion=default_completion if completion is None else completion,
         retry_safe=retry_safe,
         target_radians=target_radians,
+        move_velocity=move_velocity,
     )
 
 
@@ -164,8 +169,16 @@ def _action(
 # Methods without a comment keep the SDK name and do not add an unverified body effect.
 _SDK_DESCRIPTION = {
     "stop_move": "停止高层速度运动。SDK 示例 go2w_sport_client.cpp 注释为「停止运动」，不是卸力。",
-    "balance_stand": "进入平衡站立。SDK 示例注释为「平衡站立」；go2_sport_client.cpp 写明该姿态可由 roll、pitch、yaw 调整。做点头、摇头、歪头或抬头低头前先进入此模式，再用 sport.euler。",
-    "stand_up": "切换到站立锁定。SDK 示例 go2w_sport_client.cpp 注释为「站立锁定」，go2_sport_client.cpp 注释为 position stand up，也作为默认站立。",
+    "balance_stand": (
+        "进入平衡站立。SDK 示例注释为「平衡站立」；go2_sport_client.cpp 写明该姿态可由 roll、pitch、yaw 调整。"
+        "调用 sport.euler 保持某个姿态角前先进入此模式。"
+        "点头、摇头、歪头请用 expression.nod / expression.shake_head / expression.tilt_head，不要手拼 Euler 序列。"
+    ),
+    "stand_up": (
+        "切换到站立锁定。口语：站起来、起立、站立、起来。"
+        "SDK 示例 go2w_sport_client.cpp 注释为「站立锁定」，go2_sport_client.cpp 注释为 position stand up，也作为默认站立。"
+        "parameters 为空。若用户同时要求转向，先本技能再接 motion.turn_*，不要追问。"
+    ),
     "stand_down": "趴下。SDK 示例注释为「趴下」和 position stand down。",
     "sit": "请求坐下。SDK 示例 go2_sport_client.cpp 将 Sit() 列为特殊动作，头文件没有更多说明。",
     "rise_sit": "请求从坐姿起身。SDK 示例将 RiseSit() 列为特殊动作，头文件没有更多说明。",
@@ -197,22 +210,30 @@ _SDK_DESCRIPTION = {
     "walk_upright": "SportClient::WalkUpright(flag)，直立行走。enabled 为真时进入，为假时退出。头文件没有更多说明。",
     "cross_step": "SportClient::CrossStep(flag)，交叉步。enabled 为真时进入，为假时退出。头文件没有更多说明。",
     "auto_recover_set": "SportClient::AutoRecoverSet(flag)，设置摔倒后是否自动恢复。enabled 为真时开启，为假时关闭。",
+    "obstacles_avoid_set": (
+        "ObstaclesAvoidClient::SwitchSet(enable)，打开或关闭机身避障服务。"
+        "enabled 为真时开启服务，为假时关闭服务。关闭会去掉机身避障保护，属于高危操作；"
+        "仅 Dashboard 操作员可执行，并需重新输入当前账户密码。"
+        "这与 sport.switch_avoid_mode / sport.free_avoid 不同：后两者不替代本服务总开关。"
+    ),
     "euler": (
-        "SportClient::Euler(roll, pitch, yaw)，在平衡站立下设定机身姿态角目标，不是原地转身。"
-        "Go2 无独立颈部：pitch 用于抬头低头/点头，yaw 用于左右扭身/摇头，roll 用于左右歪身/歪头。"
-        "单次调用只设一个姿态；完整点头或摇头需在姿态间切换（可用顺序计划）。"
-        "用户要左转、右转、转身、调头时不要用本技能，改用 sport.move 的 vyaw。"
+        "SportClient::Euler(roll, pitch, yaw)，在平衡站立下设定并保持机身姿态角，不是原地转身，也不是点头/摇头/歪头。"
+        "Go2 无独立颈部：pitch 抬头低头，yaw 左右扭身，roll 左右侧倾；单次调用只设一个姿态并保持。"
+        "用户要点头用 expression.nod，摇头用 expression.shake_head，歪头用 expression.tilt_head。"
+        "用户要左转、右转、转身、调头时不要用本技能，改用 motion.turn_* 或 sport.move 的 vyaw。"
         "SDK 示例写明平衡站立可由这三个值控制，但没有标明单位。"
     ),
     "move": (
-        "按时间做速度控制移动。vx 前进/后退，vy 左右平移，vyaw 原地转向角速度；"
-        "用户要左转、右转、转身、调头时用 vyaw（vx/vy 可为 0），不要用 sport.euler。"
+        "按时间做速度控制移动。vx 前进/后退，vy 左右平移，vyaw 原地转向角速度。"
+        "固定左转/右转约 90° 或向后转 180° 时优先用 motion.turn_left / motion.turn_right / motion.turn_around；"
+        "只有任意角度或任意时长原地转才用本技能的 vyaw（vx/vy 可为 0）。不要用 sport.euler 转身。"
         "duration_ms 是整段时长，最长 120 秒。原生 Move 单次最长约 2 秒，程序按这个上限计算循环次数并重复发送，到时调用 StopMove。"
         "一次移动只调用一次，不要拆成多步。SDK 没有标明速度单位。"
     ),
     "move_distance": (
         "按距离移动。vx/vy/vyaw 含义同 sport.move；distance_m 是相对起点的水平位移，范围 0.2 到 8 米。"
-        "转身或调头若只需改变朝向、不要求走完一段距离，优先用 sport.move 的 vyaw。"
+        "纯后退优先用 motion.back_up；纯左右侧移优先用 motion.strafe_left / motion.strafe_right。"
+        "转身或调头若只需改变朝向、不要求走完一段距离，优先用 motion.turn_*；任意角度再退回 sport.move 的 vyaw。"
         "程序同时读取机体位置和雷达里程计，读数一致后调用 StopMove。到截止预算仍不够则失败。"
         "一次移动只调用一次，不要拆成多步。位置按米解释，坐标系未另行换算。"
     ),
@@ -257,6 +278,18 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
     _action("walk_upright", "flag", RiskLevel.NORMAL, _FLAG),
     _action("cross_step", "flag", RiskLevel.NORMAL, _FLAG),
     _action("auto_recover_set", "flag", RiskLevel.CONFIRM, _FLAG),
+    _action(
+        "obstacles_avoid_set",
+        "flag",
+        RiskLevel.HIGH,
+        _FLAG,
+        prefix="obstacles",
+        skill="obstacles.avoid_set",
+        description=_SDK_DESCRIPTION["obstacles_avoid_set"],
+        completion="accepted",
+        estimate_ms=1500,
+        timeout_ms=8000,
+    ),
     _action("euler", "euler", RiskLevel.NORMAL, _EULER),
     _action("move", "move", RiskLevel.NORMAL, _MOVE),
     _action(
@@ -271,31 +304,78 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
         timeout_ms=90000,
     ),
     _action(
-        "move", "turn", RiskLevel.CONFIRM,
+        "move", "turn", RiskLevel.NORMAL,
         skill="motion.turn_left",
-        description="向左闭环转向 90 度。需要新鲜 IMU yaw；转向不可逆，不可安全重试。",
-        completion="measured", estimate_ms=5000, timeout_ms=10000,
+        description=(
+            "原地向左闭环转向固定 90°。口语：左转、向左转、往左转。"
+            "parameters 必须为 {}，不要填角度。用 IMU yaw 闭环；不可安全重试。"
+        ),
+        completion="measured", estimate_ms=5000, timeout_ms=12000,
         target_radians=pi / 2,
     ),
     _action(
-        "move", "turn", RiskLevel.CONFIRM,
+        "move", "turn", RiskLevel.NORMAL,
         skill="motion.turn_right",
-        description="向右闭环转向 90 度。需要新鲜 IMU yaw；转向不可逆，不可安全重试。",
-        completion="measured", estimate_ms=5000, timeout_ms=10000,
+        description=(
+            "原地向右闭环转向固定 90°。口语：右转、向右转、往右转。"
+            "parameters 必须为 {}，不要填角度。用 IMU yaw 闭环；不可安全重试。"
+        ),
+        completion="measured", estimate_ms=5000, timeout_ms=12000,
         target_radians=-pi / 2,
     ),
     _action(
-        "move", "turn", RiskLevel.CONFIRM,
+        "move", "turn", RiskLevel.NORMAL,
         skill="motion.turn_around",
-        description="向左闭环转向 180 度。需要新鲜 IMU yaw；转向不可逆，不可安全重试。",
-        completion="measured", estimate_ms=10000, timeout_ms=15000,
+        description=(
+            "原地向左闭环转向固定 180°（掉头）。口语：向后转、往后转、掉头、转过身、转身、转一百八十度。"
+            "parameters 必须为 {}，角度已固定，不要追问是否 180° 或面向哪边。"
+            "用 IMU yaw 闭环直至到位；completion=measured。不可安全重试。"
+        ),
+        completion="measured", estimate_ms=10000, timeout_ms=25000,
         target_radians=pi,
+    ),
+    _action(
+        "move", "translate", RiskLevel.CONFIRM,
+        {"distance_m": _number(0.2, 3.0)},
+        skill="motion.back_up",
+        description=(
+            "按距离向后平移。口语：后退、往后退、向后走一米。"
+            "参数只有 distance_m（0.2–3.0 米）；速度固定为安全后退值，不要填 vx/vy。"
+            "用融合位置与里程计闭环；后方盲区，不可安全重试。"
+        ),
+        completion="measured", estimate_ms=8000, timeout_ms=20000,
+        move_velocity=(-BACK_UP_SPEED_MPS, 0.0, 0.0),
+    ),
+    _action(
+        "move", "translate", RiskLevel.CONFIRM,
+        {"distance_m": _number(0.2, 1.5)},
+        skill="motion.strafe_left",
+        description=(
+            "按距离向左侧移。口语：向左平移、向左侧移、往左横移。"
+            "参数只有 distance_m（0.2–1.5 米）；不要填 vx/vy。用位置闭环；不可安全重试。"
+        ),
+        completion="measured", estimate_ms=6000, timeout_ms=15000,
+        move_velocity=(0.0, STRAFE_SPEED_MPS, 0.0),
+    ),
+    _action(
+        "move", "translate", RiskLevel.CONFIRM,
+        {"distance_m": _number(0.2, 1.5)},
+        skill="motion.strafe_right",
+        description=(
+            "按距离向右侧移。口语：向右平移、向右侧移、往右横移。"
+            "参数只有 distance_m（0.2–1.5 米）；不要填 vx/vy。用位置闭环；不可安全重试。"
+        ),
+        completion="measured", estimate_ms=6000, timeout_ms=15000,
+        move_velocity=(0.0, -STRAFE_SPEED_MPS, 0.0),
     ),
     _action(
         "euler", "expression", RiskLevel.NORMAL,
         {"direction": ParameterSpec("string", max_length=5)},
         prefix="expression", skill="expression.tilt_head",
-        description="向指定方向轻微歪头，保持后恢复中立。方向为 left 或 right；重复执行安全。",
+        description=(
+            "向指定方向轻微歪头，保持后恢复中立。口语：歪头、向左歪头、向右歪头。"
+            "direction 为 left 或 right；不要用 sport.euler 手拼。重复执行安全。"
+        ),
         completion="nominal", estimate_ms=2000, timeout_ms=7000,
         retry_safe=True,
     ),
@@ -303,7 +383,10 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
         "euler", "expression", RiskLevel.NORMAL,
         {"count": _number(1, 5)},
         prefix="expression", skill="expression.nod",
-        description="点头 1 到 5 次，每次向下再向上，完成后恢复中立；重复执行安全。",
+        description=(
+            "点头 1 到 5 次，每次向下再向上，完成后恢复中立。口语：点头、点个头、点一下头。"
+            "不要用 sport.euler 手拼序列。重复执行安全。"
+        ),
         completion="nominal", estimate_ms=6000, timeout_ms=11000,
         retry_safe=True,
     ),
@@ -311,7 +394,10 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
         "euler", "expression", RiskLevel.NORMAL,
         {"count": _number(1, 5)},
         prefix="expression", skill="expression.shake_head",
-        description="左右摇头 1 到 5 次，每次左摆再右摆，完成后恢复中立；重复执行安全。",
+        description=(
+            "左右摇头 1 到 5 次，每次左摆再右摆，完成后恢复中立。口语：摇头、摇摇头。"
+            "不要用 sport.euler 手拼序列。重复执行安全。"
+        ),
         completion="nominal", estimate_ms=6000, timeout_ms=11000,
         retry_safe=True,
     ),
@@ -397,7 +483,7 @@ def validate_parameters(action: SportAction, parameters: dict[str, Any]) -> str 
 def native_arguments(action: SportAction, parameters: dict[str, Any]) -> tuple[list[float], bool | None]:
     if action.kind in {"none", "query"}:
         return [], None
-    if action.kind in {"turn", "expression"}:
+    if action.kind in {"turn", "expression", "translate"}:
         return [], None
     if action.kind == "euler":
         return [float(parameters[name]) for name in ("roll", "pitch", "yaw")], None

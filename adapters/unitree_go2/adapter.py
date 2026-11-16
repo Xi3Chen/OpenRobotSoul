@@ -122,6 +122,25 @@ class UnitreeGo2Adapter:
                 self.safety_supervisor.update_state(observation.payload, observed_at=observation.observed_at)
         return observations
 
+    def refresh_safety_state(self) -> bool:
+        """Pull the latest sport state into the local safety supervisor.
+
+        Language waits and nominal-duration sleeps do not drain observations, so
+        command/landing checks must refresh explicitly or the state watchdog expires.
+        """
+        if not self.connected:
+            return False
+        try:
+            observations = self.drain_observations()
+        except Exception as exc:
+            runtime_log("Go2", "Warning", f"安全状态刷新失败：{exc}")
+            observations = ()
+        if any(item.event_type == "robot.sport_state" for item in observations):
+            return True
+        # Driver is healthy but the latest sport sample was outside TTL: keep the
+        # connection heartbeat alive so on-robot waits do not fail closed spuriously.
+        return self.health()
+
     def sensor_snapshot(self) -> dict[str, Any]:
         if not self.connected:
             return {"streams": []}
@@ -140,6 +159,7 @@ class UnitreeGo2Adapter:
         error = self._validate_command(command)
         if error:
             return (self._feedback(command, FeedbackStatus.FAILED, error, "command_rejected"),)
+        self.refresh_safety_state()
         local_check = self.safety_supervisor.check_command(command, phase="before")
         if not local_check.allowed:
             return (
@@ -152,6 +172,7 @@ class UnitreeGo2Adapter:
                 ),
             )
         feedback = self.driver.execute(command)
+        self.refresh_safety_state()
         landing_check = self.safety_supervisor.after_feedback(command, feedback)
         if not landing_check.allowed and any(item.status == FeedbackStatus.SUCCEEDED for item in feedback):
             return feedback + (

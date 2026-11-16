@@ -74,6 +74,7 @@ CAPABILITY_LABELS = {
     "sport.left_flip": "向左侧翻",
     "sport.back_flip": "后空翻",
     "sport.switch_avoid_mode": "切换避障模式",
+    "obstacles.avoid_set": "打开/关闭避障服务",
     "sport.pose": "摆姿势",
     "sport.classic_walk": "经典步态",
     "sport.switch_joystick": "切换手柄控制",
@@ -84,7 +85,16 @@ CAPABILITY_LABELS = {
     "sport.walk_upright": "直立行走",
     "sport.cross_step": "交叉步",
     "sport.auto_recover_set": "设置摔倒自动恢复",
-    "sport.euler": "机身姿态（点头/摇头/歪头）",
+    "sport.euler": "设定机身姿态角",
+    "motion.turn_left": "向左转 90°",
+    "motion.turn_right": "向右转 90°",
+    "motion.turn_around": "向后转 180°",
+    "motion.back_up": "后退指定距离",
+    "motion.strafe_left": "向左侧移",
+    "motion.strafe_right": "向右侧移",
+    "expression.tilt_head": "歪头",
+    "expression.nod": "点头",
+    "expression.shake_head": "摇头",
     "sport.move": "按时间移动/转向",
     "sport.move_distance": "按距离移动",
     "sport.speed_level": "设置速度档位",
@@ -101,9 +111,11 @@ PARAMETER_LABELS = {
     "vy": "侧向速度",
     "vyaw": "转向速度",
     "duration_ms": "持续时间（毫秒）",
-    "roll": "横滚（歪头）",
-    "pitch": "俯仰（点头）",
-    "yaw": "扭身（摇头，非转身）",
+    "roll": "横滚角",
+    "pitch": "俯仰角",
+    "yaw": "扭身角（非转身）",
+    "direction": "方向（left/right）",
+    "count": "次数",
     "level": "速度档位",
     "volume": "音量（0到10）",
     "enabled": "开关",
@@ -588,7 +600,10 @@ class DashboardService:
         return payload
 
     def _capability_view(self, name: str, capability: Any) -> dict[str, Any]:
-        risk = getattr(capability, "risk_level", "normal")
+        raw_risk = getattr(capability, "risk_level", "normal")
+        risk = getattr(raw_risk, "value", raw_risk)
+        if not isinstance(risk, str):
+            risk = str(risk)
         callers = sorted(getattr(capability, "allowed_callers", ("agent", "dashboard")))
         dashboard_allowed = "dashboard" in callers
         enabled = True
@@ -659,7 +674,10 @@ class DashboardService:
         digest = hashlib.sha256(
             json.dumps(binding, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        risk = getattr(capability, "risk_level", "normal")
+        raw_risk = getattr(capability, "risk_level", "normal")
+        risk = getattr(raw_risk, "value", raw_risk)
+        if not isinstance(risk, str):
+            risk = str(risk)
         requires_operator = (
             risk == "high"
             or getattr(capability, "requires_operator_confirmation", False)
@@ -686,7 +704,7 @@ class DashboardService:
             "operation": skill,
             "label": CAPABILITY_LABELS.get(skill, skill),
             "parameters": challenge.parameters,
-            "risk_level": getattr(capability, "risk_level", "normal"),
+            "risk_level": risk,
             "ai_review_required": ai_review_required,
             "requires_operator_confirmation": requires_operator,
         }
@@ -718,7 +736,10 @@ class DashboardService:
             )
             if not hmac.compare_digest(digest, challenge.digest):
                 raise PermissionError("Action confirmation does not match its parameters")
-            risk = getattr(capability, "risk_level", "normal")
+            raw_risk = getattr(capability, "risk_level", "normal")
+            risk = getattr(raw_risk, "value", raw_risk)
+            if not isinstance(risk, str):
+                risk = str(risk)
             requires_operator = (
                 risk == "high"
                 or getattr(capability, "requires_operator_confirmation", False)

@@ -166,6 +166,8 @@ textarea { min-height: 74px; resize: vertical; }
 .parameter-summary dd { margin: 5px 0 0; font-size: 13px; font-weight: 600; }
 .explicit-confirm { display: flex; align-items: start; gap: 9px; padding: 12px 0; font-size: 13px; line-height: 1.45; }
 .explicit-confirm input { width: 18px; height: 18px; margin: 0; accent-color: var(--red); }
+.dialog-password { display: grid; gap: 6px; padding: 4px 0 8px; font-size: 13px; font-weight: 600; }
+.dialog-password.hidden { display: none; }
 .dialog-actions { display: flex; justify-content: end; gap: 10px; margin-top: 16px; }
 .settings-form { display: grid; gap: 12px; max-width: 760px; }
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }

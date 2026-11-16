@@ -14,8 +14,10 @@ from math import hypot, isfinite, pi
 
 NATIVE_MOVE_MS = 2000
 MOVE_RESEND_MS = 500
-TURN_SPEED_RAD_S = 0.4
+TURN_SPEED_RAD_S = 0.8
 TURN_TOLERANCE_RAD = 0.08
+BACK_UP_SPEED_MPS = 0.5
+STRAFE_SPEED_MPS = 0.3
 
 
 def move_cycle_count(duration_ms: int, slice_ms: int = NATIVE_MOVE_MS) -> int:
