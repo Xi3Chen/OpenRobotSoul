@@ -13,6 +13,13 @@ class CapabilityProfileTests(unittest.TestCase):
             self.assertTrue(all(capability.allowed_callers for capability in profile.capabilities))
             self.assertTrue(all(capability.risk_level in RiskLevel for capability in profile.capabilities))
 
+    def test_agent_capabilities_have_action_descriptions(self):
+        for profile_id in ("simulator-basic", "simulator-compact", "mimax2-basic", "unitree-go2-development"):
+            profile = load_profile(profile_id)
+            for capability in profile.capabilities:
+                if "agent" in capability.allowed_callers and capability.risk_level != RiskLevel.HIGH:
+                    self.assertTrue(capability.description.strip(), f"{profile_id}: {capability.name}")
+
     def test_capability_requires_explicit_risk_and_caller_policy(self):
         with self.assertRaisesRegex(ValueError, "Missing capability fields"):
             _parse_capability({"name": "test", "parameters": {}})

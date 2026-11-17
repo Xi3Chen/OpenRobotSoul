@@ -16,7 +16,8 @@
       "requires_operator_confirmation": false,
       "parameters": {"enabled": {"type": "boolean"}},
       "timeout_ms": 1500,
-      "required": true
+      "required": true,
+      "description": "将 MiMax2 闪光灯明确设为启用或关闭：enabled=true 开启，enabled=false 关闭；这是设置目标状态，不是切换当前状态。设备不可用或无写入权限时动作会失败；设备读回状态不符合目标时会失败。成功反馈包含设备读回值；若设备节点不可读则状态无法确认。"
     }
   ]
 }

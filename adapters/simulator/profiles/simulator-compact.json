@@ -16,7 +16,8 @@
       "requires_operator_confirmation": false,
       "parameters": {"text": {"type": "string", "max_length": 160}},
       "timeout_ms": 5000,
-      "required": true
+      "required": true,
+      "description": "在模拟器中播报一段文本，text 必须是用户要求或对当前结果的简短说明，最多 160 个字符。执行反馈只证明模拟动作完成，不代表真实设备已播报。"
     },
     {
       "name": "head.look",
@@ -27,7 +28,8 @@
         "yaw_deg": {"type": "number", "min": -30, "max": 30},
         "pitch_deg": {"type": "number", "min": -10, "max": 15}
       },
-      "timeout_ms": 3000
+      "timeout_ms": 3000,
+      "description": "在模拟器中设置头部朝向，yaw_deg 左右转动、pitch_deg 抬头或低头；必须提供两个数值，分别在 -30..30 度和 -10..15 度范围内。反馈只代表模拟动作完成，不代表真实设备姿态。"
     }
   ]
 }

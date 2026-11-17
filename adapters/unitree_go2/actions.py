@@ -227,14 +227,16 @@ _SDK_DESCRIPTION = {
         "按时间做速度控制移动。vx 前进/后退，vy 左右平移，vyaw 原地转向角速度。"
         "固定左转/右转约 90° 或向后转 180° 时优先用 motion.turn_left / motion.turn_right / motion.turn_around；"
         "只有任意角度或任意时长原地转才用本技能的 vyaw（vx/vy 可为 0）。不要用 sport.euler 转身。"
-        "duration_ms 是整段时长，最长 120 秒。原生 Move 单次最长约 2 秒，程序按这个上限计算循环次数并重复发送，到时调用 StopMove。"
-        "一次移动只调用一次，不要拆成多步。SDK 没有标明速度单位。"
+        "duration_ms 是整段时长，范围 200 毫秒到 120 秒；SDK 没有标明速度单位。"
+        "程序按约 2 秒周期重复发送并在到时请求 StopMove；timed 只证明本地周期结束且 StopMove 被接受，不证明走过指定距离或转到指定角度。"
+        "一次连续移动只调用一次，不要拆成多步。"
     ),
     "move_distance": (
-        "按距离移动。vx/vy/vyaw 含义同 sport.move；distance_m 是相对起点的水平位移，范围 0.2 到 8 米。"
+        "按距离直线移动；vx/vy/vyaw 含义同 sport.move，必须提供三个速度分量和 distance_m（0.2 到 8 米）。"
+        "distance_m 始终是正的水平路程目标；前进/后退/侧移方向由速度分量决定，SDK 未标明速度单位。"
         "纯后退优先用 motion.back_up；纯左右侧移优先用 motion.strafe_left / motion.strafe_right。"
-        "转身或调头若只需改变朝向、不要求走完一段距离，优先用 motion.turn_*；任意角度再退回 sport.move 的 vyaw。"
-        "程序同时读取机体位置和雷达里程计，读数一致后调用 StopMove。到截止预算仍不够则失败。"
+        "只改变朝向用 motion.turn_*；任意角度原地转用 sport.move 的 vyaw。"
+        "宿主融合机体位置与雷达里程计，只有读数一致到达目标并成功请求 StopMove 才算完成；传感器缺失/不一致或截止时间到仍未到位都会失败。"
         "一次移动只调用一次，不要拆成多步。位置按米解释，坐标系未另行换算。"
     ),
     "speed_level": "SportClient::SpeedLevel(level)，速度档位。SDK 示例注释为「速度档位」，没有说明每个档位对应的速度。",
@@ -308,7 +310,8 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
         skill="motion.turn_left",
         description=(
             "原地向左闭环转向固定 90°。口语：左转、向左转、往左转。"
-            "parameters 必须为 {}，不要填角度。用 IMU yaw 闭环；不可安全重试。"
+            "parameters 必须为 {}，不要填角度。以 IMU yaw 测量到位；IMU 不可读、取消或超时会失败。"
+            "失败后不能假定机器人仍朝原方向；不可自动重试。"
         ),
         completion="measured", estimate_ms=5000, timeout_ms=12000,
         target_radians=pi / 2,
@@ -318,7 +321,8 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
         skill="motion.turn_right",
         description=(
             "原地向右闭环转向固定 90°。口语：右转、向右转、往右转。"
-            "parameters 必须为 {}，不要填角度。用 IMU yaw 闭环；不可安全重试。"
+            "parameters 必须为 {}，不要填角度。以 IMU yaw 测量到位；IMU 不可读、取消或超时会失败。"
+            "失败后不能假定机器人仍朝原方向；不可自动重试。"
         ),
         completion="measured", estimate_ms=5000, timeout_ms=12000,
         target_radians=-pi / 2,
@@ -328,8 +332,8 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
         skill="motion.turn_around",
         description=(
             "原地向左闭环转向固定 180°（掉头）。口语：向后转、往后转、掉头、转过身、转身、转一百八十度。"
-            "parameters 必须为 {}，角度已固定，不要追问是否 180° 或面向哪边。"
-            "用 IMU yaw 闭环直至到位；completion=measured。不可安全重试。"
+            "parameters 必须为 {}；方向固定为向左，不支持选择旋转方向或任意角度，不要追问是否 180° 或面向哪边。"
+            "以 IMU yaw 测量到位；IMU 不可读、取消或超时会失败。失败后不能假定机器人仍朝原方向；不可自动重试。"
         ),
         completion="measured", estimate_ms=10000, timeout_ms=25000,
         target_radians=pi,
@@ -340,8 +344,9 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
         skill="motion.back_up",
         description=(
             "按距离向后平移。口语：后退、往后退、向后走一米。"
-            "参数只有 distance_m（0.2–3.0 米）；速度固定为安全后退值，不要填 vx/vy。"
-            "用融合位置与里程计闭环；后方盲区，不可安全重试。"
+            "只提供正数 distance_m（0.2–3.0 米），速度由技能固定，不要填 vx/vy。"
+            "此技能为 confirm 风险级，须经过宿主复核；使用融合位置与里程计测量，后方盲区或传感器缺失/不一致会阻止或中断动作。"
+            "失败后结果可能不确定，不能自动重试或假定未移动。"
         ),
         completion="measured", estimate_ms=8000, timeout_ms=20000,
         move_velocity=(-BACK_UP_SPEED_MPS, 0.0, 0.0),
@@ -352,7 +357,8 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
         skill="motion.strafe_left",
         description=(
             "按距离向左侧移。口语：向左平移、向左侧移、往左横移。"
-            "参数只有 distance_m（0.2–1.5 米）；不要填 vx/vy。用位置闭环；不可安全重试。"
+            "只提供正数 distance_m（0.2–1.5 米），速度由技能固定，不要填 vx/vy。此技能为 confirm 风险级，须经过宿主复核。"
+            "位置反馈不可用或到截止时间未到位时会失败；失败后不能假定未移动，也不能自动重试。"
         ),
         completion="measured", estimate_ms=6000, timeout_ms=15000,
         move_velocity=(0.0, STRAFE_SPEED_MPS, 0.0),
@@ -363,7 +369,8 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
         skill="motion.strafe_right",
         description=(
             "按距离向右侧移。口语：向右平移、向右侧移、往右横移。"
-            "参数只有 distance_m（0.2–1.5 米）；不要填 vx/vy。用位置闭环；不可安全重试。"
+            "只提供正数 distance_m（0.2–1.5 米），速度由技能固定，不要填 vx/vy。此技能为 confirm 风险级，须经过宿主复核。"
+            "位置反馈不可用或到截止时间未到位时会失败；失败后不能假定未移动，也不能自动重试。"
         ),
         completion="measured", estimate_ms=6000, timeout_ms=15000,
         move_velocity=(0.0, -STRAFE_SPEED_MPS, 0.0),
@@ -373,8 +380,9 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
         {"direction": ParameterSpec("string", max_length=5)},
         prefix="expression", skill="expression.tilt_head",
         description=(
-            "向指定方向轻微歪头，保持后恢复中立。口语：歪头、向左歪头、向右歪头。"
-            "direction 为 left 或 right；不要用 sport.euler 手拼。重复执行安全。"
+            "向指定方向轻微侧倾约 1 秒后恢复中立。口语：歪头、向左歪头、向右歪头。"
+            "direction 只能是 left 或 right；不要用 sport.euler 手拼。完成状态为名义估计，不是姿态传感器验证。"
+            "仅在宿主明确判定本次失败且允许重试时才重试，避免重复动作。"
         ),
         completion="nominal", estimate_ms=2000, timeout_ms=7000,
         retry_safe=True,
@@ -385,7 +393,8 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
         prefix="expression", skill="expression.nod",
         description=(
             "点头 1 到 5 次，每次向下再向上，完成后恢复中立。口语：点头、点个头、点一下头。"
-            "不要用 sport.euler 手拼序列。重复执行安全。"
+            "count 必须是 1..5 的整数；未说明次数时用 1。不要用 sport.euler 手拼序列。"
+            "完成状态为名义估计，不是姿态传感器验证；仅在宿主明确判定本次失败且允许重试时才重试。"
         ),
         completion="nominal", estimate_ms=6000, timeout_ms=11000,
         retry_safe=True,
@@ -396,7 +405,8 @@ SPORT_ACTIONS: tuple[SportAction, ...] = (
         prefix="expression", skill="expression.shake_head",
         description=(
             "左右摇头 1 到 5 次，每次左摆再右摆，完成后恢复中立。口语：摇头、摇摇头。"
-            "不要用 sport.euler 手拼序列。重复执行安全。"
+            "count 必须是 1..5 的整数；未说明次数时用 1。不要用 sport.euler 手拼序列。"
+            "完成状态为名义估计，不是姿态传感器验证；仅在宿主明确判定本次失败且允许重试时才重试。"
         ),
         completion="nominal", estimate_ms=6000, timeout_ms=11000,
         retry_safe=True,

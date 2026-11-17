@@ -16,7 +16,8 @@
       "requires_operator_confirmation": false,
       "parameters": {"text": {"type": "string", "max_length": 240}},
       "timeout_ms": 5000,
-      "required": true
+      "required": true,
+      "description": "在模拟器中播报一段文本，text 必须是用户要求或对当前结果的简短说明，最多 240 个字符。执行反馈只证明模拟动作完成，不代表真实设备已播报。"
     },
     {
       "name": "head.look",
@@ -27,7 +28,8 @@
         "yaw_deg": {"type": "number", "min": -45, "max": 45},
         "pitch_deg": {"type": "number", "min": -20, "max": 25}
       },
-      "timeout_ms": 3000
+      "timeout_ms": 3000,
+      "description": "在模拟器中设置头部朝向，yaw_deg 左右转动、pitch_deg 抬头或低头；必须提供两个数值，分别在 -45..45 度和 -20..25 度范围内。反馈只代表模拟动作完成，不代表真实设备姿态。"
     },
     {
       "name": "base.move_distance",
@@ -38,7 +40,8 @@
         "distance_m": {"type": "number", "min": -0.5, "max": 0.5},
         "max_speed_mps": {"type": "number", "min": 0.01, "max": 0.2}
       },
-      "timeout_ms": 8000
+      "timeout_ms": 8000,
+      "description": "在模拟器中按距离移动底盘。必须同时提供 distance_m（-0.5..0.5 米，正值前进、负值后退）和 max_speed_mps（0.01..0.2）。该技能为 confirm 风险级，仍需宿主复核；模拟器反馈不能证明真实环境安全或实体移动。"
     }
   ]
 }
