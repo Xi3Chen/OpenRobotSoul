@@ -876,6 +876,16 @@ class RobotRuntime:
                     policy_version=self.profile.profile_version, arguments_digest=digest,
                     created_at=now, expires_at=now + _REVIEW_WINDOW,
                     user_input=text,
+                    skill_description=capability.description,
+                    parameter_schema={
+                        name: {
+                            "type": spec.value_type,
+                            "minimum": spec.minimum,
+                            "maximum": spec.maximum,
+                            "max_length": spec.max_length,
+                        }
+                        for name, spec in capability.parameters.items()
+                    },
                 )
                 try:
                     review = self.safety_reviewer.review(proposal)

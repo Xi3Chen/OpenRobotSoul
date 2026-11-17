@@ -267,6 +267,10 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(result.task.status, "completed")
         self.assertEqual(len(reviewer.proposals), 1)
         self.assertEqual(reviewer.proposals[0].risk_level, RiskLevel.CONFIRM)
+        capability = runtime.capabilities["base.move_distance"]
+        self.assertEqual(reviewer.proposals[0].skill_description, capability.description)
+        self.assertEqual(reviewer.proposals[0].parameter_schema["distance_m"]["maximum"],
+                         capability.parameters["distance_m"].maximum)
         self.assertEqual(runtime.adapter.executed_commands[0].parameters["distance_m"], 0.2)
         self.assertTrue(any(item.event_type == "safety.review.completed" for item in result.history))
 

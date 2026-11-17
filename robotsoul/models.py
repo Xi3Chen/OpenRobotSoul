@@ -224,6 +224,8 @@ class ReviewProposal:
     created_at: datetime
     expires_at: datetime
     user_input: str
+    skill_description: str = ""
+    parameter_schema: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

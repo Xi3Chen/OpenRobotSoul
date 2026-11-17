@@ -2,10 +2,11 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 from robotsoul import RobotRuntime, load_profile
-from robotsoul.models import AgentPlan, CapabilitySpec, ParameterSpec, RiskLevel
+from robotsoul.models import AgentPlan
 from robotsoul.language_gateway import handle_request
 from robotsoul.language_session import (
     AgentRejected,
@@ -13,9 +14,21 @@ from robotsoul.language_session import (
     LanguageAgent,
     LanguageSafetyReviewer,
     LanguageSession,
+    _skill_descriptor,
     report_startup_failure,
 )
-from robotsoul.models import Observation, utc_now
+from robotsoul.models import (
+    CapabilitySpec,
+    Command,
+    ConversationContext,
+    Observation,
+    ParameterSpec,
+    ReviewProposal,
+    RiskLevel,
+    Task,
+    TaskContext,
+    utc_now,
+)
 
 
 FAKE_GATEWAY = r"""
@@ -158,6 +171,96 @@ class LanguageSessionTests(unittest.TestCase):
 
         self.assertEqual(dispatcher.calls, ["模块启动失败：adapter health failed"])
 
+    def test_skill_descriptor_includes_operational_limits(self):
+        descriptor = _skill_descriptor(CapabilitySpec(
+            name="motion.back_up",
+            parameters={"distance_m": ParameterSpec("number", 0.2, 3.0)},
+            risk_level=RiskLevel.CONFIRM,
+            requires_operator_confirmation=True,
+            interruptible=False,
+            timeout_ms=12000,
+            description="按距离向后平移。",
+            estimate_ms=8000,
+            completion="measured",
+            retry_safe=False,
+        ))
+
+        self.assertEqual(descriptor["description"], "按距离向后平移。")
+        self.assertEqual(descriptor["parameters"]["distance_m"]["minimum"], 0.2)
+        self.assertEqual(descriptor["parameters"]["distance_m"]["maximum"], 3.0)
+        self.assertEqual(descriptor["risk_level"], "confirm")
+        self.assertTrue(descriptor["requires_operator_confirmation"])
+        self.assertFalse(descriptor["interruptible"])
+        self.assertEqual(descriptor["timeout_ms"], 12000)
+        self.assertFalse(descriptor["retry_safe"])
+
+    def test_language_agent_only_receives_skills_it_may_propose(self):
+        captured = []
+
+        class Session:
+            def request(self, payload):
+                captured.append(payload)
+                if payload.get("type") == "decide":
+                    return {"kind": "clarify", "reply": "需要补充什么？"}
+                return {"rejected": True, "reason": "只检查技能目录"}
+
+        capabilities = {
+            "agent.normal": CapabilitySpec("agent.normal", {}),
+            "agent.confirm": CapabilitySpec("agent.confirm", {}, risk_level=RiskLevel.CONFIRM),
+            "dashboard.only": CapabilitySpec("dashboard.only", {}, allowed_callers=("dashboard",)),
+            "maintenance.only": CapabilitySpec("maintenance.only", {}, allowed_callers=("maintenance",)),
+            "agent.high": CapabilitySpec("agent.high", {}, risk_level=RiskLevel.HIGH),
+        }
+        agent = LanguageAgent(Session(), CodingDispatcher(lambda prompt: prompt))
+        context = TaskContext(
+            Task("task", "trace", "robot", "请执行动作"),
+            ConversationContext("robot", "test", "user", "conversation"),
+        )
+
+        agent.decide(context, capabilities)
+        with self.assertRaises(AgentRejected):
+            agent.plan("请执行动作", capabilities)
+
+        expected = {"agent.normal", "agent.confirm"}
+        for payload in captured:
+            self.assertEqual({item["name"] for item in payload["skills"]}, expected)
+
+    def test_safety_review_receives_registered_skill_description_and_schema(self):
+        captured = {}
+
+        class Session:
+            def request(self, payload):
+                captured.update(payload)
+                return {"verdict": "deny", "rationale": "只检查传输内容"}
+
+        now = utc_now()
+        proposal = ReviewProposal(
+            proposal_id="proposal-1",
+            command=Command(
+                command_id="command-1",
+                task_id="task-1",
+                trace_id="trace-1",
+                robot_id="robot-1",
+                skill="motion.back_up",
+                parameters={"distance_m": 1.0},
+                deadline=now + timedelta(seconds=12),
+                risk_level=RiskLevel.CONFIRM,
+            ),
+            risk_level=RiskLevel.CONFIRM,
+            policy_version="profile-1",
+            arguments_digest="digest-1",
+            created_at=now,
+            expires_at=now + timedelta(seconds=30),
+            user_input="向后退一米",
+            skill_description="按距离向后平移；后方盲区。",
+            parameter_schema={"distance_m": {"type": "number", "minimum": 0.2, "maximum": 3.0}},
+        )
+
+        LanguageSafetyReviewer(Session()).review(proposal)
+
+        self.assertEqual(captured["skill_description"], "按距离向后平移；后方盲区。")
+        self.assertEqual(captured["parameter_schema"]["distance_m"]["maximum"], 3.0)
+
 
 class LanguageGatewayTests(unittest.TestCase):
     def test_model_json_selects_only_a_registered_skill(self):
@@ -207,6 +310,10 @@ class LanguageGatewayTests(unittest.TestCase):
         self.assertIn("motion.turn_around", seen["system"])
         self.assertIn("向后转、往后转、掉头", seen["system"])
         self.assertIn("euler 的 yaw 只是扭身姿态", seen["system"])
+        self.assertIn("组合动作时先按用户目标拆成前置状态", seen["system"])
+        self.assertIn("前一步失败、取消、超时或结果未知时停止后续步骤", seen["system"])
+        self.assertIn("先站起来再向右转", seen["system"])
+        self.assertIn("nominal 或 timed 的成功可能只是名义保持或计时结束", seen["system"])
         self.assertIn("切换到站立锁定", seen["user"])
 
     def test_decide_prompt_includes_sensor_readings(self):

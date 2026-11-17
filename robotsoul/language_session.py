@@ -29,6 +29,7 @@ from robotsoul.models import (
     Observation,
     ReviewProposal,
     ReviewVerdict,
+    RiskLevel,
     SafetyReviewResult,
     TaskContext,
 )
@@ -318,12 +319,13 @@ class LanguageAgent:
             interrupt(task_id)
 
     def decide(self, context: TaskContext, capabilities: dict[str, CapabilitySpec]) -> AgentDecision | AgentIntent | AgentPlan:
+        agent_capabilities = _agent_capabilities(capabilities)
         payload = {
             "type": "resume" if (context.feedback or context.decision_count) and not context.resume_input else "decide",
             "version": 1,
             "session_key": context.conversation.session_key,
             "text": context.resume_input or context.task.user_input,
-            "skills": [_skill_descriptor(item) for item in capabilities.values()],
+            "skills": [_skill_descriptor(item) for item in agent_capabilities],
             "sensors": language_sensor_context(context.observations),
             "identity": identity_payload(self._robot_config_path),
             "task_context": _decision_context(context),
@@ -379,13 +381,14 @@ class LanguageAgent:
         capabilities: dict[str, CapabilitySpec],
         observations: tuple[Observation, ...] = (),
     ) -> AgentIntent | AgentPlan | None:
+        agent_capabilities = _agent_capabilities(capabilities)
         try:
             decision = self.session.request(
                 {
                     "type": "decide",
                     "session_key": self._legacy_conversation.session_key,
                     "text": user_input,
-                    "skills": [_skill_descriptor(item) for item in capabilities.values()],
+                    "skills": [_skill_descriptor(item) for item in agent_capabilities],
                     "observations": [item.event_type for item in observations[:8]],
                     "sensors": language_sensor_context(observations),
                     "identity": identity_payload(self._robot_config_path),
@@ -446,6 +449,8 @@ class LanguageSafetyReviewer:
                     "type": "review",
                     "task_id": proposal.command.task_id,
                     "skill": proposal.command.skill,
+                    "skill_description": proposal.skill_description,
+                    "parameter_schema": proposal.parameter_schema,
                     "parameters": proposal.command.parameters,
                     "user_input": proposal.user_input,
                     "risk_level": proposal.risk_level.value,
@@ -541,6 +546,10 @@ def _skill_descriptor(capability: CapabilitySpec) -> dict[str, Any]:
         "name": capability.name,
         "estimate_ms": capability.estimate_ms,
         "completion": capability.completion,
+        "interruptible": capability.interruptible,
+        "timeout_ms": capability.timeout_ms,
+        "retry_safe": capability.retry_safe,
+        "requires_operator_confirmation": capability.requires_operator_confirmation,
         "risk_level": capability.risk_level.value,
         "parameters": {
             name: {
@@ -554,11 +563,24 @@ def _skill_descriptor(capability: CapabilitySpec) -> dict[str, Any]:
     }
     if capability.description:
         descriptor["description"] = capability.description
-    if capability.completion == "timed":
-        descriptor["estimate_note"] = "一次调用的时长就是参数 duration_ms，程序按 2 秒循环补发。estimate_ms 是允许的最长时长。不要把同一次移动拆成多次调用。"
-    if capability.completion == "measured":
-        descriptor["estimate_note"] = "estimate_ms 只是截止预算。走到 distance_m 才算完成，到预算仍不够则失败。不要把同一次移动拆成多次调用。"
+    if capability.completion == "accepted":
+        descriptor["estimate_note"] = "受理或接口返回不等于实体目标已达成；以本次反馈中的实际证据为准。"
+    elif capability.completion == "nominal":
+        descriptor["estimate_note"] = "estimate_ms 是名义动作时间；等待结束不是实测到位证据，回复时保留这一限制。"
+    elif capability.completion == "timed":
+        descriptor["estimate_note"] = "按声明的时长参数执行整段动作；到时不等于已达到某个距离或角度。不要把同一段动作拆成重复调用。"
+    elif capability.completion == "measured":
+        descriptor["estimate_note"] = "按技能说明中的测量条件判定完成（如距离或转角），仍需本次反馈证据；预算耗尽不等于达成目标，不得盲目重试。"
     return descriptor
+
+
+def _agent_capabilities(capabilities: dict[str, CapabilitySpec]) -> tuple[CapabilitySpec, ...]:
+    """Return only skills this language agent is authorized to propose."""
+    return tuple(
+        capability
+        for capability in capabilities.values()
+        if "agent" in capability.allowed_callers and capability.risk_level != RiskLevel.HIGH
+    )
 
 
 def _llm_timeout(path: Path) -> int:
