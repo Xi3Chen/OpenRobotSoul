@@ -35,8 +35,13 @@ if [[ -f "$HOME/.openrobotsoul-go2.env" ]]; then
   set +a
 fi
 
+# 方案 A：唤醒后按 KWS 时间戳裁剪 ASR 音频（默认关闭，这里显式打开）
+# 已在环境或 ~/.openrobotsoul-go2.env 中设置时保留原值。
+export ROBOTSOUL_VOICE_WAKE_CROP="${ROBOTSOUL_VOICE_WAKE_CROP:-1}"
+export ROBOTSOUL_VOICE_WAKE_GUARD_MS="${ROBOTSOUL_VOICE_WAKE_GUARD_MS:-80}"
+export ROBOTSOUL_VOICE_COMMAND_PREROLL_MS="${ROBOTSOUL_VOICE_COMMAND_PREROLL_MS:-120}"
+
 exec .venv/bin/python -m robotsoul dashboard \
-  --no-voice \
   --host "$HOST" \
   --port 8765 \
   --tls-cert certs/dashboard.crt \
