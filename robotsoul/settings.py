@@ -39,7 +39,10 @@ _AUDIO_FIELDS = (
     "session_max_seconds",
     "call_reconnect_grace_seconds",
 )
-_LLM_FIELDS = ("provider", "base_url", "model", "timeout_seconds", "api_key")
+_LLM_FIELDS = (
+    "provider", "base_url", "model", "api_method", "context_window",
+    "summary_max_tokens", "thinking_level", "timeout_seconds", "api_key",
+)
 _ACCOUNT_FIELDS = ("username", "password", "current_password")
 _directory_lock = Lock()
 _llm_lock = Lock()
@@ -220,6 +223,10 @@ class LlmSettings:
     provider: str = "openai-compatible"
     base_url: str = ""
     model: str = ""
+    api_method: str = "chat/completions"
+    context_window: int = 32768
+    summary_max_tokens: int = 4096
+    thinking_level: str = "off"
     timeout_seconds: int = 30
     api_key: str = ""
 
@@ -228,6 +235,10 @@ class LlmSettings:
             "provider": self.provider,
             "base_url": self.base_url,
             "model": self.model,
+            "api_method": self.api_method,
+            "context_window": self.context_window,
+            "summary_max_tokens": self.summary_max_tokens,
+            "thinking_level": self.thinking_level,
             "timeout_seconds": self.timeout_seconds,
             "api_key_configured": bool(self.api_key),
         }
@@ -257,12 +268,20 @@ class LlmConfigStore:
             provider = payload.get("provider", current.provider)
             base_url = payload.get("base_url", current.base_url)
             model = payload.get("model", current.model)
+            api_method = payload.get("api_method", current.api_method)
+            context_window = payload.get("context_window", current.context_window)
+            summary_max_tokens = payload.get("summary_max_tokens", current.summary_max_tokens)
+            thinking_level = payload.get("thinking_level", current.thinking_level)
             timeout = payload.get("timeout_seconds", current.timeout_seconds)
             api_key = current.api_key if "api_key" not in payload else payload.get("api_key")
             updated = LlmSettings(
                 provider=_validate_provider(provider),
                 base_url=_validate_base_url(base_url),
                 model=_validate_model(model),
+                api_method=_validate_api_method(api_method),
+                context_window=_validate_context_window(context_window),
+                summary_max_tokens=_validate_summary_max_tokens(summary_max_tokens, context_window),
+                thinking_level=_validate_thinking_level(thinking_level),
                 timeout_seconds=_validate_timeout(timeout),
                 api_key=_validate_api_key(api_key),
             )
@@ -274,6 +293,10 @@ class LlmConfigStore:
                         "provider": updated.provider,
                         "base_url": updated.base_url,
                         "model": updated.model,
+                        "api_method": updated.api_method,
+                        "context_window": updated.context_window,
+                        "summary_max_tokens": updated.summary_max_tokens,
+                        "thinking_level": updated.thinking_level,
                         "timeout_seconds": updated.timeout_seconds,
                         "api_key": updated.api_key,
                     },
@@ -299,6 +322,10 @@ class LlmConfigStore:
             provider=_validate_provider(raw.get("provider", "openai-compatible")),
             base_url=_validate_base_url(raw.get("base_url", "")),
             model=_validate_model(raw.get("model", "")),
+            api_method=_validate_api_method(raw.get("api_method", "chat/completions")),
+            context_window=_validate_context_window(raw.get("context_window", 32768)),
+            summary_max_tokens=_validate_summary_max_tokens(raw.get("summary_max_tokens", 4096), raw.get("context_window", 32768)),
+            thinking_level=_validate_thinking_level(raw.get("thinking_level", "off")),
             timeout_seconds=_validate_timeout(raw.get("timeout_seconds", 30)),
             api_key=_validate_api_key(raw.get("api_key", "")),
         )
@@ -326,6 +353,35 @@ def _validate_model(value: object) -> str:
     if not isinstance(value, str) or len(value.strip()) > 128:
         raise ValueError("model must contain at most 128 characters")
     return value.strip()
+
+
+def _validate_api_method(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("api_method must be chat/completions")
+    value = value.strip().lstrip("/")
+    if value != "chat/completions":
+        raise ValueError("api_method must be chat/completions")
+    return value
+
+
+def _validate_context_window(value: object) -> int:
+    if type(value) is not int or isinstance(value, bool) or not 1024 <= value <= 1_000_000:
+        raise ValueError("context_window must be an integer from 1024 to 1000000")
+    return value
+
+
+def _validate_summary_max_tokens(value: object, context_window: object) -> int:
+    if type(value) is not int or isinstance(value, bool) or not 256 <= value <= 32768:
+        raise ValueError("summary_max_tokens must be an integer from 256 to 32768")
+    if type(context_window) is not int or value >= context_window:
+        raise ValueError("summary_max_tokens must be smaller than context_window")
+    return value
+
+
+def _validate_thinking_level(value: object) -> str:
+    if not isinstance(value, str) or value.strip().lower() not in {"off", "low", "medium", "high", "xhigh", "adaptive"}:
+        raise ValueError("thinking_level must be off, low, medium, high, xhigh or adaptive")
+    return value.strip().lower()
 
 
 def _validate_timeout(value: object) -> int:

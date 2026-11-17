@@ -184,6 +184,19 @@
                 <label>提供方<input id="llm-provider" name="provider" type="text" maxlength="64" required></label>
                 <label>模型名称<input id="llm-model" name="model" type="text" maxlength="128"></label>
                 <label>接口地址<input id="llm-base-url" name="base_url" type="url" maxlength="300" placeholder="https://example.com/v1"></label>
+                <label>接口方法<input id="llm-api-method" name="api_method" type="text" value="chat/completions" readonly></label>
+                <label>上下文窗口（token）<input id="llm-context-window" name="context_window" type="number" min="1024" max="1000000" step="1" required></label>
+                <label>摘要输出上限（token）<input id="llm-summary-max-tokens" name="summary_max_tokens" type="number" min="256" max="32768" step="1" required></label>
+                <label>思考模式
+                  <select id="llm-thinking-level" name="thinking_level">
+                    <option value="off">关闭</option>
+                    <option value="low">低</option>
+                    <option value="medium">中</option>
+                    <option value="high">高</option>
+                    <option value="xhigh">极高</option>
+                    <option value="adaptive">自适应</option>
+                  </select>
+                </label>
                 <label>超时（秒）<input id="llm-timeout" name="timeout_seconds" type="number" min="1" max="180" step="1" required></label>
               </div>
               <label>API 密钥<input id="llm-api-key" name="api_key" type="password" maxlength="512" autocomplete="off"></label>

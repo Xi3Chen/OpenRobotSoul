@@ -31,9 +31,12 @@ func TestConfiguredHTTPProviderUsesNonStreamingToolsFreeRequest(t *testing.T) {
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	inner, model, timeout, err := loadProvider(path)
+	inner, model, timeout, options, err := loadProvider(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if options.APIMethod != defaultAPIMethod || options.ContextWindow != defaultContextWindow || options.ThinkingLevel != defaultThinkingLevel {
+		t.Fatalf("unexpected dialogue options: %+v", options)
 	}
 	g := testGateway(t, inner)
 	g.model, g.timeout = model, timeout

@@ -782,6 +782,10 @@
     $("#llm-provider").value = llm.provider || "openai-compatible";
     $("#llm-model").value = llm.model || "";
     $("#llm-base-url").value = llm.base_url || "";
+    $("#llm-api-method").value = llm.api_method || "chat/completions";
+    $("#llm-context-window").value = llm.context_window || 32768;
+    $("#llm-summary-max-tokens").value = llm.summary_max_tokens || 4096;
+    $("#llm-thinking-level").value = llm.thinking_level || "off";
     $("#llm-timeout").value = llm.timeout_seconds || 30;
     $("#llm-api-key").value = "";
     $("#llm-api-key").placeholder = llm.api_key_configured ? "已保存，留空则保持不变" : "未设置";
@@ -879,6 +883,10 @@
         provider: $("#llm-provider").value,
         base_url: $("#llm-base-url").value,
         model: $("#llm-model").value,
+        api_method: $("#llm-api-method").value,
+        context_window: integerValue("#llm-context-window"),
+        summary_max_tokens: integerValue("#llm-summary-max-tokens"),
+        thinking_level: $("#llm-thinking-level").value,
         timeout_seconds: integerValue("#llm-timeout"),
       };
       const apiKey = $("#llm-api-key").value;

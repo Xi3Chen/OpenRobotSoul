@@ -20,31 +20,81 @@ type codedError struct{ Code, Message string }
 func (e *codedError) Error() string { return e.Message }
 
 type llmSettings struct {
-	Provider       string `json:"provider"`
-	BaseURL        string `json:"base_url"`
-	Model          string `json:"model"`
-	TimeoutSeconds int    `json:"timeout_seconds"`
-	APIKey         string `json:"api_key"`
+	Provider         string `json:"provider"`
+	BaseURL          string `json:"base_url"`
+	Model            string `json:"model"`
+	APIMethod        string `json:"api_method"`
+	ContextWindow    int    `json:"context_window"`
+	SummaryMaxTokens int    `json:"summary_max_tokens"`
+	ThinkingLevel    string `json:"thinking_level"`
+	TimeoutSeconds   int    `json:"timeout_seconds"`
+	APIKey           string `json:"api_key"`
 }
 
-func loadProvider(path string) (providers.LLMProvider, string, time.Duration, error) {
+const (
+	defaultContextWindow    = 32768
+	defaultSummaryMaxTokens = 4096
+	defaultAPIMethod        = "chat/completions"
+	defaultThinkingLevel    = "off"
+)
+
+type dialogueOptions struct {
+	ProviderName     string
+	APIMethod        string
+	ContextWindow    int
+	SummaryMaxTokens int
+	ThinkingLevel    string
+}
+
+func loadProvider(path string) (providers.LLMProvider, string, time.Duration, dialogueOptions, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return nil, "", 0, fmt.Errorf("read LLM configuration: %w", err)
+		return nil, "", 0, dialogueOptions{}, fmt.Errorf("read LLM configuration: %w", err)
 	}
 	var settings llmSettings
 	if err = json.Unmarshal(content, &settings); err != nil {
-		return nil, "", 0, fmt.Errorf("invalid LLM configuration: %w", err)
+		return nil, "", 0, dialogueOptions{}, fmt.Errorf("invalid LLM configuration: %w", err)
+	}
+	if settings.APIMethod == "" {
+		settings.APIMethod = defaultAPIMethod
+	}
+	settings.APIMethod = strings.TrimPrefix(strings.TrimSpace(settings.APIMethod), "/")
+	if settings.APIMethod != defaultAPIMethod {
+		return nil, "", 0, dialogueOptions{}, fmt.Errorf("unsupported api_method %q; only %q is supported", settings.APIMethod, defaultAPIMethod)
+	}
+	if settings.ContextWindow == 0 {
+		settings.ContextWindow = defaultContextWindow
+	}
+	if settings.ContextWindow < 1024 || settings.ContextWindow > 1000000 {
+		return nil, "", 0, dialogueOptions{}, errors.New("context_window must be between 1024 and 1000000")
+	}
+	if settings.SummaryMaxTokens == 0 {
+		settings.SummaryMaxTokens = defaultSummaryMaxTokens
+	}
+	if settings.SummaryMaxTokens < 256 || settings.SummaryMaxTokens > 32768 {
+		return nil, "", 0, dialogueOptions{}, errors.New("summary_max_tokens must be between 256 and 32768")
+	}
+	if settings.SummaryMaxTokens >= settings.ContextWindow {
+		return nil, "", 0, dialogueOptions{}, errors.New("summary_max_tokens must be smaller than context_window")
+	}
+	settings.ThinkingLevel = strings.ToLower(strings.TrimSpace(settings.ThinkingLevel))
+	if settings.ThinkingLevel == "" {
+		settings.ThinkingLevel = defaultThinkingLevel
+	}
+	switch settings.ThinkingLevel {
+	case "off", "low", "medium", "high", "xhigh", "adaptive":
+	default:
+		return nil, "", 0, dialogueOptions{}, fmt.Errorf("unsupported thinking_level %q", settings.ThinkingLevel)
 	}
 	if settings.TimeoutSeconds == 0 {
 		settings.TimeoutSeconds = 30
 	}
 	if settings.TimeoutSeconds < 1 || settings.TimeoutSeconds > 180 {
-		return nil, "", 0, errors.New("timeout_seconds must be between 1 and 180")
+		return nil, "", 0, dialogueOptions{}, errors.New("timeout_seconds must be between 1 and 180")
 	}
 	settings.Model = strings.TrimSpace(settings.Model)
 	if settings.Model == "" {
-		return nil, "", 0, errors.New("LLM model is required")
+		return nil, "", 0, dialogueOptions{}, errors.New("LLM model is required")
 	}
 	providerName := strings.ToLower(strings.TrimSpace(settings.Provider))
 	if providerName == "" || providerName == "openai-compatible" {
@@ -55,11 +105,14 @@ func loadProvider(path string) (providers.LLMProvider, string, time.Duration, er
 	switch providerName {
 	case "openai", "anthropic", "gemini", "ollama", "deepseek", "openrouter", "groq", "zhipu", "qwen":
 	default:
-		return nil, "", 0, fmt.Errorf("unsupported dialogue provider %q", providerName)
+		return nil, "", 0, dialogueOptions{}, fmt.Errorf("unsupported dialogue provider %q", providerName)
 	}
 	modelConfig := &config.ModelConfig{ModelName: "dialogue", Provider: providerName, Model: settings.Model, APIBase: strings.TrimRight(settings.BaseURL, "/"), RequestTimeout: settings.TimeoutSeconds, APIKeys: config.SimpleSecureStrings(settings.APIKey)}
 	provider, model, err := providers.CreateProviderFromConfig(modelConfig)
-	return provider, model, time.Duration(settings.TimeoutSeconds) * time.Second, err
+	return provider, model, time.Duration(settings.TimeoutSeconds) * time.Second, dialogueOptions{
+		ProviderName: providerName, APIMethod: settings.APIMethod, ContextWindow: settings.ContextWindow,
+		SummaryMaxTokens: settings.SummaryMaxTokens, ThinkingLevel: settings.ThinkingLevel,
+	}, err
 }
 
 // Intentionally implements only LLMProvider. Optional streaming, search and
@@ -120,12 +173,15 @@ func (p *guardedProvider) Chat(ctx context.Context, messages []providers.Message
 		return deny(err)
 	}
 	if response == nil {
+		if purpose == purposeSummary {
+			return nil, nil
+		}
 		return deny(errors.New("provider returned no response"))
 	}
 	if len(response.ToolCalls) != 0 {
 		return deny(&codedError{"tools_forbidden", "model returned an unexpected tool call"})
 	}
-	if response.FinishReason == "length" || response.FinishReason == "max_tokens" {
+	if (response.FinishReason == "length" || response.FinishReason == "max_tokens") && purpose != purposeSummary {
 		return deny(&codedError{"incomplete_response", "model response exceeded its output budget"})
 	}
 	if purpose == purposeDecision {

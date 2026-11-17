@@ -81,9 +81,12 @@ def handle_request(request: dict[str, Any], complete: Completer) -> dict[str, An
 def complete_chat(settings: LlmSettings, messages: list[dict[str, str]]) -> str:
     if not settings.base_url or not settings.model or not settings.api_key:
         raise RuntimeError("云端模型未配置，无法理解这句话")
-    url = settings.base_url.rstrip("/") + "/chat/completions"
+    url = settings.base_url.rstrip("/") + "/" + settings.api_method.lstrip("/")
+    body_payload: dict[str, Any] = {"model": settings.model, "temperature": 0, "messages": messages}
+    if settings.thinking_level == "off":
+        body_payload["thinking"] = {"type": "disabled"}
     body = json.dumps(
-        {"model": settings.model, "temperature": 0, "messages": messages},
+        body_payload,
         ensure_ascii=False,
     ).encode("utf-8")
     request = urllib.request.Request(

@@ -553,6 +553,10 @@ type summarySnapshot struct {
 }
 
 func (l *ledger) summarySnapshot(key string, keepTurns, inputBudget int) (summarySnapshot, bool) {
+	return l.summarySnapshotWithReserve(key, keepTurns, inputBudget, summaryMaxTokens)
+}
+
+func (l *ledger) summarySnapshotWithReserve(key string, keepTurns, inputBudget, outputReserve int) (summarySnapshot, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	s := cloneState(l.sessions[key]) // pending user/assistant writes are excluded
@@ -587,7 +591,7 @@ func (l *ledger) summarySnapshot(key string, keepTurns, inputBudget int) (summar
 	lo, hi, fit := 0, len(boundaries)-1, 0
 	for lo <= hi {
 		mid := lo + (hi-lo)/2
-		tokens := summaryMaxTokens + messageTokens(summaryMessages(s.Summary, s.Entries[:boundaries[mid]]))
+		tokens := outputReserve + messageTokens(summaryMessages(s.Summary, s.Entries[:boundaries[mid]]))
 		if tokens <= inputBudget {
 			fit = boundaries[mid]
 			lo = mid + 1
@@ -600,6 +604,33 @@ func (l *ledger) summarySnapshot(key string, keepTurns, inputBudget int) (summar
 	}
 	cut = fit
 	return summarySnapshot{Key: key, Generation: s.Generation, SummaryRevision: s.SummaryRevision, Summary: s.Summary, Entries: s.Entries[:cut]}, true
+}
+
+// fallbackSummarySnapshot selects the oldest complete turn without requiring
+// it to fit the provider's input budget. The caller creates a bounded local
+// summary from this snapshot when the provider cannot summarize the turn.
+func (l *ledger) fallbackSummarySnapshot(key string, keepTurns int) (summarySnapshot, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s := cloneState(l.sessions[key])
+	cut := len(s.Entries)
+	for n := 0; n < keepTurns && cut > 0; n++ {
+		turn := s.Entries[cut-1].TurnID
+		for cut > 0 && s.Entries[cut-1].TurnID == turn {
+			cut--
+		}
+	}
+	for start := 0; start < cut; {
+		end := start + 1
+		for end < cut && s.Entries[end].TurnID == s.Entries[start].TurnID {
+			end++
+		}
+		if s.Entries[end-1].Message.Role == "assistant" {
+			return summarySnapshot{Key: key, Generation: s.Generation, SummaryRevision: s.SummaryRevision, Summary: s.Summary, Entries: s.Entries[:end]}, true
+		}
+		start = end
+	}
+	return summarySnapshot{}, false
 }
 
 func (l *ledger) CommitSummary(snap summarySnapshot, summary string) (bool, error) {

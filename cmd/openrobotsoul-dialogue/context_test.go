@@ -13,16 +13,17 @@ import (
 )
 
 type recordingProvider struct {
-	mu          sync.Mutex
-	calls       [][]providers.Message
-	toolCounts  []int
-	response    string
-	tools       bool
-	started     chan struct{}
-	release     chan struct{}
-	startOnce   sync.Once
-	summaryFail bool
-	block       bool
+	mu           sync.Mutex
+	calls        [][]providers.Message
+	toolCounts   []int
+	response     string
+	tools        bool
+	started      chan struct{}
+	release      chan struct{}
+	startOnce    sync.Once
+	summaryFail  bool
+	summaryEmpty bool
+	block        bool
 }
 
 func (*recordingProvider) GetDefaultModel() string { return "test-model" }
@@ -47,6 +48,9 @@ func (p *recordingProvider) Chat(ctx context.Context, messages []providers.Messa
 			return nil, errors.New("injected summary error")
 		}
 		if purpose == purposeSummary {
+			if p.summaryEmpty {
+				return &providers.LLMResponse{ReasoningContent: "hidden reasoning", FinishReason: "length"}, nil
+			}
 			return &providers.LLMResponse{Content: "summary of exactly a", FinishReason: "stop"}, nil
 		}
 	}
@@ -121,13 +125,17 @@ func TestSummaryFailureRetainsRawAndCloseCancelsWorker(t *testing.T) {
 	}
 	p := &recordingProvider{summaryFail: true}
 	c := newReliableContext(l, &guardedProvider{inner: p, store: l, budget: 32768}, "test-model", 32768)
-	if err := c.compactNow(context.Background(), "session"); err == nil {
-		t.Fatal("summary error was hidden")
+	if err := c.compactNow(context.Background(), "session"); err != nil {
+		t.Fatal("summary failure should use the local fallback:", err)
 	}
-	if len(l.GetHistory("session")) != 6 || l.GetSummary("session") != "" || l.Health() != nil {
-		t.Fatal("summary failure changed durable history")
+	if len(l.GetHistory("session")) >= 6 || l.GetSummary("session") == "" || l.Health() != nil {
+		t.Fatal("summary fallback did not commit a bounded context")
 	}
 	c.Close()
+	l, _ = testLedger(t)
+	for _, id := range []string{"a", "b", "c"} {
+		appendTurn(t, l, "session", id)
+	}
 	p = &recordingProvider{started: make(chan struct{}), release: make(chan struct{})}
 	c = newReliableContext(l, &guardedProvider{inner: p, store: l, budget: 32768}, "test-model", 32768)
 	c.startSummary("session")
@@ -145,6 +153,22 @@ func TestSummaryFailureRetainsRawAndCloseCancelsWorker(t *testing.T) {
 	}
 	if len(l.GetHistory("session")) != 6 {
 		t.Fatal("cancelled summary changed history")
+	}
+}
+
+func TestEmptySummaryResponseUsesFallback(t *testing.T) {
+	l, _ := testLedger(t)
+	for _, id := range []string{"a", "b", "c"} {
+		appendTurn(t, l, "session", id)
+	}
+	p := &recordingProvider{summaryEmpty: true}
+	c := newReliableContext(l, &guardedProvider{inner: p, store: l, budget: 32768}, "test-model", 32768)
+	defer c.Close()
+	if err := c.compactNow(context.Background(), "session"); err != nil {
+		t.Fatal("empty summary response should not fail compaction:", err)
+	}
+	if strings.TrimSpace(l.GetSummary("session")) == "" || len(l.GetHistory("session")) >= 6 {
+		t.Fatal("empty summary response did not commit the bounded fallback")
 	}
 }
 

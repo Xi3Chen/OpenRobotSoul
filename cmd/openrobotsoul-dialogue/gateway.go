@@ -113,32 +113,47 @@ func (c *runtimeContributor) set(payload map[string]json.RawMessage) {
 }
 
 type gateway struct {
-	mu          sync.Mutex
-	store       *ledger
-	context     *reliableContext
-	provider    *guardedProvider
-	loop        *agent.AgentLoop
-	bus         *bus.MessageBus
-	contributor *runtimeContributor
-	model       string
-	timeout     time.Duration
-	fake        bool
-	closeOnce   sync.Once
+	mu            sync.Mutex
+	store         *ledger
+	context       *reliableContext
+	provider      *guardedProvider
+	loop          *agent.AgentLoop
+	bus           *bus.MessageBus
+	contributor   *runtimeContributor
+	model         string
+	timeout       time.Duration
+	fake          bool
+	thinkingLevel string
+	closeOnce     sync.Once
 }
 
 var managerSequence atomic.Uint64
 var explicitSessionPattern = regexp.MustCompile(`^sk_v1_[0-9a-f]{64}$`)
 
 func newGateway(home string, inner providers.LLMProvider, model string, timeout time.Duration, budget int, fake bool) (_ *gateway, err error) {
+	return newGatewayWithOptions(home, inner, model, timeout, dialogueOptions{ContextWindow: budget}, fake)
+}
+
+func newGatewayWithOptions(home string, inner providers.LLMProvider, model string, timeout time.Duration, options dialogueOptions, fake bool) (_ *gateway, err error) {
+	budget := options.ContextWindow
 	logger.DisableConsole() // PicoClaw's default console logger writes stdout.
 	if budget <= 0 {
-		budget = 32768
+		budget = defaultContextWindow
+	}
+	if options.SummaryMaxTokens <= 0 {
+		options.SummaryMaxTokens = summaryMaxTokens
+	}
+	if options.ThinkingLevel == "" {
+		options.ThinkingLevel = defaultThinkingLevel
+	}
+	if options.ProviderName == "" {
+		options.ProviderName = "openai"
 	}
 	store, err := openLedger(home)
 	if err != nil {
 		return nil, err
 	}
-	g := &gateway{store: store, model: model, timeout: timeout, fake: fake, contributor: &runtimeContributor{}}
+	g := &gateway{store: store, model: model, timeout: timeout, fake: fake, thinkingLevel: options.ThinkingLevel, contributor: &runtimeContributor{}}
 	defer func() {
 		if err != nil {
 			g.Close()
@@ -161,7 +176,7 @@ func newGateway(home string, inner providers.LLMProvider, model string, timeout 
 		return nil, err
 	}
 	g.provider = &guardedProvider{inner: inner, store: store, budget: budget}
-	g.context = newReliableContext(store, g.provider, model, budget)
+	g.context = newReliableContextWithOptions(store, g.provider, model, budget, options.SummaryMaxTokens)
 	name := fmt.Sprintf("openrobotsoul-reliable-%d", managerSequence.Add(1))
 	if err = agent.RegisterContextManager(name, func(json.RawMessage, *agent.AgentLoop) (agent.ContextManager, error) { return g.context, nil }); err != nil {
 		return nil, err
@@ -169,7 +184,10 @@ func newGateway(home string, inner providers.LLMProvider, model string, timeout 
 	z := 0.0
 	// A bounded 256-event timeline can require 256 feedback UUID references in
 	// its final decision. Reserve enough output for those evidence identities.
-	cfg := &config.Config{Agents: config.AgentsConfig{Defaults: config.AgentDefaults{Workspace: workspace, RestrictToWorkspace: true, ModelName: model, MaxTokens: 8192, ContextWindow: budget, Temperature: &z, MaxToolIterations: 1, SummarizeMessageThreshold: 20, SummarizeTokenPercent: 75, MaxParallelTurns: 1, ContextManager: name}}}
+	cfg := &config.Config{
+		ModelList: []*config.ModelConfig{{ModelName: model, Provider: options.ProviderName, Model: model, ThinkingLevel: options.ThinkingLevel}},
+		Agents:    config.AgentsConfig{Defaults: config.AgentDefaults{Workspace: workspace, RestrictToWorkspace: true, ModelName: model, MaxTokens: 8192, ContextWindow: budget, Temperature: &z, MaxToolIterations: 1, SummarizeMessageThreshold: 20, SummarizeTokenPercent: 75, MaxParallelTurns: 1, ContextManager: name}},
+	}
 	g.bus = bus.NewMessageBus()
 	g.loop = agent.NewAgentLoop(cfg, g.bus, g.provider)
 	if agent.NewPipeline(g.loop).ContextManager != g.context {
@@ -270,7 +288,7 @@ func (g *gateway) dispatch(ctx context.Context, req request, payload map[string]
 		reviewCtx, cancel := context.WithTimeout(ctx, g.timeout)
 		defer cancel()
 		reviewCtx = context.WithValue(reviewCtx, purposeKey{}, purposeReview)
-		response, err := g.provider.Chat(reviewCtx, []providers.Message{{Role: "system", Content: reviewInstructions}, {Role: "user", Content: string(proposal)}}, nil, g.model, map[string]any{"max_tokens": 1024, "temperature": 0.0})
+		response, err := g.provider.Chat(reviewCtx, []providers.Message{{Role: "system", Content: reviewInstructions}, {Role: "user", Content: string(proposal)}}, nil, g.model, map[string]any{"max_tokens": 1024, "temperature": 0.0, "thinking_level": g.thinkingLevel})
 		if err != nil {
 			return nil, false, err
 		}

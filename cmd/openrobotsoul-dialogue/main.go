@@ -58,21 +58,25 @@ func run() error {
 	home := flag.String("home", defaultHome, "isolated dialogue journal directory")
 	configPath := flag.String("config", defaultConfig, "RobotHarness LLM configuration JSON")
 	fake := flag.Bool("fake-provider", false, "explicit deterministic test provider; no network or physical authorization")
-	budget := flag.Int("context-window", 32768, "complete model context token budget")
+	budget := flag.Int("context-window", 0, "override the configured complete model context token budget")
 	flag.Parse()
 	var inner providers.LLMProvider
 	var model string
 	timeout := 30 * time.Second
+	options := dialogueOptions{ContextWindow: defaultContextWindow, SummaryMaxTokens: summaryMaxTokens, ThinkingLevel: defaultThinkingLevel, ProviderName: "openai", APIMethod: defaultAPIMethod}
 	var err error
 	if *fake {
 		inner, model = fakeProvider{}, "explicit-test-provider"
 	} else {
-		inner, model, timeout, err = loadProvider(*configPath)
+		inner, model, timeout, options, err = loadProvider(*configPath)
 		if err != nil {
 			return err
 		}
 	}
-	g, err := newGateway(*home, inner, model, timeout, *budget, *fake)
+	if *budget > 0 {
+		options.ContextWindow = *budget
+	}
+	g, err := newGatewayWithOptions(*home, inner, model, timeout, options, *fake)
 	if err != nil {
 		return err
 	}

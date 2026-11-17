@@ -373,7 +373,7 @@ cat /run/mimax2-voice/status.json
 | 官方 API Base URL（OpenAI 格式） | `https://api.deepseek.com`，chat completions 路径为 `/chat/completions` |
 | 模型名 | `deepseek-flash`（旧名 `deepseek-v4-flash` 仍被接受，实际由 V4.1-Flash 服务） |
 | 代码入口 | `openrobotsoul-dialogue`（链接 `third_party/picoclaw` 的 Go 对话进程）+ `robotsoul/language_session.py` 的 `LanguageAgent`；旧的 `robotsoul/language_gateway.py` 无状态单轮入口不再使用 |
-| 配置 | `config/llm.json`（`provider`/`base_url`/`model`/`timeout_seconds`/`api_key`），也可用 Dashboard 的模型设置页写入 |
+| 配置 | `config/llm.json`（`provider`/`base_url`/`model`/`api_method`/`context_window`/`summary_max_tokens`/`thinking_level`/`timeout_seconds`/`api_key`），也可用 Dashboard 的模型设置页写入 |
 | 依赖 | Python 仅标准库 `urllib`；对话进程为独立 Go 模块，构建需要 Go 1.25.13+ 与已初始化的 PicoClaw 子模块 |
 
 配置方式（不要把 key 写进仓库/命令行历史；也可以先在 Dashboard → 设置里填写，再由 Dashboard 以 0600 权限写盘）：
@@ -386,6 +386,10 @@ cat > /home/user/mimax2-voice/release/config/llm.json <<'EOF'
   "provider": "openai-compatible",
   "base_url": "https://api.deepseek.com",
   "model": "deepseek-flash",
+  "api_method": "chat/completions",
+  "context_window": 32768,
+  "summary_max_tokens": 4096,
+  "thinking_level": "off",
   "timeout_seconds": 30,
   "api_key": "sk-your-key"
 }
