@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 import os
 from pathlib import Path
 import inspect
@@ -46,6 +47,24 @@ def _env_int(name: str, default: int) -> int:
 class AsrResult:
     text: str
     is_endpoint: bool
+
+
+@dataclass(frozen=True)
+class WakeDetection:
+    phrase: str
+    generation: int
+    stream_id: int
+    stream_start_sample: int | None
+    anchor_sample: int | None
+    sample_rate: int
+    last_token_timestamp: float | None
+    token_count: int
+    timestamp_count: int
+    continuous: bool
+    fallback_reason: str | None = None
+
+    def __str__(self) -> str:
+        return self.phrase
 
 
 @dataclass(frozen=True)
@@ -124,6 +143,12 @@ class SherpaVoiceEngine:
         self._kws_stream: Any = None
         self._vad: Any = None
         self._keywords_file: Any = None
+        self._kws_stream_id = 0
+        self._kws_stream_start_sample: int | None = None
+        self._kws_next_sample: int | None = None
+        self._kws_generation: int | None = None
+        self._kws_sample_rate: int | None = None
+        self._legacy_wake_offset = 0
 
     def load(self) -> None:
         _voice_log("Info", "开始加载语音模型")
@@ -187,6 +212,7 @@ class SherpaVoiceEngine:
                 keywords_threshold=threshold, num_trailing_blanks=_KEYWORD_TRAILING_BLANKS,
             )
             self._kws_stream = self._kws.create_stream()
+            self._kws_stream_id += 1
             _voice_log(
                 "Info",
                 f"唤醒模型已加载 短语={','.join(self.wake_phrases)} 音素={phones} "
@@ -228,15 +254,122 @@ class SherpaVoiceEngine:
             self.load()
 
     def accept_wake(self, samples: Sequence[float], sample_rate: int) -> str | None:
+        """Compatibility wrapper for callers that do not track audio offsets."""
+        if sample_rate <= 0:
+            raise ValueError("wake audio sample rate must be positive")
+        offset = self._legacy_wake_offset
+        self._legacy_wake_offset += round(len(samples) * self.sample_rate / sample_rate)
+        detection = self.accept_wake_at(
+            samples,
+            sample_rate,
+            sample_offset=offset,
+            generation=0,
+        )
+        return detection.phrase if detection is not None else None
+
+    def accept_wake_at(
+        self,
+        samples: Sequence[float],
+        sample_rate: int,
+        *,
+        sample_offset: int,
+        generation: int,
+    ) -> WakeDetection | None:
+        """Run KWS while preserving its timestamp in the caller's sample timeline."""
+        if sample_rate <= 0 or sample_offset < 0:
+            raise ValueError("wake audio sample rate and offset must be valid")
         self._ensure_loaded()
+        if self._kws_stream_start_sample is None:
+            self._kws_stream_start_sample = sample_offset
+            self._kws_generation = generation
+            self._kws_sample_rate = sample_rate
+        elif (
+            self._kws_generation != generation
+            or self._kws_sample_rate != sample_rate
+            or self._kws_next_sample != sample_offset
+        ):
+            self._reset_kws_stream()
+            self._kws_stream_start_sample = sample_offset
+            self._kws_generation = generation
+            self._kws_sample_rate = sample_rate
+        stream_id = self._kws_stream_id
         self._kws_stream.accept_waveform(sample_rate, self._np.asarray(samples, dtype=self._np.float32))
         while self._kws.is_ready(self._kws_stream):
             self._kws.decode_stream(self._kws_stream)
+        phrase, tokens, timestamps = self._keyword_result()
+        self._kws_next_sample = sample_offset + len(samples)
+        if not phrase:
+            return None
+
+        token_count = len(tokens)
+        timestamp_count = len(timestamps)
+        last_timestamp = timestamps[-1] if timestamps else None
+        anchor: int | None = None
+        fallback_reason: str | None = None
+        stream_start = self._kws_stream_start_sample
+        if stream_start is None:
+            fallback_reason = "stream_start_unavailable"
+        elif token_count == 0 or timestamp_count != token_count:
+            fallback_reason = "timestamp_count_mismatch"
+        elif last_timestamp is None or not isfinite(last_timestamp) or last_timestamp < 0:
+            fallback_reason = "timestamp_invalid"
+        else:
+            candidate = stream_start + round(last_timestamp * sample_rate)
+            if candidate < stream_start or candidate > sample_offset + len(samples):
+                fallback_reason = "timestamp_out_of_range"
+            else:
+                anchor = candidate
+
+        detection = WakeDetection(
+            phrase=phrase,
+            generation=generation,
+            stream_id=stream_id,
+            stream_start_sample=stream_start,
+            anchor_sample=anchor,
+            sample_rate=sample_rate,
+            last_token_timestamp=last_timestamp,
+            token_count=token_count,
+            timestamp_count=timestamp_count,
+            continuous=True,
+            fallback_reason=fallback_reason,
+        )
+        self._reset_kws_stream()
+        return detection
+
+    def _keyword_result(self) -> tuple[str, list[str], list[float]]:
+        """Read phrase and timing from one native result; get_result consumes it."""
+        native = getattr(self._kws, "keyword_spotter", None)
+        get_result = getattr(native, "get_result", None)
+        if callable(get_result):
+            result = get_result(self._kws_stream)
+            phrase = str(getattr(result, "keyword", "")).strip()
+            tokens = list(getattr(result, "tokens", ()) or ())
+            try:
+                timestamps = [float(value) for value in (getattr(result, "timestamps", ()) or ())]
+            except (TypeError, ValueError):
+                timestamps = []
+            return phrase, tokens, timestamps
         result = self._kws.get_result(self._kws_stream)
-        if result:
+        return str(result).strip(), [], []
+
+    def reset_wake(self) -> None:
+        """Drop KWS time alignment after a capture discontinuity or lease change."""
+        self._ensure_loaded()
+        self._kws_stream = self._kws.create_stream()
+        self._kws_stream_id += 1
+        self._kws_stream_start_sample = None
+        self._kws_next_sample = None
+        self._kws_generation = None
+        self._kws_sample_rate = None
+
+    def _reset_kws_stream(self) -> None:
+        if self._kws is not None and self._kws_stream is not None:
             self._kws.reset_stream(self._kws_stream)
-            return str(result)
-        return None
+            self._kws_stream_id += 1
+        self._kws_stream_start_sample = None
+        self._kws_next_sample = None
+        self._kws_generation = None
+        self._kws_sample_rate = None
 
     def accept_asr(self, samples: Sequence[float], sample_rate: int) -> AsrResult:
         """Streaming frames stay uncommitted; the speech API decodes a finished VAD segment."""
@@ -297,6 +430,10 @@ class SherpaVoiceEngine:
         """Release model references and the generated KWS keyword list."""
         self._kws_stream = self._vad = None
         self._kws = self._vad = self._sherpa = None
+        self._kws_stream_start_sample = None
+        self._kws_next_sample = None
+        self._kws_generation = None
+        self._kws_sample_rate = None
         if self._keywords_file is not None:
             path = Path(self._keywords_file.name)
             self._keywords_file.close()

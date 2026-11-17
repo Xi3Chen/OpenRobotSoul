@@ -1,6 +1,6 @@
 # 唤醒词残段进入 ASR 转写：问题与方案
 
-状态：方案讨论（未选型落地）  
+状态：方案 A+B 已实现（A 默认关闭）；待目标板时间映射与裁剪标定
 关联：[16-voice-interaction.md](16-voice-interaction.md)、`robotsoul/voice/commands.py`、`robotsoul/voice/service.py`、`robotsoul/voice/engine.py`
 
 ## 1. 现象
@@ -51,8 +51,8 @@ KWS: 索拉 ✓
 
 ### 2.3 闭集匹配当前只精确剥唤醒词
 
-`match_closed_command` 的 `_normalize` 只剥配置字面量（如「索拉」）。  
-`service._is_wake_only` 已对「整句仅唤醒词」做了无调拼音判断，但 **「唤醒残段 + 指令」的前缀剥离** 没有同等的通用拼音逻辑，却叠了硬编码别名。
+原实现中 `match_closed_command` 的 `_normalize` 只剥配置字面量（如「索拉」）。
+`service._is_wake_only` 曾对「整句仅唤醒词」做无调拼音判断，但 **「唤醒残段 + 指令」的前缀剥离** 没有通用拼音逻辑，之后又叠加了硬编码别名。方案 B 已把两类判断收敛到共享转写工具。
 
 ### 2.4 硬编码同音表为什么不合理
 
@@ -85,20 +85,56 @@ KWS: 索拉 ✓
 
 ### 方案 A：音频裁剪（治本）
 
-**做法**：KWS 给出唤醒结束时间（或固定延迟）；ASR 只上传该时刻之后的 PCM（可保留短 pre-roll 以免吞掉指令首字）。文本侧仍保留精确剥配置唤醒词作为双保险。
+**做法**：KWS 给出 token 解码时间；应用将该时间映射到带偏移的有限 PCM 环形缓存，并从唤醒结束候选附近截取 ASR 音频，保留经实机标定的短 pre-roll。文本侧仍保留配置唤醒词清洗作为双保险。
 
 | | |
 |---|---|
 | 优点 | 从源头减少「佐拉」进入转写；与换名无关；符合 16 号文档分层 |
-| 缺点 | 依赖 KWS 时间戳/延迟标定；裁太狠会吞「站」等首字；需实机调 pre-roll |
+| 缺点 | token 时间戳是解码时间，不是精确声学边界；需做缓存时间映射与实机 pre-roll 标定，裁太狠会吞「站」等首字 |
 | 工作量 | 中（采集链路与时间对齐） |
 | 风险 | 标定不准导致指令残缺 |
 
-**适用**：中长期默认方向；与现有 sherpa KWS 匹配。
+**技术可行性**：项目锁定 sherpa-onnx 2.0.1。Python `KeywordSpotter` 提供 `timestamps(stream)`，返回与 KWS tokens 对齐的秒级时间；高层 `get_result()` 只返回关键词文本。底层 `start_time` 表示 segment 起点且 Python 绑定未暴露，不能将其当作关键词结束点。当前 transducer 时间戳换算使用 10 ms 帧移和 4 倍 subsampling；token timestamp 表示解码时刻，并非声学起止边界。因此应用应以最后 token 时间作为候选锚点，使用安全尾部和 pre-roll 参数实机标定。每次 KWS stream reset 后应重新维护流内偏移；检测结果缺少时间戳或偏移/采样率/generation 对不上时，回退到未裁剪音频并由方案 B 清理文本。
+
+#### A 的实现契约（编码前固定）
+
+1. **唯一时间基准**：采集音频先重采样到统一的 `pipeline_sample_rate`（当前为 16 kHz），KWS、VAD、裁剪缓存和 ASR 输入都使用该采样率。每个送入 KWS/VAD 的块都记录 `generation`、`stream_offset_samples`、`sample_count`、`sample_rate` 和 `captured_at`。`stream_offset_samples` 是该块在本次 KWS stream 中的起始样本序号，不能用处理线程的到达时间推算；重采样改变样本数时，映射必须在重采样后建立。
+2. **连续性要求**：同一 generation 内，下一块的起始序号必须等于上一块起始序号加样本数。队列丢帧、采样率变化、重采样失败、设备切换或 generation 变化都会将当前映射标记为 `discontinuous`；标记后在重新建立 KWS stream 并积累一个完整连续窗口前，不得启用裁剪。
+3. **时间戳换算**：检测结果取最后一个 token 的 timestamp `t_last`，仅当 `t_last` 为有限非负数、token 数与 timestamp 数一致，且结果属于当前 stream/generation 时有效。候选锚点为
+   `anchor = stream_base_sample + round(t_last * pipeline_sample_rate)`。
+   这里的 `stream_base_sample` 是本次 stream 第一个实际送入样本在环形缓存中的绝对样本位置；不能使用 `KeywordResult.start_time`，也不能把 `t_last` 解释成关键词声学结束点。
+4. **裁剪公式**：配置两个独立参数：`wake_guard_ms`（锚点之后的安全尾部，默认先取 80 ms）和 `command_preroll_ms`（裁剪点之前保留的音频，标定值为 80/120/160 ms 之一）。裁剪边界为
+   `cut = anchor + round(wake_guard_ms * pipeline_sample_rate / 1000)`，
+   `asr_start = max(segment_start, cut - round(command_preroll_ms * pipeline_sample_rate / 1000))`。
+   只把 `[asr_start, segment_end]` 送入 ASR。`command_preroll_ms` 是从 `cut` 向前保留的时长，不是“唤醒词结束后再等待的时间”。时间戳整体偏晚时，应使用人工标注集校准 `wake_guard_ms`（减小 guard）和/或增加 pre-roll；不得只凭单条转写调参。两者虽然共同决定裁剪起点，但会改变保留唤醒残段的倾向，实验记录必须分开。
+5. **缓存与边界**：环形缓存保存带绝对样本序号的 PCM 块，而不是只有 `AudioFrame` 引用。VAD 输出的每个 segment 也必须带有其在同一 pipeline 样本坐标中的 `[segment_start, segment_end)`；不能假设 VAD 返回的 `samples` 从 KWS stream 的零点开始。裁剪必须在拥有数据副本后进行；若无法将 VAD segment 与该坐标映射、`asr_start` 已被环形缓存淘汰、块之间存在空洞，或边界落在未知采样率数据上，整句回退到未裁剪 VAD 段，并继续走方案 B。
+6. **reset 语义**：KWS `reset_stream` 后递增 `stream_id`，清零流内偏移并清空该 stream 的时间戳状态；旧 stream 的检测结果一律丢弃。generation 切换、PASSIVE/CALL 切换和服务重启都必须同时清空裁剪映射，不能复用旧偏移。
+7. **结果元数据**：`WakeDetection` 至少包含 `phrase`、`generation`、`stream_id`、`anchor_sample`、`kws_sample_rate`、`last_token_timestamp`、`timestamp_count`、`continuous` 和 `fallback_reason`。日志只记录这些诊断字段及裁剪参数，不记录原始音频。
+8. **默认策略**：裁剪开关默认关闭。开启后，只有上述校验全部通过才使用裁剪；任何异常都采用“未裁剪音频 + 方案 B”，不能因为时间戳异常而丢弃整轮指令，也不能静默使用跨 generation 的缓存。
+9. **长时间被动监听**：sherpa-onnx 2.0.1 在约 1.5 秒 trailing blank 后会在 C++ 内部重置 KWS 解码器，但 Python 不收到 reset 事件。A 开启时，应用必须在 KWS stream 年龄达到 1.4 秒前创建新 stream，并回放最近 0.8 秒连续 PCM，使解码时间原点可知且窗口短于上游静默重置阈值。回放窗口不完整时该次检测标记不可裁剪并走 B。
+
+第一版运行时参数通过环境变量提供：`ROBOTSOUL_VOICE_WAKE_CROP=1` 开启 A，`ROBOTSOUL_VOICE_WAKE_GUARD_MS` 设置安全尾部（默认 80），`ROBOTSOUL_VOICE_COMMAND_PREROLL_MS` 设置 pre-roll（默认 120，标定时比较 80/120/160）。未设置或设置为关闭时为 B-only；无论开关状态如何，最终转写都继续经过 B 的动态唤醒词清洗和仅唤醒词过滤。
+
+该契约意味着第一版代码需要同时改造三处：采集/队列为帧提供样本序号，KWS wrapper 返回 `WakeDetection` 而不只返回字符串，VAD 完成后按样本序号裁剪 `_OwnedSegment`。仅在 `accept_wake()` 中调用 `timestamps()` 而不改造这三处，不能形成可靠的 A 实现。
+
+#### A 的标定与对照实验
+
+标定必须在目标板、目标麦克风、实际采样率和实际 100 ms 音频块配置下进行。每个 `command_preroll_ms` 至少使用 300 条有效样本，覆盖至少 3 名说话人、安静/常规噪声/机器人播报回声三类条件（每名说话人在每类条件下至少 30 条）；同一批录音分别离线重放给 B-only 和 A+B，避免两组输入不一致。每条样本须有人工标注的唤醒词结束点、指令首音节起点和期望闭集技能。300 条的门槛使零次首音节丢失时一侧 95% 精确二项置信上界约低于 1%；若出现丢失，则增加样本，直到上界达标或判定该候选失败。
+
+记录并按以下公式统计：
+
+- **指令首音节丢失率** = ASR 结果缺少人工标注首音节的样本数 / 有效样本数。
+- **残段率** = ASR 文本仍包含唤醒词或其近音前缀的样本数 / 有效样本数；B-only 与 A+B 使用同一判定规则。
+- **闭集准确率** = 命中期望技能且参数正确的样本数 / 闭集样本数。
+- **裁剪回退率** = 触发任一 `fallback_reason` 的样本数 / 唤醒命中样本数，另分列时间戳无效、连续性破坏、缓存不足和 generation 不一致。
+
+选择满足以下条件的最小 `command_preroll_ms`：首音节丢失率不超过 1%，且其一侧 95% Clopper-Pearson 二项置信上界也不超过 1%；A+B 相对 B-only 的闭集准确率差值的一侧 95% 配对置信下界不低于 -1 个百分点；残段率相对 B-only 至少下降 50% 或降到 5% 以下（取较宽松者），且该配对下降的 95% 置信区间排除零。若三个候选值都不满足，A 保持关闭，继续使用 B，并把失败样本按 `fallback_reason` 分类后重新标定。标定报告必须同时记录 `wake_guard_ms`，不能只报告 pre-roll 一个数。
+
+**适用**：中期方向；现有 sherpa KWS 支持所需时间戳，但需先完成时间映射测试和实机标定。
 
 ### 方案 B：相对当前唤醒词的拼音动态剥离（治标、可换名）
 
-**做法**：删除 `_WAKE_ASR_ALIASES`。对转写句首、与 `wake_phrase` 同长度（或同音节数）的片段做无调拼音相似度；超过阈值则剥掉，再跑闭集。可复用 `service` 里已有的 `_toneless_pinyin` 思路，扩展为「前缀剥离」而非仅「整句是否纯唤醒」。
+**做法**：删除 `_WAKE_ASR_ALIASES`。对转写句首、与 `wake_phrase` 同音节数的片段做无调拼音相似度；平均得分至少 `0.75` 且至少一个音节完全匹配时作为闭集候选，再按原始归一化文本回退。仅唤醒词判断和前缀候选共用拼音工具；`pypinyin` 不可用时只做字面量前缀剥离。
 
 | | |
 |---|---|
@@ -141,9 +177,9 @@ KWS: 索拉 ✓
 
 ## 5. 建议路线
 
-1. **立即**：去掉源码内 `_WAKE_ASR_ALIASES` 及依赖它的启发式；避免制造「换名即坏」的技术债。  
-2. **短期**：落地 **方案 B**（拼音动态前缀剥离）+ 闭集前统一「清洗转写」入口；并给语言路径补称谓说明，减轻残留错写。  
-3. **中期**：落地 **方案 A**（ASR 音频起点后移 / 按 KWS 时间裁剪），从根上减少残段。  
+1. **已完成**：去掉源码内 `_WAKE_ASR_ALIASES` 及依赖它的启发式；共享转写工具按当前配置动态判断同音/近音前缀，供闭集匹配使用。
+2. **短期**：在实机 ASR 与闭集回归通过后持续使用方案 B；开放语言路径仍接收原始最终转写，不因闭集清洗而改写。
+3. **已实现**：方案 A 的 `WakeDetection` 元数据、统一采样坐标、带样本偏移的有限回放缓存、长时间监听的 stream 轮换和默认关闭的裁剪开关；时间戳缺失、无效、断流、缓存不足或 generation 错位时安全回退到完整音频并继续走 B。
 4. **并行**：修对话 **summary 空结果** 的 fail-closed（重试、跳过压缩、或降级无摘要决策），避免次生失败掩盖语音问题。  
 5. **原则**：  
    - 闭集：吃「清洗后的指令」，清洗算法只依赖**当前配置的唤醒词**，不依赖仓库常量人名表。  
@@ -156,6 +192,11 @@ KWS: 索拉 ✓
 - 将唤醒词改为另一双字称谓（如「小月」）后：**不改代码**，同音错写（如「晓悦站起来」）仍能剥前缀并闭集命中。  
 - KWS 命中且指令为标准口令时，不因 summary 空结果导致整单失败（开放路径降级策略生效）。  
 - 无针对特定旧称谓的源码常量表。
+- B 的拼音近似只在同音节数、平均相似度至少 `0.75` 且至少一个音节完全匹配时剥离；未安装可选 `pypinyin` 时只执行字面量剥离。
+- A 启用前至少比较 `80/120/160 ms` command pre-roll，初始 `wake_guard_ms=80 ms`；每个候选至少 300 条有效样本，且必须包含 3 名说话人、安静/噪声/回声条件。只有首音节丢失率及其一侧 95% Clopper-Pearson 上界均不超过 `1%`、闭集准确率配对差值的一侧 95% 下界不低于 `-1` 个百分点、残段率满足下降门槛且其配对置信区间排除零时，才允许启用。
+- 报告每个候选的残段率、首音节丢失率、闭集准确率、回退率、置信区间及失败原因；标注版本、模型/运行库版本、采样率、块大小和环境条件，以便复现比较。
+- 单元测试覆盖：连续帧的样本序号映射、跨块时间戳、KWS stream 轮换和重叠回放、reset 后偏移重置、队列丢帧、generation 切换、采样率不一致、缓存不足和无效 timestamp；所有异常路径都验证“未裁剪音频 + B 清洗”仍可提交。
+- 实机灰度期间 A 的裁剪开关可独立关闭；日志能区分 `A-cropped`、`A-fallback` 和 `B-only`，以便在不改 ASR 服务的情况下比较同一批指令。
 
 ## 7. 非目标
 

@@ -1,7 +1,9 @@
 import unittest
+from unittest.mock import patch
 
 from robotsoul.models import CapabilitySpec, ParameterSpec
 from robotsoul.voice.commands import match_closed_command
+from robotsoul.voice.transcript import wake_prefix_candidates
 
 
 def _move_capability() -> CapabilitySpec:
@@ -102,18 +104,71 @@ class ClosedCommandTests(unittest.TestCase):
             "motion.turn_around": CapabilitySpec("motion.turn_around", {}),
             "sport.stand_up": CapabilitySpec("sport.stand_up", {}),
         }
-        self.assertEqual(
-            match_closed_command("左拉，向后转。", capabilities, wake_phrase="索拉").skill,
-            "motion.turn_around",
+        pronunciations = {
+            "索拉": ["suo", "la"],
+            "左拉": ["zuo", "la"],
+            "所拉": ["suo", "la"],
+            "佐拉": ["zuo", "la"],
+            "小月": ["xiao", "yue"],
+            "晓悦": ["xiao", "yue"],
+            "佐那": ["zuo", "na"],
+        }
+        with patch("robotsoul.voice.transcript._toneless_pinyin", side_effect=pronunciations.get):
+            self.assertEqual(
+                match_closed_command("左拉，向后转。", capabilities, wake_phrase="索拉").skill,
+                "motion.turn_around",
+            )
+            self.assertEqual(
+                match_closed_command("所拉向后转", capabilities, wake_phrase="索拉").skill,
+                "motion.turn_around",
+            )
+            self.assertEqual(
+                match_closed_command("佐拉站起来。", capabilities, wake_phrase="索拉").skill,
+                "sport.stand_up",
+            )
+            self.assertEqual(
+                match_closed_command("晓悦站起来", capabilities, wake_phrase="小月").skill,
+                "sport.stand_up",
+            )
+            self.assertIsNone(
+                match_closed_command("佐那站起来", capabilities, wake_phrase="索拉")
+            )
+            self.assertIsNone(
+                match_closed_command("佐拉站起来", capabilities, wake_phrase="小月")
+            )
+
+    def test_only_configured_wake_prefix_is_removed(self):
+        capabilities = {"motion.turn_around": CapabilitySpec("motion.turn_around", {})}
+        self.assertIsNone(
+            match_closed_command(
+                "佐拉，向后转",
+                capabilities,
+                wake_phrase="小月",
+            )
         )
-        self.assertEqual(
-            match_closed_command("所拉向后转", capabilities, wake_phrase="索拉").skill,
-            "motion.turn_around",
+        self.assertIsNone(
+            match_closed_command(
+                "说明一下，向后转",
+                capabilities,
+                wake_phrase="索拉",
+            )
         )
-        self.assertEqual(
-            match_closed_command("佐拉站起来。", capabilities, wake_phrase="索拉").skill,
-            "sport.stand_up",
-        )
+
+    def test_wake_prefix_candidates_apply_similarity_threshold_and_punctuation(self):
+        pronunciations = {
+            "索拉": ["suo", "la"],
+            "左拉": ["zuo", "la"],
+            "所你": ["suo", "ni"],
+        }
+        with patch("robotsoul.voice.transcript._toneless_pinyin", side_effect=pronunciations.get):
+            self.assertEqual(
+                wake_prefix_candidates("左拉，向后转。", "索拉"),
+                ["向后转", "左拉，向后转"],
+            )
+            self.assertEqual(
+                wake_prefix_candidates("所你站起来", "索拉"),
+                ["所你站起来"],
+            )
 
     def test_meters_and_minutes_use_separate_move_skills(self):
         speed = ParameterSpec("number", -2.5, 3.8)

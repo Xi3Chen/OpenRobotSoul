@@ -11,6 +11,7 @@ import re
 from typing import Any, Mapping, Sequence
 
 from robotsoul.models import AgentIntent, AgentPlan
+from robotsoul.voice.transcript import wake_prefix_candidates
 
 _STAND_UP = re.compile(r"^(?:请)?(?:你)?(?:站起来|起立|站立|起来)$")
 _STAND_DOWN = re.compile(r"^(?:请)?(?:你)?(?:趴下|卧倒)$")
@@ -64,14 +65,6 @@ _COUNTS = {
     "十": 10,
 }
 _WALK_SPEED = 0.3
-# Common ASR mishearings of configured wake phrases. Keyed by the configured text.
-_WAKE_ASR_ALIASES = {
-    "索拉": (
-        "左拉", "所拉", "索啦", "锁拉", "梭拉", "索那",
-        "佐拉", "卓拉", "苏拉", "沙拉", "索娜", "索喇",
-    ),
-}
-_COMMAND_LEADERS = frozenset("站趴转点摇歪退向往请你起")
 
 
 def match_closed_command(
@@ -82,7 +75,7 @@ def match_closed_command(
 ) -> AgentIntent | AgentPlan | None:
     if not isinstance(capabilities, Mapping):
         return None
-    for phrase in _phrase_candidates(text, wake_phrase):
+    for phrase in wake_prefix_candidates(text, wake_phrase):
         matched = _match_normalized_phrase(phrase, capabilities)
         if matched is not None:
             return matched
@@ -201,71 +194,6 @@ def _match_normalized_phrase(
         },
         "闭集：按时间移动",
     )
-
-
-def _phrase_candidates(text: str, wake_phrase: str | Sequence[str]) -> list[str]:
-    """Yield normalized phrases, including ASR wake-garble fallbacks.
-
-    Example: wake is 索拉 but ASR returns「左拉，向后转」→ also try「向后转」。
-    """
-
-    wakes = _wake_list(wake_phrase)
-    primary = _normalize(text, wakes)
-    candidates: list[str] = []
-    seen: set[str] = set()
-
-    def add(value: str) -> None:
-        cleaned = value.strip("，。！？,.!?、 ")
-        if cleaned and cleaned not in seen:
-            seen.add(cleaned)
-            candidates.append(cleaned)
-
-    add(primary)
-    raw = "".join(str(text).split()).strip("，。！？,.!?、 ")
-    aliases = []
-    for wake in wakes:
-        compact = "".join(wake.split())
-        aliases.append(compact)
-        aliases.extend(_WAKE_ASR_ALIASES.get(compact, ()))
-    for alias in sorted({item for item in aliases if item}, key=len, reverse=True):
-        if raw.startswith(alias):
-            add(raw[len(alias) :])
-        if primary.startswith(alias):
-            add(primary[len(alias) :])
-    # Same-length near-wake:「佐拉站起来」when wake is「索拉」(shared last char).
-    for wake in wakes:
-        compact = "".join(wake.split())
-        if len(compact) != 2:
-            continue
-        for source in (raw, primary):
-            if (
-                len(source) > 2
-                and source[1] == compact[1]
-                and source[0] != compact[0]
-                and source[2] in _COMMAND_LEADERS
-            ):
-                add(source[2:])
-    for sep in ("，", ",", "、"):
-        if sep in primary:
-            add(primary.split(sep, 1)[1])
-        if sep in raw:
-            add(raw.split(sep, 1)[1])
-    return candidates
-
-
-def _wake_list(wake_phrase: str | Sequence[str]) -> tuple[str, ...]:
-    if isinstance(wake_phrase, str):
-        return tuple(part.strip() for part in wake_phrase.split(",") if part.strip())
-    return tuple(phrase.strip() for phrase in wake_phrase if isinstance(phrase, str) and phrase.strip())
-
-
-def _normalize(text: str, wake_phrase: str | Sequence[str]) -> str:
-    cleaned = "".join(str(text).split())
-    cleaned = cleaned.strip("，。！？,.!?、 ")
-    for phrase in sorted(("".join(item.split()) for item in _wake_list(wake_phrase)), key=len, reverse=True):
-        if phrase and cleaned.startswith(phrase):
-            cleaned = cleaned[len(phrase) :].lstrip("，。！？,.!?、 ")
-    return cleaned
 
 
 def _translate_distance_m(count: str | None, unit: str | None) -> float:

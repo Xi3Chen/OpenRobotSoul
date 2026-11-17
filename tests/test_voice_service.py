@@ -6,10 +6,11 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from robotsoul.runlog import configure, current
 from robotsoul.voice.core import CaptureState
-from robotsoul.voice.engine import AsrResult, SynthesizedAudio
+from robotsoul.voice.engine import AsrResult, SynthesizedAudio, WakeDetection
 from robotsoul.voice.service import VoiceService
 
 
@@ -223,6 +224,171 @@ class VoiceServiceTests(unittest.TestCase):
             while time.monotonic() < deadline and engine.vad_audio != [(0.1,), (0.2,), (0.3,)]:
                 time.sleep(0.01)
             self.assertEqual(engine.vad_audio, [(0.1,), (0.2,), (0.3,)])
+        finally:
+            service.stop()
+
+    def test_wake_crop_uses_timestamp_and_preserves_configured_preroll(self):
+        class Engine(FakeEngine):
+            def __init__(self):
+                super().__init__()
+                self.vad_audio = []
+                self._seen = 0
+
+            def accept_wake_at(self, _samples, sample_rate, *, sample_offset, generation):
+                self._seen += 1
+                if self._seen != 3:
+                    return None
+                return WakeDetection(
+                    phrase="索拉",
+                    generation=generation,
+                    stream_id=1,
+                    stream_start_sample=0,
+                    anchor_sample=sample_offset,
+                    sample_rate=sample_rate,
+                    last_token_timestamp=0.008,
+                    token_count=2,
+                    timestamp_count=2,
+                    continuous=True,
+                )
+
+            def accept_vad(self, samples):
+                self.vad_audio.append(tuple(samples))
+                return False
+
+            def accept_asr(self, _samples, _sample_rate):
+                return AsrResult("", False)
+
+        capture = FakeCapture(available=True)
+        engine = Engine()
+        with patch.dict(os.environ, {
+            "ROBOTSOUL_VOICE_WAKE_CROP": "1",
+            "ROBOTSOUL_VOICE_WAKE_GUARD_MS": "0",
+            "ROBOTSOUL_VOICE_COMMAND_PREROLL_MS": "4",
+        }):
+            service = VoiceService(
+                capture=capture,
+                engine=engine,
+                run_text=lambda text: text,
+                sample_rate=1000,
+                idle_probe_seconds=100,
+            )
+        try:
+            self.assertEqual(service.start(), CaptureState.PASSIVE)
+            capture.callback((0, 1, 2, 3), 1000)
+            capture.callback((4, 5, 6, 7), 1000)
+            capture.callback((8, 9, 10, 11), 1000)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and len(engine.vad_audio) < 2:
+                time.sleep(0.01)
+            self.assertEqual(engine.vad_audio, [(4, 5, 6, 7), (8, 9, 10, 11)])
+            self.assertTrue(any("A-cropped" in line for line in current().recent(20)))
+        finally:
+            service.stop()
+
+    def test_wake_crop_falls_back_to_full_preroll_without_timestamp_metadata(self):
+        service = VoiceService(
+            capture=FakeCapture(available=False),
+            engine=FakeEngine(),
+            run_text=lambda text: text,
+            sample_rate=1000,
+            idle_probe_seconds=100,
+        )
+        service._wake_crop_enabled = True
+        frames = (
+            service._make_frame(1, (0, 1, 2), 1000),
+            service._make_frame(1, (3, 4, 5), 1000),
+        )
+        try:
+            replay, crop_start, fallback = service._select_wake_preroll(
+                frames, "索拉", frames[-1]
+            )
+            self.assertEqual(replay, list(frames))
+            self.assertIsNone(crop_start)
+            self.assertEqual(fallback, "timestamp_metadata_unavailable")
+        finally:
+            service.stop()
+
+    def test_wake_crop_refreshes_kws_stream_with_a_contiguous_replay_window(self):
+        class Engine(FakeEngine):
+            def __init__(self):
+                super().__init__()
+                self.wake_resets = 0
+                self.wake_inputs = []
+
+            def reset_wake(self):
+                self.wake_resets += 1
+
+            def accept_wake_at(self, samples, sample_rate, *, sample_offset, generation):
+                self.wake_inputs.append((sample_offset, len(samples), sample_rate, generation))
+                return None
+
+        engine = Engine()
+        service = VoiceService(
+            capture=FakeCapture(available=False),
+            engine=engine,
+            run_text=lambda text: text,
+            sample_rate=1000,
+            pre_roll_frames=20,
+            idle_probe_seconds=100,
+        )
+        service._wake_crop_enabled = True
+        frames = tuple(
+            service._make_frame(1, (index,) * 100, 1000)
+            for index in range(14)
+        )
+        service._pre_roll.extend(frames)
+        service._wake_stream_origin_sample = 0
+        try:
+            self.assertIsNone(service._accept_wake_frame(frames[-1]))
+            self.assertEqual(engine.wake_resets, 1)
+            self.assertEqual(service._wake_stream_origin_sample, 600)
+            self.assertEqual(engine.wake_inputs[0], (600, 100, 1000, 1))
+            self.assertEqual(engine.wake_inputs[-1], (1300, 100, 1000, 1))
+            self.assertEqual(sum(item[1] for item in engine.wake_inputs), 800)
+        finally:
+            service.stop()
+
+    def test_audio_gap_disables_crop_until_a_contiguous_recovery_window(self):
+        class Engine(FakeEngine):
+            def __init__(self):
+                super().__init__()
+                self.wake_resets = 0
+
+            def reset_wake(self):
+                self.wake_resets += 1
+
+        service = VoiceService(
+            capture=FakeCapture(available=False),
+            engine=Engine(),
+            run_text=lambda text: text,
+            sample_rate=1000,
+            idle_probe_seconds=100,
+        )
+        service._wake_crop_enabled = True
+        frames = tuple(service._make_frame(1, (index,) * 100, 1000) for index in range(4))
+        try:
+            service._prepare_audio_frame(frames[0])
+            after_gap = service._prepare_audio_frame(frames[2])
+            following = service._prepare_audio_frame(frames[3])
+            detection = WakeDetection(
+                phrase="索拉",
+                generation=1,
+                stream_id=1,
+                stream_start_sample=200,
+                anchor_sample=350,
+                sample_rate=1000,
+                last_token_timestamp=0.15,
+                token_count=1,
+                timestamp_count=1,
+                continuous=True,
+            )
+            replay, crop_start, fallback = service._select_wake_preroll(
+                (after_gap, following), detection, following
+            )
+            self.assertEqual(service.engine.wake_resets, 1)
+            self.assertEqual(replay, [after_gap, following])
+            self.assertIsNone(crop_start)
+            self.assertEqual(fallback, "alignment_recovery_window")
         finally:
             service.stop()
 
@@ -714,10 +880,55 @@ class VoiceServiceTests(unittest.TestCase):
             run_text=lambda text: seen.append(text) or text,
             idle_probe_seconds=100,
         )
+        service.engine.wake_phrases = ("索拉", "小月")
         try:
-            service._handle_asr_result(AsrResult("锁拉", True))
-            self.assertEqual(seen, [])
-            self.assertTrue(any("忽略仅唤醒词" in line for line in current().recent(20)))
+            pronunciations = {
+                "索拉": ["suo", "la"],
+                "小月": ["xiao", "yue"],
+                "晓悦": ["xiao", "yue"],
+            }
+            with patch("robotsoul.voice.transcript._toneless_pinyin", side_effect=pronunciations.get):
+                service._handle_asr_result(AsrResult("晓悦", True))
+                self.assertEqual(seen, [])
+                self.assertTrue(any("忽略仅唤醒词" in line for line in current().recent(20)))
+        finally:
+            service.stop()
+
+    def test_cleaned_closed_match_keeps_original_asr_text_for_runtime(self):
+        from robotsoul.models import CapabilitySpec
+        from robotsoul.voice.commands import match_closed_command
+        from robotsoul.voice.engine import AsrResult
+
+        submitted = []
+        completed = threading.Event()
+
+        def run_text(text, intent=None):
+            submitted.append((text, intent.skill if intent is not None else None))
+            completed.set()
+            return text
+
+        pronunciation = {
+            "索拉": ["suo", "la"],
+            "佐拉": ["zuo", "la"],
+        }
+        matcher = lambda text: match_closed_command(
+            text,
+            {"sport.stand_up": CapabilitySpec("sport.stand_up", {})},
+            wake_phrase="索拉",
+        )
+        service = VoiceService(
+            capture=FakeCapture(available=False),
+            engine=FakeEngine(),
+            run_text=run_text,
+            command_matcher=matcher,
+            idle_probe_seconds=100,
+        )
+        try:
+            with patch("robotsoul.voice.transcript._toneless_pinyin", side_effect=pronunciation.get):
+                service._handle_asr_result(AsrResult("佐拉站起来。", True))
+            self.assertTrue(completed.wait(2))
+            self.assertEqual(submitted, [("佐拉站起来。", "sport.stand_up")])
+            self.assertTrue(any("识别：佐拉站起来。" in line for line in current().recent(20)))
         finally:
             service.stop()
 

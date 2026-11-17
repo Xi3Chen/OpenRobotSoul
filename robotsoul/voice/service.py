@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from math import isfinite
 import os
 from queue import Empty, Full, Queue
 import re
@@ -19,10 +20,14 @@ from robotsoul.voice.core import (
     ConversationGate,
     RuntimeTextExecutor,
 )
-from robotsoul.voice.engine import VoiceEngineError
+from robotsoul.voice.engine import VoiceEngineError, WakeDetection
 from robotsoul.voice.monitor import AudioLevelMonitor
 from robotsoul.voice.reply_speech import ReplySpeechPipeline
 from robotsoul.voice.speech_api import SpeechApiError
+from robotsoul.voice.transcript import is_wake_only
+
+_KWS_MAX_STREAM_SECONDS = 1.4
+_KWS_REPLAY_SECONDS = 0.8
 
 
 def _recognition_text(value: Any) -> str:
@@ -51,29 +56,29 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _toneless_pinyin(text: str) -> list[str] | None:
-    try:
-        from pypinyin import lazy_pinyin
-    except ImportError:
-        return None
-    return [item.lower() for item in lazy_pinyin(text)]
-
-
-def _is_wake_only(text: str, wake_phrase: str) -> bool:
-    """True when the transcript is the wake word itself (including homophones)."""
-    cleaned = "".join(text.split())
-    wake = "".join(wake_phrase.split())
-    if not cleaned or not wake:
-        return False
-    if cleaned == wake:
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
         return True
-    wake_syllables = _toneless_pinyin(wake)
-    text_syllables = _toneless_pinyin(cleaned)
-    if wake_syllables is not None and text_syllables is not None:
-        return text_syllables == wake_syllables
-    # Minimal environment without pypinyin: accept a same-length, same-final
-    # transcription (e.g. 索拉 -> 锁拉) as the wake word.
-    return len(cleaned) == len(wake) and cleaned[-1] == wake[-1]
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
+
+
+def _env_ms(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer number of milliseconds") from exc
+    if not 0 <= value <= 2000:
+        raise ValueError(f"{name} must be between 0 and 2000 milliseconds")
+    return value
 
 
 def _shorten_spoken_reply(text: str, success: bool, limit: int) -> str:
@@ -201,11 +206,23 @@ class VoiceService:
         # here so a late pause does not replace the first half with the second.
         self._utterance_samples: list[float] = []
         self._frames: Queue[AudioFrame] = Queue(maxsize=frame_queue_size)
-        # Capture blocks are 100 ms, so 20 frames keep about 2 s. The keyword
-        # spotter reports the wake phrase only after its chunk delay, which is
-        # already inside the following command. This window has to hold the
-        # wake phrase itself, or that audio never reaches VAD.
+        # Capture blocks are 100 ms, so 20 frames keep about 2 s for VAD replay,
+        # timestamped cropping, and full-audio fallback when alignment is unsafe.
         self._pre_roll: deque[AudioFrame] = deque(maxlen=pre_roll_frames)
+        self._capture_cursor_lock = Lock()
+        self._capture_cursor_generation: int | None = None
+        self._capture_cursor_rate: int | None = None
+        self._capture_cursor = 0
+        self._processed_generation: int | None = None
+        self._processed_sample_rate: int | None = None
+        self._expected_sample_offset: int | None = None
+        self._wake_alignment_ready = True
+        self._wake_stream_origin_sample: int | None = None
+        self._wake_crop_safe_after_sample: int | None = None
+        self._wake_crop_enabled = _env_bool("ROBOTSOUL_VOICE_WAKE_CROP", False)
+        self._wake_guard_ms = _env_ms("ROBOTSOUL_VOICE_WAKE_GUARD_MS", 80)
+        self._command_preroll_ms = _env_ms("ROBOTSOUL_VOICE_COMMAND_PREROLL_MS", 120)
+        self._pending_audio_start_sample: int | None = None
         self._idle_probe_seconds = idle_probe_seconds
         self._call_reconnect_grace_seconds = call_reconnect_grace_seconds
         self.call_reconnect_grace_seconds = call_reconnect_grace_seconds
@@ -523,7 +540,24 @@ class VoiceService:
             flattened = samples.reshape(-1).tolist() if hasattr(samples, "reshape") else samples.tolist()
         else:
             flattened = samples
-        return AudioFrame(generation, tuple(float(value) for value in flattened), sample_rate, monotonic())
+        owned = tuple(float(value) for value in flattened)
+        sample_count = round(len(owned) * self.sample_rate / sample_rate) if sample_rate > 0 else 0
+        with self._capture_cursor_lock:
+            continuous = True
+            if self._capture_cursor_generation != generation:
+                self._capture_cursor_generation = generation
+                self._capture_cursor_rate = sample_rate
+                self._capture_cursor = 0
+            elif self._capture_cursor_rate != sample_rate:
+                self._capture_cursor_rate = sample_rate
+                self._capture_cursor = 0
+                continuous = False
+            offset = self._capture_cursor
+            self._capture_cursor += sample_count
+        return AudioFrame(
+            generation, owned, sample_rate, monotonic(),
+            sample_offset=offset, sample_count=sample_count, continuous=continuous,
+        )
 
     def _enqueue(self, frame: AudioFrame) -> bool:
         self._push_level("input", frame.samples, frame.sample_rate)
@@ -540,6 +574,7 @@ class VoiceService:
                 pass
             with self._state_lock:
                 self._dropped_frames += 1
+            frame = replace(frame, continuous=False)
             try:
                 self._frames.put_nowait(frame)
                 return True
@@ -621,14 +656,30 @@ class VoiceService:
         source = "call" if state in {CaptureState.CALL, CaptureState.CALL_RECONNECTING} else "local"
         if not self.arbiter.accepts(frame, source=source):
             return
+        frame = self._prepare_audio_frame(frame)
         samples = frame.samples
         if state == CaptureState.PASSIVE and not self.gate.active:
             self._pre_roll.append(frame)
             if not self._engine_loaded:
                 return
-            wake = self.engine.accept_wake(samples, frame.sample_rate)
+            accept_wake_at = getattr(self.engine, "accept_wake_at", None)
+            if callable(accept_wake_at):
+                if self._wake_crop_enabled:
+                    wake = self._accept_wake_frame(frame)
+                else:
+                    wake = accept_wake_at(
+                        samples,
+                        frame.sample_rate,
+                        sample_offset=frame.sample_offset,
+                        generation=frame.generation,
+                    )
+            else:
+                wake = self.engine.accept_wake(samples, frame.sample_rate)
+            if isinstance(wake, WakeDetection) and not frame.continuous:
+                wake = replace(wake, continuous=False, fallback_reason=wake.fallback_reason or "audio_discontinuous")
             if not wake:
                 return
+            phrase = str(getattr(wake, "phrase", wake)).strip()
             self.gate.wake()
             self._logged_recognition = ""
             self._reset_utterance()
@@ -640,20 +691,280 @@ class VoiceService:
                 self._last_wake_at = monotonic()
             self._turn_mark("wake", self._last_wake_at)
             if self._wake_callback is not None:
-                self._wake_callback(str(wake))
-            self._note("Info", f"唤醒：{str(wake).strip()}")
+                self._wake_callback(phrase)
+            self._note("Info", f"唤醒：{phrase}")
             if hasattr(self.engine, "reset_vad"):
                 self.engine.reset_vad()
             # The spotter fires after the wake phrase has already been spoken.
             # Replay that audio into VAD; accept_asr does not keep samples.
             pre_roll = tuple(self._pre_roll)
             self._pre_roll.clear()
-            for buffered in pre_roll:
+            replay, crop_start, fallback = self._select_wake_preroll(pre_roll, wake, frame)
+            if self._wake_crop_enabled:
+                if fallback is not None:
+                    self._note("Info", f"唤醒音频路径：A-fallback reason={fallback}")
+                else:
+                    self._note(
+                        "Info",
+                        f"唤醒音频路径：A-cropped anchor={wake.anchor_sample} start={crop_start} "
+                        f"guard_ms={self._wake_guard_ms} preroll_ms={self._command_preroll_ms}",
+                    )
+            else:
+                self._pending_audio_start_sample = None
+                replay = list(pre_roll)
+                self._note("Info", "唤醒音频路径：B-only")
+            for buffered in replay:
                 self._consume_utterance(buffered)
             return
         if state not in {CaptureState.CALL, CaptureState.CALL_RECONNECTING} and not self.gate.active:
             return
+        frame = self._apply_pending_wake_crop(frame)
+        if frame is None:
+            return
         self._consume_utterance(frame)
+
+    def _prepare_audio_frame(self, frame: AudioFrame) -> AudioFrame:
+        samples = frame.samples
+        if frame.sample_rate != self.sample_rate:
+            samples = self._resample(samples, frame.sample_rate, self.sample_rate)
+        generation_changed = self._processed_generation != frame.generation
+        discontinuous = (
+            frame.continuous is False
+            or (not generation_changed and self._processed_sample_rate != self.sample_rate)
+            or (
+                not generation_changed
+                and self._expected_sample_offset is not None
+                and frame.sample_offset != self._expected_sample_offset
+            )
+        )
+        if generation_changed and self._processed_generation is not None:
+            discontinuous = True
+        if discontinuous:
+            self._wake_alignment_ready = False
+            self._wake_stream_origin_sample = None
+            self._wake_crop_safe_after_sample = frame.sample_offset + round(
+                _KWS_REPLAY_SECONDS * self.sample_rate
+            )
+            self._pre_roll.clear()
+            self._pending_audio_start_sample = None
+            self._reset_utterance()
+            self._utterance_active = False
+            reset_wake = getattr(self.engine, "reset_wake", None)
+            if callable(reset_wake):
+                reset_wake()
+            if hasattr(self.engine, "reset_vad"):
+                self.engine.reset_vad()
+            self._note("Warning", "音频样本不连续，已重置唤醒/端点对齐")
+        frame_continuous = self._wake_alignment_ready
+        self._wake_alignment_ready = True
+        if (
+            self._wake_crop_safe_after_sample is not None
+            and frame.sample_offset + len(samples) >= self._wake_crop_safe_after_sample
+        ):
+            self._wake_crop_safe_after_sample = None
+        self._processed_generation = frame.generation
+        self._processed_sample_rate = self.sample_rate
+        self._expected_sample_offset = frame.sample_offset + len(samples)
+        return replace(
+            frame,
+            samples=tuple(samples),
+            sample_rate=self.sample_rate,
+            sample_count=len(samples),
+            continuous=frame_continuous,
+        )
+
+    def _accept_wake_frame(self, frame: AudioFrame) -> WakeDetection | None:
+        """Keep the KWS decoder's local timestamp window shorter than its silent reset."""
+        accept_wake_at = self.engine.accept_wake_at
+        if self._wake_stream_origin_sample is None:
+            self._wake_stream_origin_sample = frame.sample_offset
+        frame_end = frame.sample_offset + len(frame.samples)
+        max_samples = round(_KWS_MAX_STREAM_SECONDS * self.sample_rate)
+        if frame_end - self._wake_stream_origin_sample < max_samples:
+            detection = accept_wake_at(
+                frame.samples,
+                frame.sample_rate,
+                sample_offset=frame.sample_offset,
+                generation=frame.generation,
+            )
+            if detection is not None:
+                self._wake_stream_origin_sample = None
+            return detection
+
+        frames = tuple(self._pre_roll)
+        replay_samples = round(_KWS_REPLAY_SECONDS * self.sample_rate)
+        replay_start = frame_end - replay_samples
+        expected: int | None = None
+        replay: list[AudioFrame] = []
+        for buffered in frames:
+            if buffered.generation != frame.generation or buffered.sample_rate != self.sample_rate:
+                replay = []
+                break
+            if expected is not None and buffered.sample_offset != expected:
+                replay = []
+                break
+            expected = buffered.sample_offset + len(buffered.samples)
+            if expected <= replay_start:
+                continue
+            trim = max(0, replay_start - buffered.sample_offset)
+            selected = buffered.samples[trim:]
+            if selected:
+                replay.append(replace(
+                    buffered,
+                    samples=selected,
+                    sample_offset=buffered.sample_offset + trim,
+                    sample_count=len(selected),
+                ))
+
+        replay_length = sum(len(item.samples) for item in replay)
+        if not replay or replay[-1].sample_offset + len(replay[-1].samples) != frame_end:
+            replay = []
+            replay_length = 0
+        if not replay or replay_length < min(replay_samples, round(0.6 * self.sample_rate)):
+            reset_wake = getattr(self.engine, "reset_wake", None)
+            if callable(reset_wake):
+                reset_wake()
+            self._wake_stream_origin_sample = frame.sample_offset
+            self._wake_crop_safe_after_sample = frame_end + replay_samples
+            detection = accept_wake_at(
+                frame.samples,
+                frame.sample_rate,
+                sample_offset=frame.sample_offset,
+                generation=frame.generation,
+            )
+            self._wake_stream_origin_sample = None if detection is not None else frame.sample_offset
+            if detection is not None:
+                return replace(
+                    detection,
+                    continuous=False,
+                    fallback_reason=detection.fallback_reason or "kws_replay_window_insufficient",
+                )
+            return None
+
+        reset_wake = getattr(self.engine, "reset_wake", None)
+        if callable(reset_wake):
+            reset_wake()
+        self._wake_stream_origin_sample = replay[0].sample_offset
+        for buffered in replay:
+            detection = accept_wake_at(
+                buffered.samples,
+                buffered.sample_rate,
+                sample_offset=buffered.sample_offset,
+                generation=buffered.generation,
+            )
+            if detection is not None:
+                self._wake_stream_origin_sample = None
+                return detection
+        return None
+
+    def _select_wake_preroll(
+        self,
+        frames: tuple[AudioFrame, ...],
+        detection: Any,
+        current: AudioFrame,
+    ) -> tuple[list[AudioFrame], int | None, str | None]:
+        if not self._wake_crop_enabled:
+            return list(frames), None, None
+        if not isinstance(detection, WakeDetection):
+            self._pending_audio_start_sample = None
+            return list(frames), None, "timestamp_metadata_unavailable"
+        if detection.fallback_reason:
+            self._pending_audio_start_sample = None
+            return list(frames), None, detection.fallback_reason
+        if (
+            not detection.continuous
+            or detection.generation != current.generation
+            or detection.sample_rate != self.sample_rate
+            or detection.anchor_sample is None
+            or detection.stream_start_sample is None
+            or detection.token_count == 0
+            or detection.token_count != detection.timestamp_count
+            or detection.last_token_timestamp is None
+            or not isfinite(detection.last_token_timestamp)
+        ):
+            self._pending_audio_start_sample = None
+            return list(frames), None, "timestamp_or_generation_invalid"
+        if not frames:
+            self._pending_audio_start_sample = None
+            return list(frames), None, "cache_empty"
+
+        current_end = current.sample_offset + len(current.samples)
+        if (
+            self._wake_crop_safe_after_sample is not None
+            and current_end < self._wake_crop_safe_after_sample
+        ):
+            self._pending_audio_start_sample = None
+            return list(frames), None, "alignment_recovery_window"
+
+        expected = frames[0].sample_offset
+        for buffered in frames:
+            if (
+                buffered.generation != detection.generation
+                or buffered.sample_rate != self.sample_rate
+                or buffered.sample_offset != expected
+                or buffered.sample_count != len(buffered.samples)
+            ):
+                self._pending_audio_start_sample = None
+                return list(frames), None, "cache_discontinuous"
+            expected += len(buffered.samples)
+
+        first_sample = frames[0].sample_offset
+        end_sample = expected
+        anchor = detection.anchor_sample
+        if (
+            detection.stream_start_sample < first_sample
+            or anchor < detection.stream_start_sample
+            or anchor > end_sample
+        ):
+            self._pending_audio_start_sample = None
+            return list(frames), None, "timestamp_out_of_cache"
+
+        guard = round(self._wake_guard_ms * self.sample_rate / 1000)
+        preroll = round(self._command_preroll_ms * self.sample_rate / 1000)
+        requested_start = anchor + guard - preroll
+        if requested_start < first_sample:
+            self._pending_audio_start_sample = None
+            return list(frames), None, "cache_insufficient"
+        crop_start = requested_start
+
+        replay: list[AudioFrame] = []
+        for buffered in frames:
+            frame_end = buffered.sample_offset + len(buffered.samples)
+            if frame_end <= crop_start:
+                continue
+            trim = max(0, crop_start - buffered.sample_offset)
+            selected = buffered.samples[trim:]
+            if selected:
+                replay.append(replace(
+                    buffered,
+                    samples=selected,
+                    sample_offset=buffered.sample_offset + trim,
+                    sample_count=len(selected),
+                ))
+        self._pending_audio_start_sample = crop_start if crop_start >= end_sample else None
+        return replay, crop_start, None
+
+    def _apply_pending_wake_crop(self, frame: AudioFrame) -> AudioFrame | None:
+        start_sample = self._pending_audio_start_sample
+        if start_sample is None:
+            return frame
+        if frame.generation != self._processed_generation or frame.sample_rate != self.sample_rate:
+            self._pending_audio_start_sample = None
+            return frame
+        end_sample = frame.sample_offset + len(frame.samples)
+        if end_sample <= start_sample:
+            return None
+        trim = max(0, start_sample - frame.sample_offset)
+        self._pending_audio_start_sample = None
+        samples = frame.samples[trim:]
+        if not samples:
+            return None
+        return replace(
+            frame,
+            samples=samples,
+            sample_offset=frame.sample_offset + trim,
+            sample_count=len(samples),
+        )
 
     def _reset_utterance(self) -> None:
         with self._utterance_lock:
@@ -661,8 +972,6 @@ class VoiceService:
 
     def _consume_utterance(self, frame: AudioFrame) -> None:
         samples = frame.samples
-        if frame.sample_rate != self.sample_rate:
-            samples = self._resample(samples, frame.sample_rate, self.sample_rate)
         endpoint = self.engine.accept_vad(samples)
         speaking = callable(getattr(self.engine, "speech_detected", None)) and bool(self.engine.speech_detected())
         transcribe = getattr(self.engine, "transcribe_segments", None)
@@ -793,11 +1102,7 @@ class VoiceService:
         phrases = getattr(self.engine, "wake_phrases", None) or (
             (str(getattr(self.engine, "wake_phrase", "")).strip(),) if getattr(self.engine, "wake_phrase", "") else ()
         )
-        normalized = cleaned.replace(" ", "")
-        if normalized and any(
-            normalized == phrase.strip().replace(" ", "") or _is_wake_only(cleaned, phrase)
-            for phrase in phrases
-        ):
+        if any(is_wake_only(cleaned, phrase) for phrase in phrases):
             # Saying only the wake word (then pausing before the command) is not
             # a command; keep the gate open and wait for the follow-up audio.
             self._note("Info", f"忽略仅唤醒词的识别：{cleaned}")
@@ -1238,11 +1543,22 @@ class VoiceService:
             except Empty:
                 break
         self._pre_roll.clear()
+        self._pending_audio_start_sample = None
+        self._processed_generation = None
+        self._processed_sample_rate = None
+        self._expected_sample_offset = None
+        self._wake_alignment_ready = True
+        self._wake_stream_origin_sample = None
+        self._wake_crop_safe_after_sample = None
         self._reset_utterance()
         self._call_disconnected_at = None if clear_sink else self._call_disconnected_at
         if clear_sink:
             with self._state_lock:
                 self._call_audio_sink = None
+        reset_wake = getattr(self.engine, "reset_wake", None)
+        if callable(reset_wake) and self._engine_loaded:
+            with self._engine_lock:
+                reset_wake()
 
     def _push_level(self, side: str, samples: Any, sample_rate: int) -> None:
         try:

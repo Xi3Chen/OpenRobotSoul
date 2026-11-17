@@ -48,8 +48,16 @@ class VoiceAdapterTests(unittest.TestCase):
 
             class Stream:
                 def accept_waveform(self, rate, samples): calls["waveform"] = (rate, tuple(samples))
+            class NativeKeywordSpotter:
+                def get_result(self, stream):
+                    return calls.get(
+                        "keyword_result",
+                        types.SimpleNamespace(keyword="", tokens=[], timestamps=[]),
+                    )
             class Kws:
-                def __init__(self, **kw): calls["kws_args"] = kw
+                def __init__(self, **kw):
+                    calls["kws_args"] = kw
+                    self.keyword_spotter = NativeKeywordSpotter()
                 def create_stream(self, keyword=None): calls["keyword"] = keyword; return Stream()
                 def is_ready(self, stream): return calls.pop("kws_ready", False)
                 def decode_stream(self, stream): calls["kws_decoded"] = True
@@ -91,8 +99,30 @@ class VoiceAdapterTests(unittest.TestCase):
                 self.assertEqual(calls["text2token"][1]["tokens_type"], "phone+ppinyin")
                 self.assertEqual(calls["text2token"][0], (["索拉"],))
                 self.assertIsNone(calls["keyword"])
-                self.assertEqual(engine.accept_wake([0.1], 16000), "索拉")
+                calls["keyword_result"] = types.SimpleNamespace(
+                    keyword="索拉", tokens=["suǒ", "lā"], timestamps=[0.1, 0.2]
+                )
+                detection = engine.accept_wake_at(
+                    [0.1] * 4000, 16000, sample_offset=3200, generation=4
+                )
+                self.assertEqual(detection.phrase, "索拉")
+                self.assertEqual(detection.stream_start_sample, 3200)
+                self.assertEqual(detection.anchor_sample, 3200 + round(0.2 * 16000))
+                self.assertEqual(detection.stream_id, 1)
+                self.assertIsNone(detection.fallback_reason)
                 self.assertTrue(calls["kws_reset"])
+                calls["keyword_result"] = types.SimpleNamespace(
+                    keyword="索拉", tokens=["suǒ", "lā"], timestamps=[0.1]
+                )
+                invalid_timing = engine.accept_wake_at(
+                    [0.1] * 4000, 16000, sample_offset=7200, generation=4
+                )
+                self.assertIsNone(invalid_timing.anchor_sample)
+                self.assertEqual(invalid_timing.fallback_reason, "timestamp_count_mismatch")
+                previous_stream = engine._kws_stream
+                engine.reset_wake()
+                self.assertIsNot(engine._kws_stream, previous_stream)
+                self.assertIsNone(engine._kws_stream_start_sample)
                 pending = engine.accept_asr([0.2], 16000)
                 self.assertEqual((pending.text, pending.is_endpoint), ("", False))
                 segment = types.SimpleNamespace(samples=(0.2, 0.1))

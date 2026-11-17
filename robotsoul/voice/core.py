@@ -26,6 +26,9 @@ class AudioFrame:
     samples: tuple[float, ...]
     sample_rate: int
     captured_at: float
+    sample_offset: int = 0
+    sample_count: int = 0
+    continuous: bool = True
 
 
 class LocalCapture(Protocol):
